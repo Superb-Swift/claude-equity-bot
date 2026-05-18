@@ -3,19 +3,15 @@
 # =============================================================================
 # PURPOSE:
 #   Handles all communication with the Charles Schwab Trader API.
-#   Now supports multiple accounts with friendly labels.
+#   Supports multiple accounts with friendly labels.
 #
 # ANALYST NOTE:
 #   This file is the "data layer" of the bot. It knows nothing about Claude
 #   or trading decisions — it only knows how to talk to Schwab and return
-#   clean data. Keeping concerns separated like this makes the code easier
-#   to debug and maintain.
+#   clean data.
 #
 # DEPENDENCIES:
 #   pip install schwab-py python-dotenv
-#
-# USAGE:
-#   from schwab_client import get_quote, get_all_portfolios
 # =============================================================================
 
 import os
@@ -24,7 +20,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Pull credentials from .env
 APP_KEY      = os.getenv("SCHWAB_APP_KEY")
 APP_SECRET   = os.getenv("SCHWAB_APP_SECRET")
 CALLBACK_URL = os.getenv("CALLBACK_URL", "https://127.0.0.1:8182")
@@ -34,21 +29,12 @@ TOKEN_PATH   = os.getenv("TOKEN_PATH", "token.json")
 # =============================================================================
 # ACCOUNT LABELS
 # =============================================================================
-# ANALYST NOTE: Map your raw account numbers to friendly labels here.
-# The bot uses these labels in logs and portfolio overviews so you always
-# know which account is being analyzed at a glance.
-#
-# To add or rename an account: just edit this dict. Match by accountNumber
-# exactly as Schwab returns it (no dashes, no spaces).
 
 ACCOUNT_LABELS = {
     "52357894": "Roth IRA",
     "87343846": "Individual",
 }
 
-# ANALYST NOTE: Set which accounts to actively analyze. Comment out any
-# account number you want to skip. The bot will silently ignore accounts
-# not listed here. Leave empty list [] to analyze ALL linked accounts.
 ACTIVE_ACCOUNTS = [
     "52357894",   # Roth IRA
     "87343846",   # Individual
@@ -60,36 +46,52 @@ ACTIVE_ACCOUNTS = [
 # =============================================================================
 
 def get_client():
-    """
-    Authenticate with Schwab and return an authenticated client object.
-    """
+    """Authenticate with Schwab and return an authenticated client object."""
     if not APP_KEY or not APP_SECRET:
         raise ValueError(
             "SCHWAB_APP_KEY and SCHWAB_APP_SECRET must be set in your .env file."
         )
 
-    client = schwab.auth.easy_client(
+    return schwab.auth.easy_client(
         api_key=APP_KEY,
         app_secret=APP_SECRET,
         callback_url=CALLBACK_URL,
         token_path=TOKEN_PATH
     )
 
-    return client
-
 
 # =============================================================================
 # MARKET DATA
 # =============================================================================
+
+# ANALYST NOTE: Schwab's assetMainType values that we treat as equities vs ETFs.
+# This determines which fundamental fields are trustworthy.
+#
+# EQUITY              → individual stocks. peRatio, eps, divYield all reliable.
+# COLLECTIVE_INVESTMENT → ETFs/mutual funds. peRatio is unreliable per testing
+#                        (returns expense ratio or some weighted number, not
+#                        the actual underlying-holdings P/E). Suppress these.
+#EQUITY_ASSET_TYPES = {"EQUITY"}
+#ETF_ASSET_TYPES    = {"COLLECTIVE_INVESTMENT", "ETF", "MUTUAL_FUND"}
+# ANALYST NOTE: Schwab classifies ETFs as assetMainType="EQUITY" because they
+# trade on exchanges like stocks. The actual fund-vs-stock distinction lives
+# in assetSubType. Diagnostic on SPY confirmed:
+#   AAPL → assetMainType: EQUITY, assetSubType: COE  (Common Equity)
+#   SPY  → assetMainType: EQUITY, assetSubType: ETF
+# We use assetSubType to detect ETFs/funds and suppress unreliable P/E values.
+ETF_SUB_TYPES = {"ETF", "ETN", "CEF", "MUTUAL_FUND"}
 
 def get_quote(ticker: str) -> dict:
     """
     Fetch a real-time quote for a single ticker symbol.
 
     ANALYST NOTE:
-        Schwab returns a deeply nested structure with separate blocks for
-        quote, fundamental, and reference data. We flatten the most useful
-        fields into a single dict for easier downstream use.
+        Returns a flattened dict with an "is_etf" flag derived from
+        Schwab's assetMainType. Downstream code uses this to decide
+        which fundamental fields to display to Claude.
+
+        For ETFs we suppress P/E and EPS (Schwab values are unreliable)
+        but keep dividend yield since that field IS accurate for ETFs.
 
     Args:
         ticker (str): Stock symbol e.g. "AAPL"
@@ -107,8 +109,27 @@ def get_quote(ticker: str) -> dict:
         fundamental  = ticker_block.get("fundamental", {})
         reference    = ticker_block.get("reference", {})
 
+        # ANALYST NOTE: assetMainType lives at the top of the ticker block,
+        # not inside any sub-block. Examples: "EQUITY" (AAPL),
+        # "COLLECTIVE_INVESTMENT" (SPY), "MUTUAL_FUND" (some funds).
+        #asset_main_type = ticker_block.get("assetMainType", "")
+        #is_etf = asset_main_type in ETF_ASSET_TYPES
+
+        asset_main_type = ticker_block.get("assetMainType", "")
+        asset_sub_type  = ticker_block.get("assetSubType", "")
+        is_etf = asset_sub_type in ETF_SUB_TYPES
+
+        # For ETFs, suppress unreliable fundamental fields.
+        # We pass None instead of the raw value so downstream code can
+        # decide what to display.
+        pe_ratio = None if is_etf else fundamental.get("peRatio", 0)
+        eps      = None if is_etf else fundamental.get("eps", 0)
+
         return {
             "ticker"            : ticker,
+            "asset_type"        : asset_main_type,
+            "asset_sub_type"    : asset_sub_type,
+            "is_etf"            : is_etf,
             "companyName"       : reference.get("description", ""),
             "lastPrice"         : quote.get("lastPrice", 0),
             "bidPrice"          : quote.get("bidPrice", 0),
@@ -123,8 +144,8 @@ def get_quote(ticker: str) -> dict:
             "fiftyTwoWeekLow"   : quote.get("52WeekLow", 0),
             "totalVolume"       : quote.get("totalVolume", 0),
             "avg10DayVolume"    : fundamental.get("avg10DaysVolume", 0),
-            "peRatio"           : fundamental.get("peRatio", 0),
-            "eps"               : fundamental.get("eps", 0),
+            "peRatio"           : pe_ratio,    # None for ETFs
+            "eps"               : eps,         # None for ETFs
             "divYield"          : fundamental.get("divYield", 0),
             "exchange"          : reference.get("exchangeName", ""),
         }
@@ -139,9 +160,7 @@ def get_quote(ticker: str) -> dict:
 # =============================================================================
 
 def get_account_numbers() -> list:
-    """
-    Retrieve all account numbers linked to the authenticated user.
-    """
+    """Retrieve all account numbers linked to the authenticated user."""
     try:
         client = get_client()
         response = client.get_account_numbers()
@@ -152,9 +171,7 @@ def get_account_numbers() -> list:
 
 
 def get_positions(account_hash: str) -> dict:
-    """
-    Fetch current positions and balances for a given account hash.
-    """
+    """Fetch current positions and balances for a given account hash."""
     try:
         client = get_client()
         response = client.get_account(
@@ -180,11 +197,7 @@ def extract_held_tickers(positions: list) -> list:
         don't behave like equities and shouldn't be analyzed by Claude.
     """
     CASH_EQUIVALENTS = {
-        "SWVXX",   # Schwab Value Advantage Money Fund
-        "SNAXX",   # Schwab Government Money Fund
-        "SNSXX",   # Schwab US Treasury Money Fund
-        "SWGXX",   # Schwab Government Money Fund Investor
-        "MMDA1",   # Schwab Bank Deposit
+        "SWVXX", "SNAXX", "SNSXX", "SWGXX", "MMDA1",
     }
 
     tickers = []
@@ -197,6 +210,9 @@ def extract_held_tickers(positions: list) -> list:
             continue
         if symbol in CASH_EQUIVALENTS:
             continue
+        # ANALYST NOTE: At this layer we accept both equities AND ETFs/funds.
+        # The is_etf flag is set later in get_quote() and used to suppress
+        # P/E in the Claude prompt — not to filter what gets analyzed.
         if asset_type not in ("EQUITY", "COLLECTIVE_INVESTMENT", "ETF"):
             continue
 
@@ -206,16 +222,7 @@ def extract_held_tickers(positions: list) -> list:
 
 
 def get_position_detail(positions: list, ticker: str) -> dict:
-    """
-    Return the position detail for a specific ticker if held.
-
-    Args:
-        positions (list): Raw positions array from Schwab
-        ticker    (str):  Ticker symbol to look up
-
-    Returns:
-        dict: Position detail or {"is_held": False}
-    """
+    """Return the position detail for a specific ticker if held."""
     for position in positions:
         instrument = position.get("instrument", {})
         if instrument.get("symbol") == ticker:
@@ -233,24 +240,7 @@ def get_position_detail(positions: list, ticker: str) -> dict:
 
 
 def get_account_portfolio(account_number: str, account_hash: str) -> dict:
-    """
-    Get a single account's portfolio summary including label.
-
-    Args:
-        account_number (str): Raw account number from Schwab
-        account_hash   (str): Encrypted hash for API calls
-
-    Returns:
-        dict: {
-            "account_number"  : str,
-            "account_label"   : str,
-            "account_hash"    : str,
-            "cash_available"  : float,
-            "portfolio_value" : float,
-            "positions"       : list,
-            "held_tickers"    : list,
-        }
-    """
+    """Get a single account's portfolio summary including label."""
     account_data = get_positions(account_hash)
     label = ACCOUNT_LABELS.get(account_number, f"Account {account_number}")
 
@@ -262,7 +252,8 @@ def get_account_portfolio(account_number: str, account_hash: str) -> dict:
             "account_number"  : account_number,
             "account_label"   : label,
             "account_hash"    : account_hash,
-            "cash_available"  : balances.get("cashAvailableForTrading", 0),
+            "cash_available"  : balances.get("cashAvailableForTrading",
+                                     balances.get("cashBalance", 0)),
             "portfolio_value" : balances.get("liquidationValue", 0),
             "positions"       : positions,
             "held_tickers"    : extract_held_tickers(positions),
@@ -275,17 +266,7 @@ def get_account_portfolio(account_number: str, account_hash: str) -> dict:
 
 
 def get_all_portfolios() -> list:
-    """
-    Fetch portfolio summaries for all active accounts.
-
-    ANALYST NOTE:
-        Iterates through every account returned by Schwab, filters to only
-        those in ACTIVE_ACCOUNTS (or all if ACTIVE_ACCOUNTS is empty), and
-        returns a list of portfolio dicts — one per account.
-
-    Returns:
-        list: List of account portfolio dicts, each with friendly label.
-    """
+    """Fetch portfolio summaries for all active accounts."""
     accounts = get_account_numbers()
     if not accounts:
         print("[schwab_client] No accounts found.")
@@ -296,7 +277,6 @@ def get_all_portfolios() -> list:
         account_number = account.get("accountNumber", "")
         account_hash   = account.get("hashValue", "")
 
-        # Skip accounts not in active list (if list is populated)
         if ACTIVE_ACCOUNTS and account_number not in ACTIVE_ACCOUNTS:
             continue
 

@@ -5,15 +5,12 @@
 #   Uses the Anthropic Claude API to analyze market data and generate
 #   structured trading signals for individual equity tickers.
 #
-#   Position-aware: when analyzing a ticker you already hold, Claude receives
-#   your cost basis and unrealized P&L as additional context. This lets it
-#   evaluate SELL signals informed by your actual exposure, not just price.
+#   Position-aware AND asset-type-aware: ETFs get a tailored prompt that
+#   omits unreliable fundamentals (P/E, EPS) while keeping the metrics
+#   that ARE accurate for ETFs (dividend yield, volume, technicals).
 #
 # DEPENDENCIES:
 #   pip install anthropic python-dotenv
-#
-# USAGE:
-#   from claude_signal import get_signal, print_signal
 # =============================================================================
 
 import os
@@ -23,13 +20,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Initialize the Anthropic client
 client = Anthropic()
-
-# Model selection
 MODEL = "claude-sonnet-4-6"
 
-# System prompt — defines Claude's role and output format
 SYSTEM_PROMPT = """
 You are a disciplined equity research analyst. Your job is to analyze 
 market data and news for a given stock ticker and produce a concise, 
@@ -37,20 +30,27 @@ structured trading signal.
 
 You will receive:
 - Ticker symbol and company name
+- Asset type (equity or ETF)
 - Current price, intraday change, OHLC, bid/ask, volume
-- 52-week range, P/E, EPS, dividend yield
+- 52-week range
+- For equities: P/E, EPS, dividend yield
+- For ETFs: dividend yield only (P/E and EPS are intentionally omitted
+  because they are unreliable for fund products)
 - Recent news headlines (if available)
-- Position context (if the user already holds this ticker):
-  shares, average cost basis, current market value, day P&L, total P&L
+- Position context (if the user already holds this ticker)
 
 When position context is provided, evaluate the signal in light of the
-user's existing exposure. A SELL signal on a held position should account
-for unrealized gains and the user's overall risk profile, not just price action.
+user's existing exposure including cost basis and unrealized P&L.
+
+For ETFs specifically: do NOT request, infer, or speculate about
+the underlying P/E ratio. ETF analysis should focus on price action,
+flows, 52-week range, dividend yield, news flow, and macro context.
+Do not flag missing P/E as a risk for ETFs — it is intentionally omitted.
 
 You must respond with ONLY a valid JSON object — no preamble, no explanation,
 no markdown formatting, no code fences. Just raw JSON.
 
-Your response must follow this exact schema:
+Schema:
 {
   "ticker": "string",
   "signal": "BUY" | "SELL" | "HOLD",
@@ -66,20 +66,73 @@ Your response must follow this exact schema:
 
 Signal definitions:
 - BUY: Meaningful positive catalyst, asymmetric upside, favorable risk/reward
-- SELL: Deteriorating fundamentals, negative catalyst, unfavorable risk/reward,
-        or for held positions: justified profit-taking or loss-cutting
-- HOLD: No clear edge in either direction, wait for better entry or more data
+- SELL: Deteriorating fundamentals, negative catalyst, justified profit-taking
+- HOLD: No clear edge in either direction
 
-Confidence definitions:
+Confidence:
 - 80-100: Strong conviction, multiple confirming signals
-- 60-79:  Moderate conviction, some uncertainty remains
-- 40-59:  Low conviction, data is mixed or limited
-- 0-39:   Very low conviction, do not act on this signal
+- 60-79:  Moderate conviction
+- 40-59:  Low conviction, mixed data
+- 0-39:   Very low conviction, do not act
 
 IMPORTANT: You are generating research for human review only.
-You are not executing trades. Be honest about uncertainty.
-Flag any risk factors prominently.
+Be honest about uncertainty. Flag any risk factors prominently.
 """
+
+
+# =============================================================================
+# PROMPT BUILDERS
+# =============================================================================
+
+def _build_market_data_section(quote: dict) -> list:
+    """
+    Build the market data lines that apply to both equities and ETFs.
+
+    ANALYST NOTE:
+        Shared section: price, OHLC, bid/ask, volume, 52-week range.
+        These fields are reliable for both asset types.
+    """
+    return [
+        f"Ticker: {quote.get('ticker', '?')} ({quote.get('companyName', 'Unknown')})",
+        f"Asset Type: {'ETF / Fund' if quote.get('is_etf') else 'Equity'}",
+        f"Exchange: {quote.get('exchange', 'N/A')}",
+        f"Current Price: ${quote.get('lastPrice', 'N/A')}",
+        f"Day Change: ${quote.get('netChange', 0):.2f} ({quote.get('netPercentChange', 0):.2f}%)",
+        f"Open: ${quote.get('openPrice', 'N/A')} | High: ${quote.get('highPrice', 'N/A')} | Low: ${quote.get('lowPrice', 'N/A')} | Prev Close: ${quote.get('closePrice', 'N/A')}",
+        f"Bid / Ask: ${quote.get('bidPrice', 'N/A')} / ${quote.get('askPrice', 'N/A')}",
+        f"Volume: {quote.get('totalVolume', 0):,} (10-day avg: {int(quote.get('avg10DayVolume', 0)):,})",
+        f"52-Week Range: ${quote.get('fiftyTwoWeekLow', 'N/A')} - ${quote.get('fiftyTwoWeekHigh', 'N/A')}",
+    ]
+
+
+def _build_fundamentals_section(quote: dict) -> list:
+    """
+    Build the fundamentals section — different for ETFs vs equities.
+
+    ANALYST NOTE:
+        For ETFs, P/E and EPS are NOT shown because Schwab's values are
+        unreliable for fund products. Dividend yield IS shown because
+        that field is accurate for ETFs.
+
+        For equities, all three are shown when available.
+    """
+    if quote.get("is_etf"):
+        # ETF — only show dividend yield
+        return [
+            f"Dividend Yield: {quote.get('divYield', 0):.2f}%",
+            "(P/E and EPS are not displayed for ETFs — fund-level P/E is "
+            "not meaningfully comparable to single-stock P/E.)",
+        ]
+    else:
+        # Equity — show full fundamentals
+        pe  = quote.get("peRatio")
+        eps = quote.get("eps")
+        div = quote.get("divYield", 0)
+        return [
+            f"P/E Ratio: {pe if pe is not None else 'N/A'} | "
+            f"EPS: ${eps if eps is not None else 'N/A'} | "
+            f"Div Yield: {div:.2f}%",
+        ]
 
 
 # =============================================================================
@@ -91,35 +144,23 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
     """
     Generate a structured trading signal for a ticker using Claude.
 
-    ANALYST NOTE:
-        When `position` is provided, Claude receives the user's holding
-        context (shares, cost basis, P&L) and can evaluate SELL signals
-        with awareness of unrealized gains and total exposure.
-
     Args:
-        ticker     (str):  Stock symbol e.g. "AAPL"
+        ticker     (str):  Stock symbol
         quote      (dict): Quote data from schwab_client.get_quote()
-        position   (dict): Optional position detail if user holds this ticker
-        headlines  (list): Optional list of recent news headline strings
-        metrics    (dict): Optional dict of financial metrics
+        position   (dict): Optional position detail if held
+        headlines  (list): Optional list of recent headlines
+        metrics    (dict): Optional financial metrics
 
     Returns:
         dict: Structured signal, or error dict
     """
 
-    prompt_parts = [
-        f"Ticker: {ticker} ({quote.get('companyName', 'Unknown')})",
-        f"Exchange: {quote.get('exchange', 'N/A')}",
-        f"Current Price: ${quote.get('lastPrice', 'N/A')}",
-        f"Day Change: ${quote.get('netChange', 0):.2f} ({quote.get('netPercentChange', 0):.2f}%)",
-        f"Open: ${quote.get('openPrice', 'N/A')} | High: ${quote.get('highPrice', 'N/A')} | Low: ${quote.get('lowPrice', 'N/A')} | Prev Close: ${quote.get('closePrice', 'N/A')}",
-        f"Bid / Ask: ${quote.get('bidPrice', 'N/A')} / ${quote.get('askPrice', 'N/A')}",
-        f"Volume: {quote.get('totalVolume', 0):,} (10-day avg: {int(quote.get('avg10DayVolume', 0)):,})",
-        f"52-Week Range: ${quote.get('fiftyTwoWeekLow', 'N/A')} - ${quote.get('fiftyTwoWeekHigh', 'N/A')}",
-        f"P/E Ratio: {quote.get('peRatio', 'N/A')} | EPS: ${quote.get('eps', 'N/A')} | Div Yield: {quote.get('divYield', 0):.2f}%",
-    ]
+    # Build the prompt in sections
+    prompt_parts = []
+    prompt_parts.extend(_build_market_data_section(quote))
+    prompt_parts.extend(_build_fundamentals_section(quote))
 
-    # Add position context if provided
+    # Position context
     if position and position.get("is_held"):
         prompt_parts.append("\n--- POSITION CONTEXT (You currently hold this) ---")
         prompt_parts.append(f"Shares Held    : {position.get('quantity', 0):.0f}")
@@ -130,6 +171,7 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
     else:
         prompt_parts.append("\n--- POSITION CONTEXT (Scouting — not currently held) ---")
 
+    # Headlines
     if headlines:
         prompt_parts.append("\nRecent News Headlines:")
         for i, headline in enumerate(headlines[:5], 1):
@@ -137,6 +179,7 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
     else:
         prompt_parts.append("\nRecent News Headlines: None provided")
 
+    # Optional financial metrics
     if metrics:
         prompt_parts.append("\nKey Financial Metrics:")
         for key, value in metrics.items():
@@ -151,9 +194,7 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
             model=MODEL,
             max_tokens=800,
             system=SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ]
+            messages=[{"role": "user", "content": user_prompt}]
         )
 
         raw_text = response.content[0].text.strip()
@@ -194,9 +235,7 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
 # =============================================================================
 
 def print_signal(signal: dict) -> None:
-    """
-    Pretty-print a signal dict to the terminal for human review.
-    """
+    """Pretty-print a signal dict to the terminal for human review."""
     COLORS = {
         "BUY"  : "\033[92m",
         "SELL" : "\033[91m",
