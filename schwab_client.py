@@ -22,7 +22,7 @@ load_dotenv()
 
 APP_KEY      = os.getenv("SCHWAB_APP_KEY")
 APP_SECRET   = os.getenv("SCHWAB_APP_SECRET")
-CALLBACK_URL = os.getenv("CALLBACK_URL", "https://127.0.0.1:8182")
+CALLBACK_URL = os.getenv("CALLBACK_URL", "https://1XX.0.0.1:XXXX")
 TOKEN_PATH   = os.getenv("TOKEN_PATH", "token.json")
 
 
