@@ -31,13 +31,13 @@ TOKEN_PATH   = os.getenv("TOKEN_PATH", "token.json")
 # =============================================================================
 
 ACCOUNT_LABELS = {
-    "52357894": "Roth IRA",
-    "87343846": "Individual",
+    "XXXXXXXX": "Roth IRA",
+    "XXXXXXXX": "Individual",
 }
 
 ACTIVE_ACCOUNTS = [
-    "52357894",   # Roth IRA
-    "87343846",   # Individual
+    "XXXXXXXX",   # Roth IRA
+    "XXXXXXXX",   # Individual
 ]
 
 
