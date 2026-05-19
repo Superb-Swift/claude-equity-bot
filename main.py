@@ -60,6 +60,13 @@ WATCHLIST_SCOUT = [
     "VTI",    # Total stock market — diversified core
     "NVDA",   # AI semiconductor bellwether
     "GLD",    # Gold ETF — defensive hedge
+#    "SONY",   # Barchart Pick
+#    "SAIL",   # Barchart Pick
+#    "BBY",   #  Best Buy
+#    "EBAY",   # EBay
+#    "IBM",   # 
+#    "PG",   # Proctor and Gamble
+#    "VOO",   # Vangauard S&P 500 — broad market benchmark
 ]
 
 # --- Monitoring Toggle ---
