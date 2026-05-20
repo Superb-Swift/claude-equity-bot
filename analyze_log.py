@@ -69,23 +69,25 @@ def parse_log(log_path: str) -> list:
     quality_pattern = re.compile(r'"data_quality":\s*"(HIGH|MEDIUM|LOW)"')
 
     signals = []
-    last_quality = "MEDIUM"  # Sensible default if quality line is missed
 
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            # Track the most recent data_quality value
-            q_match = quality_pattern.search(line)
-            if q_match:
-                last_quality = q_match.group(1)
+            # ANALYST NOTE: With JSON-dumped signal logging, both the JSON
+            # and the summary line now appear together. We search for
+            # data_quality on the SAME line as the summary match, since
+            # the JSON dump precedes the summary text in the log entry.
+            s_match = summary_pattern.search(line)
+            if not s_match:
                 continue
 
-            # Match the summary line and attach the captured quality
-            s_match = summary_pattern.search(line)
-            if s_match:
-                d = s_match.groupdict()
-                d["confidence"]   = int(d["confidence"])
-                d["data_quality"] = last_quality
-                signals.append(d)
+            d = s_match.groupdict()
+            d["confidence"] = int(d["confidence"])
+
+            # Look for data_quality in the same line (from the JSON dump)
+            q_match = quality_pattern.search(line)
+            d["data_quality"] = q_match.group(1) if q_match else "MEDIUM"
+
+            signals.append(d)
 
     return signals
 
