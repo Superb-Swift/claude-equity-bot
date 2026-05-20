@@ -5,9 +5,9 @@
 #   Uses the Anthropic Claude API to analyze market data and generate
 #   structured trading signals for individual equity tickers.
 #
-#   Position-aware AND asset-type-aware: ETFs get a tailored prompt that
-#   omits unreliable fundamentals (P/E, EPS) while keeping the metrics
-#   that ARE accurate for ETFs (dividend yield, volume, technicals).
+#   Position-aware, asset-type-aware, AND multi-account-aware:
+#   when a ticker is held across multiple accounts, Claude sees the
+#   consolidated view AND a per-account breakdown.
 #
 # DEPENDENCIES:
 #   pip install anthropic python-dotenv
@@ -37,18 +37,18 @@ You will receive:
 - For ETFs: dividend yield only (P/E and EPS are intentionally omitted
   because they are unreliable for fund products)
 - Recent news headlines (if available)
-- Position context (if the user already holds this ticker)
+- Position context (if the user holds this ticker)
+  IMPORTANT: when the user holds the same ticker in multiple accounts,
+  you will see a CONSOLIDATED position summary AND a per-account
+  breakdown. Account taxonomy matters — Roth IRA gains are tax-free,
+  Individual account gains are taxable. Factor this into SELL signals
+  if relevant.
 
-When position context is provided, evaluate the signal in light of the
-user's existing exposure including cost basis and unrealized P&L.
-
-For ETFs specifically: do NOT request, infer, or speculate about
-the underlying P/E ratio. ETF analysis should focus on price action,
-flows, 52-week range, dividend yield, news flow, and macro context.
+For ETFs: do NOT request, infer, or speculate about underlying P/E.
 Do not flag missing P/E as a risk for ETFs — it is intentionally omitted.
 
-You must respond with ONLY a valid JSON object — no preamble, no explanation,
-no markdown formatting, no code fences. Just raw JSON.
+You must respond with ONLY a valid JSON object — no preamble, no markdown,
+no code fences. Just raw JSON.
 
 Schema:
 {
@@ -73,10 +73,9 @@ Confidence:
 - 80-100: Strong conviction, multiple confirming signals
 - 60-79:  Moderate conviction
 - 40-59:  Low conviction, mixed data
-- 0-39:   Very low conviction, do not act
+- 0-39:   Very low conviction
 
-IMPORTANT: You are generating research for human review only.
-Be honest about uncertainty. Flag any risk factors prominently.
+IMPORTANT: Research for human review only. Be honest about uncertainty.
 """
 
 
@@ -85,13 +84,7 @@ Be honest about uncertainty. Flag any risk factors prominently.
 # =============================================================================
 
 def _build_market_data_section(quote: dict) -> list:
-    """
-    Build the market data lines that apply to both equities and ETFs.
-
-    ANALYST NOTE:
-        Shared section: price, OHLC, bid/ask, volume, 52-week range.
-        These fields are reliable for both asset types.
-    """
+    """Build the market data lines that apply to both equities and ETFs."""
     return [
         f"Ticker: {quote.get('ticker', '?')} ({quote.get('companyName', 'Unknown')})",
         f"Asset Type: {'ETF / Fund' if quote.get('is_etf') else 'Equity'}",
@@ -106,25 +99,13 @@ def _build_market_data_section(quote: dict) -> list:
 
 
 def _build_fundamentals_section(quote: dict) -> list:
-    """
-    Build the fundamentals section — different for ETFs vs equities.
-
-    ANALYST NOTE:
-        For ETFs, P/E and EPS are NOT shown because Schwab's values are
-        unreliable for fund products. Dividend yield IS shown because
-        that field is accurate for ETFs.
-
-        For equities, all three are shown when available.
-    """
+    """Build the fundamentals section — different for ETFs vs equities."""
     if quote.get("is_etf"):
-        # ETF — only show dividend yield
         return [
             f"Dividend Yield: {quote.get('divYield', 0):.2f}%",
-            "(P/E and EPS are not displayed for ETFs — fund-level P/E is "
-            "not meaningfully comparable to single-stock P/E.)",
+            "(P/E and EPS are not displayed for ETFs.)",
         ]
     else:
-        # Equity — show full fundamentals
         pe  = quote.get("peRatio")
         eps = quote.get("eps")
         div = quote.get("divYield", 0)
@@ -132,6 +113,59 @@ def _build_fundamentals_section(quote: dict) -> list:
             f"P/E Ratio: {pe if pe is not None else 'N/A'} | "
             f"EPS: ${eps if eps is not None else 'N/A'} | "
             f"Div Yield: {div:.2f}%",
+        ]
+
+
+def _build_position_section(position: dict) -> list:
+    """
+    Build the position context section.
+
+    ANALYST NOTE:
+        Handles three cases:
+        1. Not held (scouting) — minimal section
+        2. Held in one account — standard display
+        3. Held across multiple accounts — consolidated view + per-account breakdown
+    """
+    if not position or not position.get("is_held"):
+        return ["\n--- POSITION CONTEXT (Scouting — not currently held) ---"]
+
+    accounts = position.get("held_in_accounts", [])
+    multi_account = len(accounts) > 1
+
+    if multi_account:
+        lines = [
+            "\n--- POSITION CONTEXT (Held across multiple accounts) ---",
+            f"Total Shares Held    : {position.get('quantity', 0):.0f}",
+            f"Weighted Avg Cost    : ${position.get('average_price', 0):,.2f}",
+            f"Combined Market Value: ${position.get('market_value', 0):,.2f}",
+            f"Combined Day P&L     : ${position.get('current_day_pnl', 0):,.2f}",
+            f"Total Open P&L       : ${position.get('long_open_pnl', 0):,.2f}",
+            f"Held in Accounts     : {', '.join(accounts)}",
+            "",
+            "Per-Account Breakdown:",
+        ]
+        # ANALYST NOTE: Per-account detail lets Claude reason about
+        # tax-aware decisions — selling from Roth has no tax impact,
+        # selling from Individual triggers capital gains.
+        for account in position.get("account_breakdown", []):
+            lines.append(
+                f"  • {account.get('account_label', '?'):<15} "
+                f"{account.get('quantity', 0):.0f} shares @ "
+                f"${account.get('average_price', 0):,.2f} avg = "
+                f"${account.get('market_value', 0):,.2f} market value "
+                f"(P&L: ${account.get('long_open_pnl', 0):,.2f})"
+            )
+        return lines
+    else:
+        # Single-account holding — standard display
+        return [
+            "\n--- POSITION CONTEXT (You currently hold this) ---",
+            f"Account        : {accounts[0] if accounts else '?'}",
+            f"Shares Held    : {position.get('quantity', 0):.0f}",
+            f"Avg Cost Basis : ${position.get('average_price', 0):,.2f}",
+            f"Market Value   : ${position.get('market_value', 0):,.2f}",
+            f"Day P&L        : ${position.get('current_day_pnl', 0):,.2f}",
+            f"Total Open P&L : ${position.get('long_open_pnl', 0):,.2f}",
         ]
 
 
@@ -147,31 +181,18 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
     Args:
         ticker     (str):  Stock symbol
         quote      (dict): Quote data from schwab_client.get_quote()
-        position   (dict): Optional position detail if held
+        position   (dict): Optional consolidated position context
         headlines  (list): Optional list of recent headlines
         metrics    (dict): Optional financial metrics
 
     Returns:
         dict: Structured signal, or error dict
     """
-
-    # Build the prompt in sections
     prompt_parts = []
     prompt_parts.extend(_build_market_data_section(quote))
     prompt_parts.extend(_build_fundamentals_section(quote))
+    prompt_parts.extend(_build_position_section(position))
 
-    # Position context
-    if position and position.get("is_held"):
-        prompt_parts.append("\n--- POSITION CONTEXT (You currently hold this) ---")
-        prompt_parts.append(f"Shares Held    : {position.get('quantity', 0):.0f}")
-        prompt_parts.append(f"Avg Cost Basis : ${position.get('average_price', 0):,.2f}")
-        prompt_parts.append(f"Market Value   : ${position.get('market_value', 0):,.2f}")
-        prompt_parts.append(f"Day P&L        : ${position.get('current_day_pnl', 0):,.2f} ({position.get('current_day_pnl_pct', 0):.2f}%)")
-        prompt_parts.append(f"Total Open P&L : ${position.get('long_open_pnl', 0):,.2f}")
-    else:
-        prompt_parts.append("\n--- POSITION CONTEXT (Scouting — not currently held) ---")
-
-    # Headlines
     if headlines:
         prompt_parts.append("\nRecent News Headlines:")
         for i, headline in enumerate(headlines[:5], 1):
@@ -179,7 +200,6 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
     else:
         prompt_parts.append("\nRecent News Headlines: None provided")
 
-    # Optional financial metrics
     if metrics:
         prompt_parts.append("\nKey Financial Metrics:")
         for key, value in metrics.items():

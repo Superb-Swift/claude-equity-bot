@@ -4,13 +4,7 @@
 # PURPOSE:
 #   Reads the most recent bot signal log and produces a clean summary
 #   of what happened on that run — signal distribution, confidence stats,
-#   notable BUY/SELL alerts, risk engine outcomes, and token usage.
-#
-# ANALYST NOTE:
-#   Run this after main.py to get a one-page digest of the day's signals
-#   without scrolling through hundreds of log lines. The output is also
-#   appended to a running summary file so you can review trends across
-#   days/weeks without opening every log file.
+#   data quality breakdown, notable signals, risk outcomes, and token usage.
 #
 # USAGE:
 #   python analyze_log.py              # analyze today's log
@@ -33,13 +27,7 @@ SUMMARY_FILE = os.path.join(LOG_DIR, "summary_history.txt")
 # =============================================================================
 
 def find_log_file(date_str: str = None) -> str:
-    """
-    Locate the log file for the given date, or today's if not specified.
-
-    ANALYST NOTE:
-        Logs are named like signals_2026-05-18.log — we just inject
-        the date into that filename pattern.
-    """
+    """Locate the log file for the given date, or today's if not specified."""
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -61,18 +49,12 @@ def parse_log(log_path: str) -> list:
         2026-05-18 14:57:50 | INFO | [PHASE 2 DRY RUN] [Roth IRA] [HELD] WMT |
         Signal: HOLD | Confidence: 62% | Risk: APPROVED | Reason: ...
 
-        We use a regex to extract account, ticker, signal, confidence, etc.
-        This is more reliable than trying to parse the raw JSON dumped
-        elsewhere in the log because the one-liner format is stable.
+        We also parse the JSON signal blocks separately to capture
+        fields like data_quality that aren't in the summary line.
     """
-    # ANALYST NOTE: Regex breakdown for the curious:
-    #   \[(?P<account>[^\]]+)\] — account label in brackets
-    #   \[(?P<held>HELD|SCOUT)\] — held/scout marker
-    #   (?P<ticker>\w+) — ticker symbol
-    #   Signal: (?P<signal>\w+) — BUY/SELL/HOLD
-    #   Confidence: (?P<confidence>\d+)% — numeric confidence
-    #   Risk: (?P<risk>APPROVED|REJECTED) — risk decision
-    pattern = re.compile(
+    # ANALYST NOTE: Two regexes — one for the summary line, one to match
+    # the data_quality field that comes from the dumped JSON block.
+    summary_pattern = re.compile(
         r"PHASE \d DRY RUN\] \[(?P<account>[^\]]+)\] "
         r"\[(?P<held>HELD|SCOUT)\] (?P<ticker>\S+) \| "
         r"Signal: (?P<signal>\w+) \| "
@@ -81,26 +63,35 @@ def parse_log(log_path: str) -> list:
         r"Reason: (?P<reason>.+)"
     )
 
+    # ANALYST NOTE: We pair each summary line with the most recent
+    # data_quality value seen in the log. The JSON block for a ticker
+    # always appears BEFORE its summary line in the log flow.
+    quality_pattern = re.compile(r'"data_quality":\s*"(HIGH|MEDIUM|LOW)"')
+
     signals = []
+    last_quality = "MEDIUM"  # Sensible default if quality line is missed
+
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            match = pattern.search(line)
-            if match:
-                d = match.groupdict()
-                d["confidence"] = int(d["confidence"])
+            # Track the most recent data_quality value
+            q_match = quality_pattern.search(line)
+            if q_match:
+                last_quality = q_match.group(1)
+                continue
+
+            # Match the summary line and attach the captured quality
+            s_match = summary_pattern.search(line)
+            if s_match:
+                d = s_match.groupdict()
+                d["confidence"]   = int(d["confidence"])
+                d["data_quality"] = last_quality
                 signals.append(d)
 
     return signals
 
 
 def parse_token_usage(log_path: str) -> dict:
-    """
-    Sum the input and output tokens used by Claude across the run.
-
-    ANALYST NOTE:
-        Token counts come from the raw signal JSON dumped by main.py.
-        We grep for the input_tokens / output_tokens fields and sum them.
-    """
+    """Sum the input and output tokens used by Claude across the run."""
     in_tokens = 0
     out_tokens = 0
 
@@ -113,9 +104,7 @@ def parse_token_usage(log_path: str) -> dict:
             if m_out:
                 out_tokens += int(m_out.group(1))
 
-    # ANALYST NOTE: Sonnet 4.6 pricing as of 2026 (verify if Anthropic updates):
-    #   Input:  $3 per million tokens  → $0.000003 per token
-    #   Output: $15 per million tokens → $0.000015 per token
+    # ANALYST NOTE: Sonnet 4.6 pricing — verify if Anthropic updates
     cost = (in_tokens * 0.000003) + (out_tokens * 0.000015)
 
     return {
@@ -130,14 +119,7 @@ def parse_token_usage(log_path: str) -> dict:
 # =============================================================================
 
 def build_summary(signals: list, tokens: dict, log_path: str) -> str:
-    """
-    Build a clean, scannable summary string from the parsed signals.
-
-    ANALYST NOTE:
-        The summary is designed to answer the questions you'll actually
-        ask each day: How many BUY/SELL/HOLD? Any high-confidence calls?
-        Did anything get rejected? What did this cost me?
-    """
+    """Build a clean, scannable summary from the parsed signals."""
     lines = []
 
     # --- Header ---
@@ -201,6 +183,42 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
         lines.append(f"  {band:<7} ({count:>2}) {bar}")
     lines.append("")
 
+    # --- Data Quality Distribution (NEW) ---
+    # ANALYST NOTE: Tracks how often Claude is confident in its data inputs.
+    # Watch for: HIGH appearing (good news!), or LOW dominating (data problem).
+    quality_counts = Counter(s["data_quality"] for s in signals)
+    lines.append("  DATA QUALITY DISTRIBUTION")
+    lines.append("  " + "-"*40)
+    for quality in ["HIGH", "MEDIUM", "LOW"]:
+        count = quality_counts.get(quality, 0)
+        pct = (count / total) * 100 if total > 0 else 0
+        bar = "█" * count
+        lines.append(f"  {quality:<7} ({count:>3}) {pct:>5.1f}%  {bar}")
+    lines.append("")
+
+    # --- LOW Quality Investigations (NEW) ---
+    # ANALYST NOTE: List the tickers that returned LOW data quality so
+    # you can investigate whether they consistently fall here or only
+    # on specific days. Persistent LOW tickers may have a data gap
+    # worth fixing (e.g., thin news coverage on small caps).
+    low_signals = [s for s in signals if s["data_quality"] == "LOW"]
+    if low_signals:
+        # Group by ticker so we don't list the same one twice
+        low_tickers = defaultdict(list)
+        for s in low_signals:
+            low_tickers[s["ticker"]].append(s["account"])
+
+        lines.append("  LOW QUALITY SIGNALS (Worth Investigating)")
+        lines.append("  " + "-"*40)
+        for ticker, accounts in sorted(low_tickers.items()):
+            unique_accounts = sorted(set(accounts))
+            lines.append(f"  {ticker:<6} flagged in: {', '.join(unique_accounts)}")
+        lines.append("")
+        lines.append("  → Common LOW causes: thin news coverage, anomalous data,")
+        lines.append("    earnings event risk, ETF data quirks. Worth tracking")
+        lines.append("    whether these tickers persistently show LOW over time.")
+        lines.append("")
+
     # --- Account Breakdown ---
     by_account = defaultdict(list)
     for s in signals:
@@ -215,8 +233,7 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
                      f"({held} held, {scout} scouting)")
     lines.append("")
 
-    # --- Notable Signals ---
-    # Highest confidence non-HOLD signals are worth flagging.
+    # --- Actionable Signals (Non-HOLD with high confidence) ---
     actionable = [s for s in signals
                   if s["signal"] in ("BUY", "SELL") and s["confidence"] >= 70]
     if actionable:
@@ -224,17 +241,19 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
         lines.append("  " + "-"*40)
         for s in sorted(actionable, key=lambda x: -x["confidence"]):
             lines.append(f"  {s['signal']:<5} {s['ticker']:<6} "
-                         f"({s['confidence']}%) in {s['account']} [{s['held']}]")
+                         f"({s['confidence']}%, {s['data_quality']}) "
+                         f"in {s['account']} [{s['held']}]")
             lines.append(f"        Risk: {s['risk']} — {s['reason'][:60]}")
         lines.append("")
 
-    # --- Top Confidence Signals (top 5 regardless of action) ---
+    # --- Top Confidence Signals ---
     top5 = sorted(signals, key=lambda x: -x["confidence"])[:5]
     lines.append("  TOP 5 HIGHEST CONFIDENCE SIGNALS")
     lines.append("  " + "-"*40)
     for s in top5:
         lines.append(f"  {s['confidence']:>3}%  {s['signal']:<5} "
-                     f"{s['ticker']:<6}  [{s['account']}] [{s['held']}]")
+                     f"{s['ticker']:<6}  [{s['account']}] [{s['held']}] "
+                     f"({s['data_quality']})")
     lines.append("")
 
     # --- Risk Engine Outcomes ---
@@ -258,15 +277,7 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
 
 
 def append_to_history(summary: str) -> None:
-    """
-    Append the daily summary to the running history file.
-
-    ANALYST NOTE:
-        Over time this file accumulates a chronological record of every
-        bot run. Open it with Notepad++ to scroll back through trends —
-        great for spotting whether confidence is rising over time or
-        whether the BUY/SELL ratio is shifting.
-    """
+    """Append the daily summary to the running history file."""
     os.makedirs(LOG_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with open(SUMMARY_FILE, "a", encoding="utf-8") as f:
@@ -280,7 +291,6 @@ def append_to_history(summary: str) -> None:
 # =============================================================================
 
 def main():
-    # Accept optional date arg
     date_arg = sys.argv[1] if len(sys.argv) > 1 else None
     log_path = find_log_file(date_arg)
 
@@ -290,10 +300,7 @@ def main():
     tokens  = parse_token_usage(log_path)
     summary = build_summary(signals, tokens, log_path)
 
-    # Print to terminal
     print(summary)
-
-    # Append to history file
     append_to_history(summary)
 
     print(f"\n📁 Summary appended to: {SUMMARY_FILE}")

@@ -4,21 +4,20 @@
 # PURPOSE:
 #   Entry point for the Claude Equity Bot.
 #
-#   MULTI-ACCOUNT MONITORING + SCOUTING + NEWS WORKFLOW:
-#     1. Pull every active account from Schwab
-#     2. For each account:
-#        a. Print portfolio overview with account label
-#        b. Build watchlist: held tickers + scout tickers
-#        c. For each ticker: fetch quote + recent headlines
-#        d. Generate position-aware Claude signal with news context
-#        e. Run signal through risk engine
-#        f. Log everything tagged by account
-#     3. Print aggregate summary across all accounts
+#   MULTI-ACCOUNT MONITORING + SCOUTING + NEWS + SUGGESTIONS WORKFLOW:
+#     1. Pull all active accounts from Schwab
+#     2. Print portfolio overview per account + aggregate summary
+#     3. Build deduplicated watchlist with consolidated position context
+#     4. For each unique ticker: fetch quote + news, generate signal
+#     5. Generate ticker suggestions based on portfolio + market context
+#     6. Log everything for review
 #
 # ANALYST NOTE:
-#   News headlines are fetched once per ticker and cached across accounts
-#   to minimize Finnhub API calls. The Finnhub free tier allows 60/min
-#   so this is rarely a constraint but it is good practice.
+#   Held-ticker signals now use CONSOLIDATED position context across all
+#   accounts — one Claude call per ticker instead of one per account.
+#   This eliminates duplicate token spend when you hold the same ticker
+#   in multiple accounts. The signal mentions both account positions
+#   in its analysis.
 #
 # USAGE:
 #   python main.py
@@ -36,9 +35,10 @@ from schwab_client import (
     get_position_detail,
     ACCOUNT_LABELS,
 )
-from claude_signal import get_signal, print_signal
-from risk_engine  import evaluate_signal, print_risk_report, calculate_position_size
-from news_client  import get_recent_headlines
+from claude_signal    import get_signal, print_signal
+from risk_engine      import evaluate_signal, print_risk_report, calculate_position_size
+from news_client      import get_recent_headlines
+from ticker_suggester import suggest_tickers, print_suggestions, log_suggestions
 
 load_dotenv()
 
@@ -47,37 +47,21 @@ load_dotenv()
 # CONFIGURATION
 # =============================================================================
 
-# --- Phase Control ---
-#   PHASE = 2  →  Read-only dry run. No orders. Logs signals to file.
-#   PHASE = 3  →  Paper simulation. Logs simulated orders. No real trades.
-#   PHASE = 4  →  Live trading. Real orders. Human approval required.
 PHASE = 2
 
-# --- Scouting Watchlist ---
 WATCHLIST_SCOUT = [
-    "SPY",    # S&P 500 — broad market benchmark
-    "QQQ",    # Nasdaq 100 — tech-heavy benchmark
-    "VTI",    # Total stock market — diversified core
-    "NVDA",   # AI semiconductor bellwether
-    "GLD",    # Gold ETF — defensive hedge
-#    "SONY",   # Barchart Pick
-#    "SAIL",   # Barchart Pick
-#    "BBY",   #  Best Buy
-#    "EBAY",   # EBay
-#    "IBM",   # 
-#    "PG",   # Proctor and Gamble
-#    "VOO",   # Vangauard S&P 500 — broad market benchmark
+    "SPY",
+    "QQQ",
+    "VTI",
+    "NVDA",
+    "GLD",
 ]
 
-# --- Monitoring Toggle ---
 MONITOR_HOLDINGS = True
+ENABLE_SUGGESTIONS = True   # Set False to skip the daily suggester call
 
-# --- News Settings ---
-# ANALYST NOTE: Tune these based on signal quality vs API cost tradeoffs.
-# More days back = more historical context but possibly stale.
-# More headlines = richer analysis but more Claude tokens consumed.
-NEWS_DAYS_BACK = 7    # Look back 1 week for headlines
-NEWS_LIMIT     = 5    # Top 5 most recent headlines per ticker
+NEWS_DAYS_BACK = 7
+NEWS_LIMIT     = 5
 
 # --- Logging Setup ---
 LOG_DIR = "logs"
@@ -92,7 +76,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler(log_filename),
+        logging.FileHandler(log_filename, encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
@@ -105,9 +89,7 @@ log = logging.getLogger(__name__)
 # =============================================================================
 
 def print_portfolio_overview(portfolio: dict) -> None:
-    """
-    Print a clean overview of a single account's portfolio.
-    """
+    """Print a clean overview of a single account's portfolio."""
     label     = portfolio.get("account_label", "Account")
     positions = portfolio.get("positions", [])
 
@@ -151,9 +133,7 @@ def print_portfolio_overview(portfolio: dict) -> None:
 
 
 def print_aggregate_summary(portfolios: list) -> None:
-    """
-    Print a roll-up summary across all analyzed accounts.
-    """
+    """Print a roll-up summary across all analyzed accounts."""
     total_value     = sum(p.get("portfolio_value", 0) for p in portfolios)
     total_cash      = sum(p.get("cash_available", 0)  for p in portfolios)
     total_positions = sum(len(p.get("positions", [])) for p in portfolios)
@@ -175,17 +155,98 @@ def print_aggregate_summary(portfolios: list) -> None:
 
 
 # =============================================================================
-# PHASE HANDLERS
+# CONSOLIDATED POSITION CONTEXT (NEW)
 # =============================================================================
 
-def handle_phase2(ticker: str, signal: dict, portfolio: dict,
-                  position_detail: dict, account_label: str) -> None:
-    """Phase 2: Dry run — log signal and risk decision, no execution."""
+def build_consolidated_position(ticker: str, portfolios: list) -> dict:
+    """
+    Build a unified position context for a ticker across all accounts.
+
+    ANALYST NOTE:
+        When you hold the same ticker in multiple accounts (e.g. NTR in
+        both Roth IRA and Individual), this function combines them into
+        one position context. Claude gets the full picture:
+        - Total shares held across accounts
+        - Weighted-average cost basis
+        - Combined market value and P&L
+        - Per-account breakdown for granular awareness
+
+        This replaces the previous behavior of generating one Claude
+        signal per account per ticker — cutting token spend roughly in
+        half for duplicated tickers.
+
+    Args:
+        ticker     (str):  Ticker symbol
+        portfolios (list): All account portfolios
+
+    Returns:
+        dict: Consolidated position dict, or {"is_held": False} if not held anywhere
+    """
+    holdings = []
+    for portfolio in portfolios:
+        position = get_position_detail(portfolio.get("positions", []), ticker)
+        if position.get("is_held"):
+            holdings.append({
+                "account_label": portfolio.get("account_label", "?"),
+                **position,
+            })
+
+    if not holdings:
+        return {"is_held": False}
+
+    # Aggregate across accounts
+    total_shares      = sum(h.get("quantity", 0)        for h in holdings)
+    total_market_val  = sum(h.get("market_value", 0)    for h in holdings)
+    total_day_pnl     = sum(h.get("current_day_pnl", 0) for h in holdings)
+    total_open_pnl    = sum(h.get("long_open_pnl", 0)   for h in holdings)
+
+    # ANALYST NOTE: Weighted-average cost basis is shares-weighted, not
+    # dollar-weighted. This matches how brokers calculate consolidated cost.
+    weighted_cost = 0
+    if total_shares > 0:
+        weighted_cost = sum(
+            h.get("average_price", 0) * h.get("quantity", 0)
+            for h in holdings
+        ) / total_shares
+
+    return {
+        "is_held"            : True,
+        "quantity"           : total_shares,
+        "average_price"      : weighted_cost,
+        "market_value"       : total_market_val,
+        "current_day_pnl"    : total_day_pnl,
+        "current_day_pnl_pct": 0,   # Not meaningful when consolidated
+        "long_open_pnl"      : total_open_pnl,
+        "account_breakdown"  : holdings,   # Per-account detail for Claude
+        "held_in_accounts"   : [h["account_label"] for h in holdings],
+    }
+
+
+# =============================================================================
+# PHASE HANDLER (now account-agnostic)
+# =============================================================================
+
+def handle_phase2(ticker: str, signal: dict, position_detail: dict,
+                  portfolios: list) -> None:
+    """
+    Phase 2: Dry run — log signal and risk decision, no execution.
+
+    ANALYST NOTE:
+        Uses the FIRST portfolio for risk engine evaluation since position
+        limits are account-level. In Phase 3+ we may need to evaluate
+        per-account separately if we add cross-account rules.
+    """
+    # Use the first portfolio for risk eval — simplest for Phase 2
+    portfolio = portfolios[0] if portfolios else {}
     approved, reason = evaluate_signal(signal, portfolio)
+
     held_marker = "[HELD]" if position_detail.get("is_held") else "[SCOUT]"
+    accounts = ",".join(position_detail.get("held_in_accounts", []))
+    account_tag = f"[{accounts}]" if accounts else "[—]"
 
     log.info(
-        f"[PHASE 2 DRY RUN] [{account_label}] {held_marker} {ticker} | "
+        f"Signal JSON: {json.dumps(signal)} | "
+        f"[PHASE 2 DRY RUN] {account_tag} {held_marker} {ticker} | "
         f"Signal: {signal.get('signal')} | "
         f"Confidence: {signal.get('confidence')}% | "
         f"Risk: {'APPROVED' if approved else 'REJECTED'} | "
@@ -197,93 +258,30 @@ def handle_phase2(ticker: str, signal: dict, portfolio: dict,
     print(f"  >>> PHASE 2: No order placed. Signal logged to {log_filename}\n")
 
 
-def handle_phase3(ticker: str, signal: dict, portfolio: dict,
-                  position_detail: dict, account_label: str) -> None:
-    """Phase 3: Paper simulation — log as if order was placed."""
-    approved, reason = evaluate_signal(signal, portfolio)
-    held_marker = "[HELD]" if position_detail.get("is_held") else "[SCOUT]"
-
-    if approved and signal.get("signal") in ["BUY", "SELL"]:
-        price  = signal.get("lastPrice", 0)
-        pvalue = portfolio.get("portfolio_value", 0)
-        shares = calculate_position_size(pvalue, price) if price else 0
-
-        log.info(
-            f"[PHASE 3 PAPER] [{account_label}] {held_marker} "
-            f"SIMULATED ORDER | {ticker} | "
-            f"Action: {signal.get('signal')} | "
-            f"Shares: {shares} | Price: ${price}"
-        )
-    else:
-        log.info(
-            f"[PHASE 3 PAPER] [{account_label}] {held_marker} NO ORDER | "
-            f"{ticker} | Signal: {signal.get('signal')} | Reason: {reason}"
-        )
-
-    print_signal(signal)
-    print_risk_report(signal, portfolio)
-
-
-def handle_phase4(ticker: str, signal: dict, portfolio: dict,
-                  position_detail: dict, account_label: str) -> None:
-    """Phase 4: Live trading with human approval gate."""
-    approved, reason = evaluate_signal(signal, portfolio)
-    held_marker = "[HELD]" if position_detail.get("is_held") else "[SCOUT]"
-
-    if not approved:
-        log.warning(f"[PHASE 4] [{account_label}] {held_marker} REJECTED | "
-                    f"{ticker} | {reason}")
-        print_signal(signal)
-        print_risk_report(signal, portfolio)
-        return
-
-    if signal.get("signal") == "HOLD":
-        log.info(f"[PHASE 4] [{account_label}] {held_marker} HOLD | {ticker}")
-        return
-
-    print_signal(signal)
-    print_risk_report(signal, portfolio)
-
-    print(f"\n  ⚠️  LIVE TRADE PENDING APPROVAL — {account_label}")
-    print(f"  Action    : {signal.get('signal')} {ticker} {held_marker}")
-    print(f"  Confidence: {signal.get('confidence')}%")
-    print(f"  Reasoning : {signal.get('reasoning')}")
-
-    approval = input(
-        "\n  Type 'yes' to approve this trade, anything else to cancel: "
-    )
-
-    if approval.strip().lower() == "yes":
-        log.info(f"[PHASE 4] [{account_label}] HUMAN APPROVED | {ticker} | "
-                 f"{signal.get('signal')}")
-        print("\n  >>> Order execution coming in Phase 4 full implementation.")
-    else:
-        log.info(f"[PHASE 4] [{account_label}] HUMAN CANCELLED | {ticker}")
-        print("\n  >>> Trade cancelled by user.")
-
-
 # =============================================================================
 # CORE PROCESSING
 # =============================================================================
 
-def process_ticker(ticker: str, portfolio: dict, quote_cache: dict,
-                   news_cache: dict, scout_signal_cache: dict) -> None:
+def process_ticker(ticker: str, portfolios: list,
+                   quote_cache: dict, news_cache: dict) -> None:
     """
-    Process a single ticker for a single account with news context.
+    Process a single ticker ONCE across all accounts.
 
     ANALYST NOTE:
-        Three caches for efficiency:
-          - quote_cache: same quote reused across accounts
-          - news_cache: same headlines reused across accounts
-          - scout_signal_cache: scout signals identical across accounts
-        Held tickers always get fresh Claude signals because position
-        context differs between accounts.
+        Major change from previous version — we no longer loop per account.
+        Each ticker gets exactly one Claude call. The consolidated position
+        context tells Claude what's held in each account so it can still
+        give account-aware advice in a single signal.
+
+        Cache usage:
+          - quote_cache: avoids duplicate Schwab quote calls
+          - news_cache:  avoids duplicate Finnhub news calls
+          - No scout cache needed — each ticker is processed once total
     """
-    label = portfolio.get("account_label", "Account")
-    log.info(f"\nProcessing: {ticker}  [account: {label}]")
+    log.info(f"\nProcessing: {ticker}")
 
     try:
-        # Quote cache — reuse across accounts
+        # Quote (cached)
         if ticker in quote_cache:
             quote = quote_cache[ticker]
         else:
@@ -299,7 +297,7 @@ def process_ticker(ticker: str, portfolio: dict, quote_cache: dict,
             f"Change: {quote.get('netPercentChange', 0):.2f}%"
         )
 
-        # News cache — reuse across accounts
+        # News (cached)
         if ticker in news_cache:
             headlines = news_cache[ticker]
         else:
@@ -316,53 +314,80 @@ def process_ticker(ticker: str, portfolio: dict, quote_cache: dict,
         else:
             log.info(f"No recent news for {ticker}")
 
-        # Look up position context
-        position_detail = get_position_detail(
-            portfolio.get("positions", []), ticker
-        )
+        # Consolidated position across all accounts
+        position_detail = build_consolidated_position(ticker, portfolios)
+        position_context = position_detail if position_detail.get("is_held") else None
 
-        is_held = position_detail.get("is_held", False)
-        position_context = position_detail if is_held else None
-
-        if is_held:
+        if position_detail.get("is_held"):
+            accounts = ", ".join(position_detail.get("held_in_accounts", []))
             log.info(
-                f"[HELD in {label}] {ticker} | "
-                f"Shares: {position_detail.get('quantity'):.0f} | "
-                f"Avg Cost: ${position_detail.get('average_price', 0):,.2f} | "
-                f"Day P&L: ${position_detail.get('current_day_pnl', 0):,.2f}"
+                f"[HELD] {ticker} | "
+                f"Total Shares: {position_detail.get('quantity'):.0f} | "
+                f"Weighted Cost: ${position_detail.get('average_price', 0):,.2f} | "
+                f"Day P&L: ${position_detail.get('current_day_pnl', 0):,.2f} | "
+                f"In: {accounts}"
             )
         else:
-            log.info(f"[SCOUT in {label}] {ticker} | Not currently held")
+            log.info(f"[SCOUT] {ticker} | Not currently held")
 
-        # Scout signal cache — same across accounts
-        if not is_held and ticker in scout_signal_cache:
-            log.info(f"Using cached scout signal for {ticker}")
-            signal = scout_signal_cache[ticker]
-        else:
-            log.info(f"Requesting Claude signal for {ticker}...")
-            signal = get_signal(
-                ticker=ticker,
-                quote=quote,
-                position=position_context,
-                headlines=headlines,
-                metrics=None
-            )
-            if not is_held:
-                scout_signal_cache[ticker] = signal
+        # Generate ONE signal for this ticker (not per account)
+        log.info(f"Requesting Claude signal for {ticker}...")
+        signal = get_signal(
+            ticker=ticker,
+            quote=quote,
+            position=position_context,
+            headlines=headlines,
+            metrics=None
+        )
 
         signal["lastPrice"] = quote.get("lastPrice", 0)
 
         if PHASE == 2:
-            handle_phase2(ticker, signal, portfolio, position_detail, label)
-        elif PHASE == 3:
-            handle_phase3(ticker, signal, portfolio, position_detail, label)
-        elif PHASE == 4:
-            handle_phase4(ticker, signal, portfolio, position_detail, label)
+            handle_phase2(ticker, signal, position_detail, portfolios)
         else:
-            log.error(f"Unknown PHASE: {PHASE}. Set to 2, 3, or 4.")
+            log.error(f"Phase {PHASE} handler not implemented in this build.")
 
     except Exception as e:
-        log.error(f"Error processing {ticker} in {label}: {e}")
+        log.error(f"Error processing {ticker}: {e}")
+
+
+# =============================================================================
+# SUGGESTION RUNNER
+# =============================================================================
+
+def run_suggester(portfolios: list, news_cache: dict) -> None:
+    """
+    Generate ticker suggestions based on portfolio and market context.
+
+    ANALYST NOTE:
+        Uses SPY headlines as the broad-market signal since SPY is in
+        the default scout list. If you remove SPY from scout, this falls
+        back to a generic prompt without market context.
+    """
+    log.info("\n" + "#"*60)
+    log.info("# GENERATING TICKER SUGGESTIONS")
+    log.info("#"*60)
+
+    # Collect all unique held tickers across accounts
+    all_held = set()
+    for p in portfolios:
+        all_held.update(p.get("held_tickers", []))
+
+    # Use SPY headlines as proxy for broad-market context (cached from earlier)
+    market_headlines = news_cache.get("SPY", [])
+
+    result = suggest_tickers(
+        held_tickers=sorted(all_held),
+        scout_list=WATCHLIST_SCOUT,
+        market_headlines=market_headlines
+    )
+
+    print_suggestions(result)
+    history_path = log_suggestions(result, LOG_DIR)
+
+    log.info(f"Suggestions saved to: {history_path}")
+    log.info(f"Suggestion tokens: {result.get('input_tokens', '?')} in / "
+             f"{result.get('output_tokens', '?')} out")
 
 
 # =============================================================================
@@ -382,8 +407,7 @@ def run_bot():
     try:
         portfolios = get_all_portfolios()
         if not portfolios:
-            log.error("No active portfolios found. Check ACTIVE_ACCOUNTS "
-                      "in schwab_client.py.")
+            log.error("No active portfolios found.")
             return
 
         log.info(f"Loaded {len(portfolios)} active account(s): "
@@ -393,41 +417,48 @@ def run_bot():
         log.error(f"Portfolio fetch failed: {e}")
         return
 
-    # STEP 2: Print overview for each account
+    # STEP 2: Print overviews
     for portfolio in portfolios:
         print_portfolio_overview(portfolio)
-
-    # STEP 3: Print aggregate summary
     print_aggregate_summary(portfolios)
 
-    # STEP 4: Process each account with shared caches
-    quote_cache         = {}   # ticker → quote
-    news_cache          = {}   # ticker → headlines
-    scout_signal_cache  = {}   # ticker → signal (scout only)
+    # STEP 3: Build deduplicated watchlist
+    # ANALYST NOTE: We combine all held tickers across accounts into one
+    # unique set, then add scout tickers. Each ticker is processed exactly
+    # once regardless of how many accounts hold it.
+    all_held = set()
+    for p in portfolios:
+        all_held.update(p.get("held_tickers", []) if MONITOR_HOLDINGS else [])
 
-    for portfolio in portfolios:
-        label = portfolio.get("account_label", "Account")
-        held_tickers = portfolio.get("held_tickers", []) if MONITOR_HOLDINGS else []
+    seen = set()
+    watchlist = []
+    for ticker in sorted(all_held) + WATCHLIST_SCOUT:
+        if ticker not in seen:
+            watchlist.append(ticker)
+            seen.add(ticker)
 
-        seen = set()
-        watchlist = []
-        for ticker in held_tickers + WATCHLIST_SCOUT:
-            if ticker not in seen:
-                watchlist.append(ticker)
-                seen.add(ticker)
+    held_count  = sum(1 for t in watchlist if t in all_held)
+    scout_count = len(watchlist) - held_count
 
-        held_count  = sum(1 for t in watchlist if t in held_tickers)
-        scout_count = len(watchlist) - held_count
+    log.info("\n" + "#"*60)
+    log.info(f"# ANALYZING {len(watchlist)} UNIQUE TICKERS")
+    log.info(f"# {held_count} held + {scout_count} scouting")
+    log.info(f"# (Held tickers analyzed once with consolidated cost basis)")
+    log.info("#"*60)
 
-        log.info("\n" + "#"*60)
-        log.info(f"# ANALYZING ACCOUNT: {label}")
-        log.info(f"# {len(watchlist)} tickers: "
-                 f"{held_count} held + {scout_count} scouting")
-        log.info("#"*60)
+    # STEP 4: Process each ticker with shared caches
+    quote_cache = {}
+    news_cache  = {}
 
-        for ticker in watchlist:
-            process_ticker(ticker, portfolio, quote_cache,
-                           news_cache, scout_signal_cache)
+    for ticker in watchlist:
+        process_ticker(ticker, portfolios, quote_cache, news_cache)
+
+    # STEP 5: Generate ticker suggestions
+    if ENABLE_SUGGESTIONS:
+        try:
+            run_suggester(portfolios, news_cache)
+        except Exception as e:
+            log.error(f"Suggester failed: {e}")
 
     log.info("\nBot run complete.")
     log.info(f"Full log saved to: {log_filename}")
