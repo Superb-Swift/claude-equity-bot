@@ -17,3 +17,11 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Microsoft Office temp/lock files
+~$*.docx
+~$*.xlsx
+~$*.pptx
+
+# Personal workflow docs (keep local, not in repo)
+*.docx
