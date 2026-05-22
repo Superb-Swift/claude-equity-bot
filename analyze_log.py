@@ -4,8 +4,9 @@
 # PURPOSE:
 #   Reads the most recent bot signal log and produces a clean summary
 #   of what happened on that run — signal distribution, confidence stats,
-#   data quality breakdown, tiered signal sections (actionable / near-miss /
-#   weak directional), low-confidence HOLD callouts, and token usage.
+#   data quality breakdown, two-tier directional signal sections
+#   (actionable + near-miss with auto-calculated tracker dates),
+#   low-confidence HOLD callouts, and token usage.
 #
 # USAGE:
 #   python analyze_log.py              # analyze today's log
@@ -33,7 +34,9 @@ MIN_CONFIDENCE_BUY  = 70   # Risk engine BUY threshold
 MIN_CONFIDENCE_SELL = 65   # Risk engine SELL threshold
 
 # How close to threshold = "near-miss"
-# A 62% BUY (8 pts below 70) lands in near-miss; a 55% BUY does not
+# A 62% BUY (8 pts below 70) lands in near-miss; a 55% BUY does NOT
+# appear anywhere — Claude downgrades that uncertainty to HOLD, which
+# the low-confidence HOLD section will catch instead.
 NEAR_MISS_BAND = 10
 
 # HOLD < this confidence = flagged as "worth manual review"
@@ -207,16 +210,20 @@ def parse_token_usage(log_path: str) -> dict:
 
 def classify_directional_signal(s: dict) -> str:
     """
-    Bucket a BUY/SELL signal into one of three tiers based on confidence
-    relative to the risk-engine threshold.
+    Bucket a BUY/SELL signal into 'actionable' or 'near_miss'.
 
-    Returns 'actionable', 'near_miss', 'weak', or None (for HOLDs).
+    Returns None for:
+        - HOLD signals (handled by low-confidence HOLD section)
+        - BUY/SELL signals below the near-miss band (Claude effectively
+          downgrades that level of uncertainty to HOLD in practice, so
+          we don't expect to see them — and if we do, the digest's
+          confidence distribution already shows them.)
 
     ANALYST NOTE:
-        The near-miss band is the most important data during Phase 2.
-        These are signals Claude was CLOSE to recommending — they're
-        your calibration evidence. Was rejecting them correct? The
-        outcome data over +5/+10/+20 days tells the story.
+        Two tiers is cleaner than three. In 5 days of testing, Claude
+        produced zero BUYs below 60% or SELLs below 55% — uncertainty
+        below those bands gets routed to HOLD instead. So a third tier
+        for "weak directional" was solving for an empty set.
     """
     signal = s["signal"]
     conf   = s["confidence"]
@@ -232,7 +239,7 @@ def classify_directional_signal(s: dict) -> str:
         return "actionable"
     if conf >= (threshold - NEAR_MISS_BAND):
         return "near_miss"
-    return "weak"
+    return None  # Below near-miss band — not surfaced in directional tiers
 
 
 # =============================================================================
@@ -339,25 +346,26 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
         lines.append("")
 
     # =========================================================================
-    # TIERED SIGNAL SECTIONS
+    # DIRECTIONAL SIGNAL SECTIONS (TWO TIERS)
     # =========================================================================
     # ANALYST NOTE:
-    #   Classify every BUY/SELL into actionable / near-miss / weak tiers.
-    #   These three sections REPLACE the old "Top 5 Highest Confidence"
-    #   block — they're more meaningful because they tell you what to DO
-    #   with each signal rather than just ranking by confidence.
+    #   Two tiers replace the old "Top 5 Highest Confidence" block:
+    #     1. Actionable — would execute in Phase 4
+    #     2. Near-Miss  — critical Phase 2 calibration data
+    #
+    #   Signals below the near-miss band aren't surfaced here because
+    #   Claude effectively never generates them — that level of uncertainty
+    #   gets routed to HOLD instead, which the low-confidence HOLD section
+    #   catches.
 
     actionable = []
     near_miss  = []
-    weak_dir   = []
     for s in signals:
         tier = classify_directional_signal(s)
         if tier == "actionable":
             actionable.append(s)
         elif tier == "near_miss":
             near_miss.append(s)
-        elif tier == "weak":
-            weak_dir.append(s)
 
     # --- TIER 1: ACTIONABLE SIGNALS ---
     lines.append("  ✅ ACTIONABLE SIGNALS (Risk Engine Approved)")
@@ -405,19 +413,6 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
                      f"{MIN_CONFIDENCE_BUY - 1}% or SELL in "
                      f"{MIN_CONFIDENCE_SELL - NEAR_MISS_BAND}–"
                      f"{MIN_CONFIDENCE_SELL - 1}%.)")
-    lines.append("")
-
-    # --- TIER 3: WEAK DIRECTIONAL SIGNALS ---
-    # Below the near-miss band — Claude leans but doesn't lean hard
-    lines.append("  📊 WEAK DIRECTIONAL SIGNALS (Far From Threshold)")
-    lines.append("  " + "-"*40)
-    if weak_dir:
-        for s in sorted(weak_dir, key=lambda x: -x["confidence"]):
-            lines.append(f"  {s['confidence']:>3}%  {s['signal']:<5} "
-                         f"{s['ticker']:<6}  [{s['account']}] [{s['held']}] "
-                         f"({s['data_quality']})")
-    else:
-        lines.append("  None today.")
     lines.append("")
 
     # --- LOW-CONFIDENCE HOLD SIGNALS ---
