@@ -4,7 +4,8 @@
 # PURPOSE:
 #   Reads the most recent bot signal log and produces a clean summary
 #   of what happened on that run — signal distribution, confidence stats,
-#   data quality breakdown, notable signals, risk outcomes, and token usage.
+#   data quality breakdown, notable signals (including low-confidence HOLDs
+#   worth manual review), risk outcomes, and token usage.
 #
 # USAGE:
 #   python analyze_log.py              # analyze today's log
@@ -20,6 +21,12 @@ from collections import defaultdict, Counter
 
 LOG_DIR = "logs"
 SUMMARY_FILE = os.path.join(LOG_DIR, "summary_history.txt")
+
+# ANALYST NOTE: Threshold for "low confidence HOLD" — below this we flag
+# the signal as worth manual review. 50% means Claude is essentially
+# uncertain and reverting to HOLD as the safer default. Adjust higher
+# (e.g. 55%) if too many signals get flagged; lower (45%) if not enough.
+LOW_CONFIDENCE_HOLD_THRESHOLD = 50
 
 
 # =============================================================================
@@ -45,15 +52,14 @@ def parse_log(log_path: str) -> list:
     Read the log file and extract every signal as a structured dict.
 
     ANALYST NOTE:
-        Signal lines look like:
-        2026-05-18 14:57:50 | INFO | [PHASE 2 DRY RUN] [Roth IRA] [HELD] WMT |
-        Signal: HOLD | Confidence: 62% | Risk: APPROVED | Reason: ...
+        Each line contains both the Signal JSON dump (with data_quality,
+        token counts, full reasoning) AND the summary line ([PHASE 2 DRY RUN]
+        ... | Signal: ... | Confidence: ... | Risk: ...).
 
-        We also parse the JSON signal blocks separately to capture
-        fields like data_quality that aren't in the summary line.
+        We parse both pieces from the same line so we can correlate
+        confidence/signal type with data quality and Claude's actual
+        reasoning text for richer reporting.
     """
-    # ANALYST NOTE: Two regexes — one for the summary line, one to match
-    # the data_quality field that comes from the dumped JSON block.
     summary_pattern = re.compile(
         r"PHASE \d DRY RUN\] \[(?P<account>[^\]]+)\] "
         r"\[(?P<held>HELD|SCOUT)\] (?P<ticker>\S+) \| "
@@ -63,19 +69,18 @@ def parse_log(log_path: str) -> list:
         r"Reason: (?P<reason>.+)"
     )
 
-    # ANALYST NOTE: We pair each summary line with the most recent
-    # data_quality value seen in the log. The JSON block for a ticker
-    # always appears BEFORE its summary line in the log flow.
     quality_pattern = re.compile(r'"data_quality":\s*"(HIGH|MEDIUM|LOW)"')
+
+    # ANALYST NOTE: Pull a short snippet of the reasoning so we can show
+    # it next to low-confidence HOLDs without spamming the digest with
+    # full paragraphs. We grab the FIRST sentence of "reasoning" from the
+    # JSON dump and cap it at ~80 chars.
+    reasoning_pattern = re.compile(r'"reasoning":\s*"([^"]+)"')
 
     signals = []
 
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            # ANALYST NOTE: With JSON-dumped signal logging, both the JSON
-            # and the summary line now appear together. We search for
-            # data_quality on the SAME line as the summary match, since
-            # the JSON dump precedes the summary text in the log entry.
             s_match = summary_pattern.search(line)
             if not s_match:
                 continue
@@ -83,9 +88,23 @@ def parse_log(log_path: str) -> list:
             d = s_match.groupdict()
             d["confidence"] = int(d["confidence"])
 
-            # Look for data_quality in the same line (from the JSON dump)
+            # Capture data quality on the same line
             q_match = quality_pattern.search(line)
             d["data_quality"] = q_match.group(1) if q_match else "MEDIUM"
+
+            # Capture reasoning snippet for low-confidence flagging
+            r_match = reasoning_pattern.search(line)
+            if r_match:
+                # First sentence only, capped at 80 chars
+                full_reasoning = r_match.group(1)
+                first_sentence = full_reasoning.split('. ')[0]
+                d["reasoning_snippet"] = (
+                    first_sentence[:80] + "..."
+                    if len(first_sentence) > 80
+                    else first_sentence
+                )
+            else:
+                d["reasoning_snippet"] = ""
 
             signals.append(d)
 
@@ -185,9 +204,7 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
         lines.append(f"  {band:<7} ({count:>2}) {bar}")
     lines.append("")
 
-    # --- Data Quality Distribution (NEW) ---
-    # ANALYST NOTE: Tracks how often Claude is confident in its data inputs.
-    # Watch for: HIGH appearing (good news!), or LOW dominating (data problem).
+    # --- Data Quality Distribution ---
     quality_counts = Counter(s["data_quality"] for s in signals)
     lines.append("  DATA QUALITY DISTRIBUTION")
     lines.append("  " + "-"*40)
@@ -198,14 +215,9 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
         lines.append(f"  {quality:<7} ({count:>3}) {pct:>5.1f}%  {bar}")
     lines.append("")
 
-    # --- LOW Quality Investigations (NEW) ---
-    # ANALYST NOTE: List the tickers that returned LOW data quality so
-    # you can investigate whether they consistently fall here or only
-    # on specific days. Persistent LOW tickers may have a data gap
-    # worth fixing (e.g., thin news coverage on small caps).
+    # --- LOW Quality Investigations ---
     low_signals = [s for s in signals if s["data_quality"] == "LOW"]
     if low_signals:
-        # Group by ticker so we don't list the same one twice
         low_tickers = defaultdict(list)
         for s in low_signals:
             low_tickers[s["ticker"]].append(s["account"])
@@ -219,6 +231,39 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
         lines.append("  → Common LOW causes: thin news coverage, anomalous data,")
         lines.append("    earnings event risk, ETF data quirks. Worth tracking")
         lines.append("    whether these tickers persistently show LOW over time.")
+        lines.append("")
+
+    # --- LOW-CONFIDENCE HOLD SIGNALS (NEW) ---
+    # ANALYST NOTE: This section surfaces HOLDs where Claude has real
+    # reservations. A HOLD at 42% confidence means "I'm telling you not
+    # to act because nothing else clearly wins — but I'm not comfortable."
+    # These are the signals where YOUR judgment matters most, because
+    # Claude is essentially abstaining from a strong recommendation.
+    low_conf_holds = [
+        s for s in signals
+        if s["signal"] == "HOLD" and s["confidence"] < LOW_CONFIDENCE_HOLD_THRESHOLD
+    ]
+    if low_conf_holds:
+        # Sort lowest confidence first — these are the most uncertain
+        low_conf_holds.sort(key=lambda x: x["confidence"])
+
+        lines.append(f"  ⚠️  LOW-CONFIDENCE HOLDS (<{LOW_CONFIDENCE_HOLD_THRESHOLD}%) — Worth Manual Review")
+        lines.append("  " + "-"*40)
+        for s in low_conf_holds:
+            ticker = s["ticker"]
+            conf = s["confidence"]
+            account = s["account"]
+            held = s["held"]
+            dq = s["data_quality"]
+            snippet = s.get("reasoning_snippet", "")
+
+            lines.append(f"  {conf:>3}%  {ticker:<6}  [{account}] [{held}] ({dq})")
+            if snippet:
+                lines.append(f"        → {snippet}")
+        lines.append("")
+        lines.append("  → These HOLDs reflect Claude's uncertainty, NOT confidence in")
+        lines.append("    the position. Claude couldn't recommend BUY or SELL with")
+        lines.append("    conviction, so defaulted to HOLD. Apply your own judgment.")
         lines.append("")
 
     # --- Account Breakdown ---
