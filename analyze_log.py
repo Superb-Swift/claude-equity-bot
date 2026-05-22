@@ -4,8 +4,8 @@
 # PURPOSE:
 #   Reads the most recent bot signal log and produces a clean summary
 #   of what happened on that run — signal distribution, confidence stats,
-#   data quality breakdown, notable signals (including low-confidence HOLDs
-#   worth manual review), risk outcomes, and token usage.
+#   data quality breakdown, tiered signal sections (actionable / near-miss /
+#   weak directional), low-confidence HOLD callouts, and token usage.
 #
 # USAGE:
 #   python analyze_log.py              # analyze today's log
@@ -16,17 +16,85 @@ import os
 import re
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 
 LOG_DIR = "logs"
 SUMMARY_FILE = os.path.join(LOG_DIR, "summary_history.txt")
 
-# ANALYST NOTE: Threshold for "low confidence HOLD" — below this we flag
-# the signal as worth manual review. 50% means Claude is essentially
-# uncertain and reverting to HOLD as the safer default. Adjust higher
-# (e.g. 55%) if too many signals get flagged; lower (45%) if not enough.
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+# ANALYST NOTE: Thresholds should mirror what's in risk_engine.py. If you
+# change them in the engine, change them here too — otherwise the digest
+# will misclassify signals.
+
+MIN_CONFIDENCE_BUY  = 70   # Risk engine BUY threshold
+MIN_CONFIDENCE_SELL = 65   # Risk engine SELL threshold
+
+# How close to threshold = "near-miss"
+# A 62% BUY (8 pts below 70) lands in near-miss; a 55% BUY does not
+NEAR_MISS_BAND = 10
+
+# HOLD < this confidence = flagged as "worth manual review"
 LOW_CONFIDENCE_HOLD_THRESHOLD = 50
+
+
+# ANALYST NOTE: US market holidays for 2026 (closed). Used to compute
+# +5d / +10d / +20d tracker dates in trading-day arithmetic. Update
+# annually. Source: NYSE 2026 holiday calendar.
+US_MARKET_HOLIDAYS_2026 = {
+    "2026-01-01",  # New Year's Day
+    "2026-01-19",  # MLK Day
+    "2026-02-16",  # Presidents Day
+    "2026-04-03",  # Good Friday
+    "2026-05-25",  # Memorial Day
+    "2026-06-19",  # Juneteenth
+    "2026-07-03",  # Independence Day (observed)
+    "2026-09-07",  # Labor Day
+    "2026-11-26",  # Thanksgiving
+    "2026-12-25",  # Christmas
+}
+
+
+# =============================================================================
+# TRADING-DAY HELPERS
+# =============================================================================
+
+def is_trading_day(d: datetime) -> bool:
+    """Return True if d is a weekday and not a US market holiday."""
+    if d.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    return d.strftime("%Y-%m-%d") not in US_MARKET_HOLIDAYS_2026
+
+
+def add_trading_days(start: datetime, n: int) -> datetime:
+    """
+    Add n TRADING days (skipping weekends and US market holidays) to start.
+
+    ANALYST NOTE:
+        Trading-day math is critical — "5 days later" in calendar terms
+        means something different than in trading-floor terms. A Friday
+        signal's +5d lands on the following Friday, not on Wednesday.
+        Memorial Day weekend shifts everything by an extra day.
+    """
+    current = start
+    days_added = 0
+    while days_added < n:
+        current += timedelta(days=1)
+        if is_trading_day(current):
+            days_added += 1
+    return current
+
+
+def format_tracker_dates(signal_date: datetime) -> str:
+    """Return a short string of +5d / +10d / +20d trading-day targets."""
+    d5  = add_trading_days(signal_date, 5)
+    d10 = add_trading_days(signal_date, 10)
+    d20 = add_trading_days(signal_date, 20)
+    return (f"+5d: {d5.strftime('%Y-%m-%d')}  "
+            f"+10d: {d10.strftime('%Y-%m-%d')}  "
+            f"+20d: {d20.strftime('%Y-%m-%d')}")
 
 
 # =============================================================================
@@ -53,12 +121,12 @@ def parse_log(log_path: str) -> list:
 
     ANALYST NOTE:
         Each line contains both the Signal JSON dump (with data_quality,
-        token counts, full reasoning) AND the summary line ([PHASE 2 DRY RUN]
-        ... | Signal: ... | Confidence: ... | Risk: ...).
+        token counts, full reasoning, lastPrice) AND the summary line
+        ([PHASE 2 DRY RUN] ... | Signal: ... | Confidence: ... | Risk: ...).
 
         We parse both pieces from the same line so we can correlate
-        confidence/signal type with data quality and Claude's actual
-        reasoning text for richer reporting.
+        confidence/signal type with data quality, price, and Claude's
+        actual reasoning text for richer reporting.
     """
     summary_pattern = re.compile(
         r"PHASE \d DRY RUN\] \[(?P<account>[^\]]+)\] "
@@ -69,13 +137,9 @@ def parse_log(log_path: str) -> list:
         r"Reason: (?P<reason>.+)"
     )
 
-    quality_pattern = re.compile(r'"data_quality":\s*"(HIGH|MEDIUM|LOW)"')
-
-    # ANALYST NOTE: Pull a short snippet of the reasoning so we can show
-    # it next to low-confidence HOLDs without spamming the digest with
-    # full paragraphs. We grab the FIRST sentence of "reasoning" from the
-    # JSON dump and cap it at ~80 chars.
+    quality_pattern   = re.compile(r'"data_quality":\s*"(HIGH|MEDIUM|LOW)"')
     reasoning_pattern = re.compile(r'"reasoning":\s*"([^"]+)"')
+    price_pattern     = re.compile(r'"lastPrice":\s*([\d.]+)')
 
     signals = []
 
@@ -88,23 +152,25 @@ def parse_log(log_path: str) -> list:
             d = s_match.groupdict()
             d["confidence"] = int(d["confidence"])
 
-            # Capture data quality on the same line
             q_match = quality_pattern.search(line)
             d["data_quality"] = q_match.group(1) if q_match else "MEDIUM"
 
-            # Capture reasoning snippet for low-confidence flagging
+            # Reasoning snippet for the digest — first sentence, capped
             r_match = reasoning_pattern.search(line)
             if r_match:
-                # First sentence only, capped at 80 chars
                 full_reasoning = r_match.group(1)
                 first_sentence = full_reasoning.split('. ')[0]
                 d["reasoning_snippet"] = (
-                    first_sentence[:80] + "..."
-                    if len(first_sentence) > 80
+                    first_sentence[:90] + "..."
+                    if len(first_sentence) > 90
                     else first_sentence
                 )
             else:
                 d["reasoning_snippet"] = ""
+
+            # Price at signal — used for near-miss tracking row
+            p_match = price_pattern.search(line)
+            d["price"] = float(p_match.group(1)) if p_match else None
 
             signals.append(d)
 
@@ -136,6 +202,40 @@ def parse_token_usage(log_path: str) -> dict:
 
 
 # =============================================================================
+# SIGNAL CLASSIFICATION
+# =============================================================================
+
+def classify_directional_signal(s: dict) -> str:
+    """
+    Bucket a BUY/SELL signal into one of three tiers based on confidence
+    relative to the risk-engine threshold.
+
+    Returns 'actionable', 'near_miss', 'weak', or None (for HOLDs).
+
+    ANALYST NOTE:
+        The near-miss band is the most important data during Phase 2.
+        These are signals Claude was CLOSE to recommending — they're
+        your calibration evidence. Was rejecting them correct? The
+        outcome data over +5/+10/+20 days tells the story.
+    """
+    signal = s["signal"]
+    conf   = s["confidence"]
+
+    if signal == "BUY":
+        threshold = MIN_CONFIDENCE_BUY
+    elif signal == "SELL":
+        threshold = MIN_CONFIDENCE_SELL
+    else:
+        return None  # HOLD doesn't go through this classification
+
+    if conf >= threshold:
+        return "actionable"
+    if conf >= (threshold - NEAR_MISS_BAND):
+        return "near_miss"
+    return "weak"
+
+
+# =============================================================================
 # SUMMARY GENERATION
 # =============================================================================
 
@@ -145,6 +245,11 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
 
     # --- Header ---
     date_str = os.path.basename(log_path).replace("signals_", "").replace(".log", "")
+    try:
+        signal_date = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        signal_date = datetime.now()
+
     lines.append("="*72)
     lines.append(f"  DAILY SIGNAL SUMMARY — {date_str}")
     lines.append("="*72)
@@ -233,33 +338,107 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
         lines.append("    whether these tickers persistently show LOW over time.")
         lines.append("")
 
-    # --- LOW-CONFIDENCE HOLD SIGNALS (NEW) ---
+    # =========================================================================
+    # TIERED SIGNAL SECTIONS
+    # =========================================================================
+    # ANALYST NOTE:
+    #   Classify every BUY/SELL into actionable / near-miss / weak tiers.
+    #   These three sections REPLACE the old "Top 5 Highest Confidence"
+    #   block — they're more meaningful because they tell you what to DO
+    #   with each signal rather than just ranking by confidence.
+
+    actionable = []
+    near_miss  = []
+    weak_dir   = []
+    for s in signals:
+        tier = classify_directional_signal(s)
+        if tier == "actionable":
+            actionable.append(s)
+        elif tier == "near_miss":
+            near_miss.append(s)
+        elif tier == "weak":
+            weak_dir.append(s)
+
+    # --- TIER 1: ACTIONABLE SIGNALS ---
+    lines.append("  ✅ ACTIONABLE SIGNALS (Risk Engine Approved)")
+    lines.append("  " + "-"*40)
+    if actionable:
+        for s in sorted(actionable, key=lambda x: -x["confidence"]):
+            lines.append(f"  {s['confidence']:>3}%  {s['signal']:<5} "
+                         f"{s['ticker']:<6}  [{s['account']}] [{s['held']}] "
+                         f"({s['data_quality']})")
+            if s.get("reasoning_snippet"):
+                lines.append(f"        → {s['reasoning_snippet']}")
+    else:
+        lines.append(f"  None today.")
+        lines.append(f"  (No BUY ≥{MIN_CONFIDENCE_BUY}% or "
+                     f"SELL ≥{MIN_CONFIDENCE_SELL}% generated.)")
+    lines.append("")
+
+    # --- TIER 2: NEAR-MISS SIGNALS ---
+    # These are your most important Phase 2 calibration data
+    lines.append("  🎯 NEAR-MISS SIGNALS (Rejected by Confidence Threshold)")
+    lines.append("  " + "-"*40)
+    if near_miss:
+        for s in sorted(near_miss, key=lambda x: -x["confidence"]):
+            threshold = (MIN_CONFIDENCE_BUY if s["signal"] == "BUY"
+                         else MIN_CONFIDENCE_SELL)
+            gap = threshold - s["confidence"]
+
+            price_str = f"${s['price']:.2f}" if s["price"] is not None else "n/a"
+
+            lines.append(f"  {s['confidence']:>3}%  {s['signal']:<5} "
+                         f"{s['ticker']:<6}  [{s['account']}] [{s['held']}] "
+                         f"({s['data_quality']})")
+            lines.append(f"        Needs {threshold}%, missed by {gap} pt(s) "
+                         f"| Price at signal: {price_str}")
+            lines.append(f"        Track: {format_tracker_dates(signal_date)}")
+            if s.get("reasoning_snippet"):
+                lines.append(f"        → {s['reasoning_snippet']}")
+            lines.append("")
+
+        lines.append("  → These are Claude's near-conviction calls. Most important")
+        lines.append(f"    Phase 2 data. Track outcomes carefully in spreadsheet.")
+    else:
+        lines.append(f"  None today.")
+        lines.append(f"  (No BUY in {MIN_CONFIDENCE_BUY - NEAR_MISS_BAND}–"
+                     f"{MIN_CONFIDENCE_BUY - 1}% or SELL in "
+                     f"{MIN_CONFIDENCE_SELL - NEAR_MISS_BAND}–"
+                     f"{MIN_CONFIDENCE_SELL - 1}%.)")
+    lines.append("")
+
+    # --- TIER 3: WEAK DIRECTIONAL SIGNALS ---
+    # Below the near-miss band — Claude leans but doesn't lean hard
+    lines.append("  📊 WEAK DIRECTIONAL SIGNALS (Far From Threshold)")
+    lines.append("  " + "-"*40)
+    if weak_dir:
+        for s in sorted(weak_dir, key=lambda x: -x["confidence"]):
+            lines.append(f"  {s['confidence']:>3}%  {s['signal']:<5} "
+                         f"{s['ticker']:<6}  [{s['account']}] [{s['held']}] "
+                         f"({s['data_quality']})")
+    else:
+        lines.append("  None today.")
+    lines.append("")
+
+    # --- LOW-CONFIDENCE HOLD SIGNALS ---
     # ANALYST NOTE: This section surfaces HOLDs where Claude has real
     # reservations. A HOLD at 42% confidence means "I'm telling you not
     # to act because nothing else clearly wins — but I'm not comfortable."
-    # These are the signals where YOUR judgment matters most, because
-    # Claude is essentially abstaining from a strong recommendation.
+    # These are the signals where YOUR judgment matters most.
     low_conf_holds = [
         s for s in signals
         if s["signal"] == "HOLD" and s["confidence"] < LOW_CONFIDENCE_HOLD_THRESHOLD
     ]
     if low_conf_holds:
-        # Sort lowest confidence first — these are the most uncertain
         low_conf_holds.sort(key=lambda x: x["confidence"])
 
         lines.append(f"  ⚠️  LOW-CONFIDENCE HOLDS (<{LOW_CONFIDENCE_HOLD_THRESHOLD}%) — Worth Manual Review")
         lines.append("  " + "-"*40)
         for s in low_conf_holds:
-            ticker = s["ticker"]
-            conf = s["confidence"]
-            account = s["account"]
-            held = s["held"]
-            dq = s["data_quality"]
-            snippet = s.get("reasoning_snippet", "")
-
-            lines.append(f"  {conf:>3}%  {ticker:<6}  [{account}] [{held}] ({dq})")
-            if snippet:
-                lines.append(f"        → {snippet}")
+            lines.append(f"  {s['confidence']:>3}%  {s['ticker']:<6}  "
+                         f"[{s['account']}] [{s['held']}] ({s['data_quality']})")
+            if s.get("reasoning_snippet"):
+                lines.append(f"        → {s['reasoning_snippet']}")
         lines.append("")
         lines.append("  → These HOLDs reflect Claude's uncertainty, NOT confidence in")
         lines.append("    the position. Claude couldn't recommend BUY or SELL with")
@@ -274,33 +453,10 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
     lines.append("  BY ACCOUNT")
     lines.append("  " + "-"*40)
     for account, sigs in by_account.items():
-        held = sum(1 for s in sigs if s["held"] == "HELD")
+        held  = sum(1 for s in sigs if s["held"] == "HELD")
         scout = sum(1 for s in sigs if s["held"] == "SCOUT")
         lines.append(f"  {account:<20} {len(sigs):>3} signals "
                      f"({held} held, {scout} scouting)")
-    lines.append("")
-
-    # --- Actionable Signals (Non-HOLD with high confidence) ---
-    actionable = [s for s in signals
-                  if s["signal"] in ("BUY", "SELL") and s["confidence"] >= 70]
-    if actionable:
-        lines.append("  ⚠️  ACTIONABLE SIGNALS (Non-HOLD, Confidence >= 70%)")
-        lines.append("  " + "-"*40)
-        for s in sorted(actionable, key=lambda x: -x["confidence"]):
-            lines.append(f"  {s['signal']:<5} {s['ticker']:<6} "
-                         f"({s['confidence']}%, {s['data_quality']}) "
-                         f"in {s['account']} [{s['held']}]")
-            lines.append(f"        Risk: {s['risk']} — {s['reason'][:60]}")
-        lines.append("")
-
-    # --- Top Confidence Signals ---
-    top5 = sorted(signals, key=lambda x: -x["confidence"])[:5]
-    lines.append("  TOP 5 HIGHEST CONFIDENCE SIGNALS")
-    lines.append("  " + "-"*40)
-    for s in top5:
-        lines.append(f"  {s['confidence']:>3}%  {s['signal']:<5} "
-                     f"{s['ticker']:<6}  [{s['account']}] [{s['held']}] "
-                     f"({s['data_quality']})")
     lines.append("")
 
     # --- Risk Engine Outcomes ---
