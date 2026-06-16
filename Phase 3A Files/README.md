@@ -2,7 +2,7 @@
 
 > An AI-powered equity research and signal generation system that combines real-time brokerage data, large language model analysis, and disciplined risk management to produce structured trading signals for human review.
 
-![Phase](https://img.shields.io/badge/Phase-3--A%20Advisory-orange)
+![Phase](https://img.shields.io/badge/Phase-2%20Dry%20Run-yellow)
 ![Language](https://img.shields.io/badge/Python-3.14-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-success)
@@ -46,8 +46,7 @@ The system is designed around three principles:
                              ▼
               ┌──────────────────────────────┐
               │  Signal log + daily analyzer  │
-              │  + ticker suggester + tracker │
-              │           export              │
+              │      + ticker suggester       │
               └──────────────────────────────┘
 ```
 
@@ -62,8 +61,7 @@ The system is designed around three principles:
 - **Risk engine** — Confidence thresholds, position-size caps, data-quality minimums, and human-approval gates prevent overconfident or low-quality signals from triggering action
 - **Daily ticker suggester** — Claude analyzes portfolio gaps, market themes, and peer companies to suggest new research candidates each day
 - **Audit-ready logging** — Every signal is logged with reasoning, risk flags, and token usage; a daily analyzer produces a one-page digest
-- **Hypothesis-driven validation** — A suite of read-only harnesses (H1–H4) probes signal behavior — trajectory-lag sensitivity, directional asymmetry, thesis stability, and data-quality thresholds — against the accumulated signal logs
-- **Phased rollout** — Phase 2 (read-only calibration) is complete; the system is currently in **Phase 3-A** (advisory-only live signals with empirically-calibrated thresholds), with Phase 3 (paper simulation) and Phase 4 (live trading with approval gates) planned
+- **Phased rollout** — Currently operating in Phase 2 (read-only dry runs), with Phase 3 (paper simulation) and Phase 4 (live trading with approval gates) planned
 
 ---
 
@@ -76,7 +74,6 @@ The system is designed around three principles:
 | **anthropic** | Claude API SDK |
 | **finnhub-python** | News and fundamentals data |
 | **python-dotenv** | Environment variable management |
-| **openpyxl** | Reads/writes the tracking spreadsheet for the validation harnesses |
 | **OAuth 2.0** | Authentication with Schwab |
 | **Git / GitHub** | Version control |
 
@@ -84,33 +81,15 @@ The system is designed around three principles:
 
 ## Module Breakdown
 
-### Core signal pipeline
-
 | File | Responsibility |
 |---|---|
-| `main.py` | Orchestrator — pulls portfolios, dedupes the watchlist, coordinates signal generation across modules; carries the active phase flag and the A/B test switch |
+| `main.py` | Orchestrator — pulls portfolios, dedupes the watchlist, coordinates signal generation across modules |
 | `schwab_client.py` | Data layer — authenticates with Schwab, fetches quotes and positions, handles account labeling |
 | `news_client.py` | News layer — fetches recent headlines per ticker from Finnhub |
-| `claude_signal.py` | Signal layer — builds structured prompts (including the prior-5-day price trajectory) and parses Claude's JSON responses |
+| `claude_signal.py` | Signal layer — builds structured prompts and parses Claude's JSON responses |
 | `risk_engine.py` | Decision layer — applies hardcoded rules to approve or reject signals |
 | `ticker_suggester.py` | Generative layer — proposes new tickers based on portfolio gaps, market themes, and peer analysis |
 | `analyze_log.py` | Analytics layer — produces a daily digest of signals, confidence distributions, and data quality breakdowns |
-| `parse_log_to_tracker.py` | Export layer — converts a run's signal log into paste-ready tracker rows (control arm only on A/B days) |
-
-### Research & validation tooling
-
-| File | Responsibility |
-|---|---|
-| `h1_lag_trace.py` | Hypothesis 1 — price-trajectory lag sensitivity (prior-5-day closes) |
-| `h2_direction_asymmetry.py` | Hypothesis 2 — BUY/SELL directional-asymmetry A/B harness |
-| `h3_thesis_stability.py` | Hypothesis 3 — thesis stability vs news-flow framing |
-| `h4_dq_threshold.py` | Hypothesis 4 — data-quality-conditional threshold watchdog |
-| `build_near_miss_registry.py` | Regenerates the near-miss BUY registry from the signal logs |
-| `run_daily.bat` | Windows runner — venv activate → signals → analyzer → tracker rows |
-| `run_ab_test.bat` | Windows runner — a daily pass with both prompt arms (A/B), control arm only imported |
-| `run_weekly_review.bat` | Windows runner — H1–H4 harnesses + near-miss registry rebuild |
-
-All four harnesses accept `--since` / `--until` for phase-scoped analysis (e.g. `--since 2026-06-15` isolates Phase 3-A from the certified Phase 2 window).
 
 ---
 
@@ -172,8 +151,7 @@ All four harnesses accept `--since` / `--until` for phase-scoped analysis (e.g. 
 | Phase | State | Description |
 |---|---|---|
 | **Phase 1** | ✅ Complete | Foundation — auth, quote retrieval, single-account positions |
-| **Phase 2** | ✅ Complete | Read-only calibration dry run (19 trading days, concluded 2026-06-12) — full signal pipeline, thresholds calibrated, no orders placed |
-| **Phase 3-A** | 🟡 Current | Advisory-only live signals on calibrated thresholds, with prompt A/B testing and the H1–H4 validation harnesses — still no orders placed |
+| **Phase 2** | 🟡 Current | Read-only dry runs — full signal pipeline, no orders placed |
 | **Phase 3** | ⏸️ Planned | Paper simulation — simulated order placement, no real money |
 | **Phase 4** | ⏸️ Planned | Live trading — real orders with mandatory human approval |
 
@@ -187,14 +165,14 @@ The risk engine acts as a backstop against overconfident or poorly-calibrated si
 MIN_CONFIDENCE_BUY   = 70%      # BUY signals need ≥70% confidence
 MIN_CONFIDENCE_SELL  = 65%      # SELL signals need ≥65% confidence
 MAX_POSITION_PCT     = 5.0%     # No single position above 5% of portfolio
-MAX_OPEN_POSITIONS   = 8        # Cap on total concurrent holdings
+MAX_OPEN_POSITIONS   = 30       # Cap on total concurrent holdings
 DAILY_LOSS_LIMIT     = 2.0%     # Halt new BUYs if daily portfolio loss exceeds 2%
 ALLOW_POSITION_ADD   = False    # Disallow adding to existing positions
 REQUIRE_HUMAN_APPROVAL = True   # Always require human approval (Phase 4+)
 MIN_DATA_QUALITY     = "MEDIUM" # Reject LOW-quality signals automatically
 ```
 
-These thresholds were calibrated empirically over Phase 2's 19-trading-day dry run (concluded 2026-06-12): the **50–59% confidence band** proved the best-calibrated cohort (61.3% +5-day hit rate) and now anchors the GO/NO-GO guardrail, and the **near-miss BUY tracking threshold** was set at 70%.
+These thresholds will be refined empirically after 2-3 weeks of Phase 2 data collection.
 
 ---
 
@@ -219,11 +197,8 @@ python -m venv venv
 venv\Scripts\activate   # Windows
 # source venv/bin/activate   # macOS / Linux
 
-# Install runtime dependencies (the bot)
+# Install dependencies
 pip install schwab-py anthropic finnhub-python python-dotenv flask cryptography
-
-# Install the analysis layer (openpyxl, used by the validation harnesses)
-pip install -r requirements.txt
 ```
 
 ### Configuration
@@ -244,16 +219,8 @@ Update `ACTIVE_ACCOUNTS` and `ACCOUNT_LABELS` in `schwab_client.py` with your ow
 ### Run
 
 ```bash
-python main.py            # Generate signals (single prompt arm)
+python main.py            # Generate signals
 python analyze_log.py     # Produce the daily digest
-
-# Windows convenience runners
-run_daily.bat             # venv + signals + analyzer + tracker rows
-run_ab_test.bat           # a daily run with both prompt arms (A/B)
-run_weekly_review.bat     # H1–H4 hypothesis harnesses + near-miss registry
-
-# Phase-scoped hypothesis analysis (any harness)
-python h1_lag_trace.py --since 2026-06-15
 ```
 
 ---
@@ -262,7 +229,7 @@ python h1_lag_trace.py --since 2026-06-15
 
 ### Why Phase Discipline?
 
-Algorithmic trading systems most often fail not because the strategy is wrong, but because the operator skipped validation. Phase 2 forced a minimum of 2-3 weeks of observed signals before any simulated trading began. Phase 3 forces a similar period of paper trading before any real capital is at risk.
+Algorithmic trading systems most often fail not because the strategy is wrong, but because the operator skipped validation. Phase 2 forces a minimum of 2-3 weeks of observed signals before any simulated trading begins. Phase 3 forces a similar period of paper trading before any real capital is at risk.
 
 ### Why Human Approval?
 
@@ -284,10 +251,6 @@ A 5% gain in a Roth IRA is structurally different from a 5% gain in a taxable ac
 | ETF asset-type detection | ✅ Done |
 | Daily ticker suggester | ✅ Done |
 | Daily log analyzer | ✅ Done |
-| Phase 2 calibration (confidence-band + near-miss thresholds) | ✅ Done |
-| Hypothesis harness suite (H1–H4) | ✅ Done |
-| Near-miss registry automation | ✅ Done |
-| Prompt A/B testing harness | ✅ Done |
 | SEC EDGAR fundamentals (Form 4, 8-K, earnings) | ⏸️ Phase 2.5 |
 | 10-Q management discussion summaries | ⏸️ Phase 3 |
 | Paper trading simulation | ⏸️ Phase 3 |

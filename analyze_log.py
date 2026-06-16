@@ -125,14 +125,23 @@ def parse_log(log_path: str) -> list:
     ANALYST NOTE:
         Each line contains both the Signal JSON dump (with data_quality,
         token counts, full reasoning, lastPrice) AND the summary line
-        ([PHASE 2 DRY RUN] ... | Signal: ... | Confidence: ... | Risk: ...).
+        ([PHASE <n> DRY RUN] ... | Signal: ... | Confidence: ... | Risk: ...).
 
         We parse both pieces from the same line so we can correlate
         confidence/signal type with data quality, price, and Claude's
         actual reasoning text for richer reporting.
     """
+    # ANALYST NOTE (2026-06-15): phase-agnostic tag match.
+    #   Phase 2 logged "[PHASE 2 DRY RUN]"; Phase 3-A logs "[PHASE 3-A DRY RUN]"
+    #   (single-arm) and "[PHASE 3-A DRY RUN A|B]" (A/B mode). The original
+    #   r"PHASE \d DRY RUN\]" matched ONE digit, so "3-A" matched nothing and
+    #   the run silently summarized 0 signals.
+    #     [\w.-]+   -> matches any phase label (2, 3-A, 3-B, 3.1, 4, ...)
+    #     (?: A)?   -> accepts the no-suffix single-arm form AND the control
+    #                  arm "A", while EXCLUDING variant "B" -> A/B runs report
+    #                  the control arm only, consistent with the tracker paste.
     summary_pattern = re.compile(
-        r"PHASE \d DRY RUN\] \[(?P<account>[^\]]+)\] "
+        r"PHASE [\w.-]+ DRY RUN(?: A)?\] \[(?P<account>[^\]]+)\] "
         r"\[(?P<held>HELD|SCOUT)\] (?P<ticker>\S+) \| "
         r"Signal: (?P<signal>\w+) \| "
         r"Confidence: (?P<confidence>\d+)% \| "

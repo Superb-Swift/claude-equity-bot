@@ -22,6 +22,13 @@ logs/
 ~$*.docx
 ~$*.xlsx
 ~$*.pptx
+~$*.tsv
+paste_today.tsv
+backfill.tsv
+all_may.tsv
 
 # Personal workflow docs (keep local, not in repo)
 *.docx
+
+# Tracking spreadsheet — contains personal trading outcomes
+claude_equity_bot_tracker.xlsx

@@ -31,7 +31,6 @@ from dotenv import load_dotenv
 
 from schwab_client import (
     get_quote,
-    get_price_history,
     get_all_portfolios,
     get_position_detail,
     ACCOUNT_LABELS,
@@ -48,16 +47,7 @@ load_dotenv()
 # CONFIGURATION
 # =============================================================================
 
-PHASE = "3-A"   # advisory-only dry run; set to 2 to replay the Phase 2 handler
-
-# A/B testing (H2 — direction asymmetry). When AB_TEST is True, every ticker is
-# scored under each prompt variant on identical inputs and logged separately, so
-# h2_direction_asymmetry.py can compare the arms. PROMPT_VARIANT is the single
-# arm used when AB_TEST is off. Prefer toggling via run_ab_test.bat (which sets
-# EQUITY_AB_TEST=1) over editing source, so the daily run never accidentally A/Bs.
-AB_TEST = os.environ.get("EQUITY_AB_TEST", "0") == "1"
-AB_VARIANTS = ("A", "B")
-PROMPT_VARIANT = "A"
+PHASE = 2
 
 WATCHLIST_SCOUT = [
     "SPY",
@@ -268,69 +258,12 @@ def handle_phase2(ticker: str, signal: dict, position_detail: dict,
     print(f"  >>> PHASE 2: No order placed. Signal logged to {log_filename}\n")
 
 
-def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
-                   portfolios: list, price_history: list = None,
-                   variant: str = None) -> None:
-    """
-    Phase 3-A: Advisory-only dry run WITH the H1 prior-5-day price input.
-
-    ANALYST NOTE:
-        Behaviorally identical to Phase 2 (no orders placed, human stays in
-        the loop, same Risk Engine), with two additions that make the run
-        measurable for H1:
-          1. Logs are tagged [PHASE 3-A DRY RUN] so 3-A signals are cleanly
-             separable from the Phase 2 backlog in the same log/tracker.
-          2. The H1 price trajectory the model actually saw (trailing N-day
-             move + the prior closes) is recorded on the log line, so
-             h1_lag_trace.py can measure the confidence-update lag against
-             the Phase 2 baseline.
-
-        The bracket-tag block keeps the EXACT
-            [PHASE 3-A DRY RUN] [<accounts>] [HELD|SCOUT]
-        shape that parse_log_to_tracker.py expects; the H1[...] marker is
-        appended after the existing fields and is ignored by the parser.
-    """
-    portfolio = portfolios[0] if portfolios else {}
-    approved, reason = evaluate_signal(signal, portfolio)
-
-    held_marker = "[HELD]" if position_detail.get("is_held") else "[SCOUT]"
-    accounts = ",".join(position_detail.get("held_in_accounts", []))
-    account_tag = f"[{accounts}]" if accounts else "[\u2014]"
-
-    # H1 trajectory marker — what the model saw (for the lag harness).
-    h1_tag = "H1[trajectory unavailable]"
-    if price_history:
-        closes = [p.get("close") for p in price_history if p.get("close") is not None]
-        if len(closes) >= 2 and closes[0]:
-            trail = (closes[-1] / closes[0] - 1) * 100
-            path = ">".join(f"{c:.2f}" for c in closes)
-            h1_tag = f"H1[trail{len(closes)}d={trail:+.2f}%; closes={path}]"
-
-    # phase tag carries the A/B variant when running an A/B (H2)
-    phase_tag = f"[PHASE 3-A DRY RUN{(' ' + variant) if variant else ''}]"
-    log.info(
-        f"Signal JSON: {json.dumps(signal)} | "
-        f"{phase_tag} {account_tag} {held_marker} {ticker} | "
-        f"Signal: {signal.get('signal')} | "
-        f"Confidence: {signal.get('confidence')}% | "
-        f"Risk: {'APPROVED' if approved else 'REJECTED'} | "
-        f"Reason: {reason} | "
-        f"{h1_tag}"
-    )
-
-    print_signal(signal)
-    print_risk_report(signal, portfolio)
-    print(f"  >>> PHASE 3-A (advisory-only): No order placed. "
-          f"Signal logged to {log_filename}\n")
-
-
 # =============================================================================
 # CORE PROCESSING
 # =============================================================================
 
 def process_ticker(ticker: str, portfolios: list,
-                   quote_cache: dict, news_cache: dict,
-                   history_cache: dict) -> None:
+                   quote_cache: dict, news_cache: dict) -> None:
     """
     Process a single ticker ONCE across all accounts.
 
@@ -363,16 +296,6 @@ def process_ticker(ticker: str, portfolios: list,
             f"{ticker} | Price: ${quote.get('lastPrice', 'N/A')} | "
             f"Change: {quote.get('netPercentChange', 0):.2f}%"
         )
-
-        # Prior-5-day price trajectory (H1) — cached
-        if ticker in history_cache:
-            price_history = history_cache[ticker]
-        else:
-            price_history = get_price_history(ticker, days=5)
-            history_cache[ticker] = price_history
-
-        if price_history:
-            log.info(f"{ticker} | Prior {len(price_history)} closes loaded for H1 trajectory")
 
         # News (cached)
         if ticker in news_cache:
@@ -407,32 +330,22 @@ def process_ticker(ticker: str, portfolios: list,
         else:
             log.info(f"[SCOUT] {ticker} | Not currently held")
 
-        # Generate the signal(s) for this ticker — one per A/B variant when
-        # AB_TEST is on (H2), a single variant otherwise. Both arms see
-        # identical inputs (same quote, news, position, price history).
+        # Generate ONE signal for this ticker (not per account)
         log.info(f"Requesting Claude signal for {ticker}...")
-        variants = AB_VARIANTS if AB_TEST else (PROMPT_VARIANT,)
-        for variant in variants:
-            signal = get_signal(
-                ticker=ticker,
-                quote=quote,
-                position=position_context,
-                headlines=headlines,
-                metrics=None,
-                price_history=price_history,
-                prompt_variant=variant
-            )
+        signal = get_signal(
+            ticker=ticker,
+            quote=quote,
+            position=position_context,
+            headlines=headlines,
+            metrics=None
+        )
 
-            signal["lastPrice"] = quote.get("lastPrice", 0)
-            tag_variant = variant if AB_TEST else None
+        signal["lastPrice"] = quote.get("lastPrice", 0)
 
-            if PHASE == 2:
-                handle_phase2(ticker, signal, position_detail, portfolios)
-            elif PHASE in ("3-A", "3A", 3):
-                handle_phase3a(ticker, signal, position_detail, portfolios,
-                               price_history, variant=tag_variant)
-            else:
-                log.error(f"Phase {PHASE} handler not implemented in this build.")
+        if PHASE == 2:
+            handle_phase2(ticker, signal, position_detail, portfolios)
+        else:
+            log.error(f"Phase {PHASE} handler not implemented in this build.")
 
     except Exception as e:
         log.error(f"Error processing {ticker}: {e}")
@@ -534,12 +447,11 @@ def run_bot():
     log.info("#"*60)
 
     # STEP 4: Process each ticker with shared caches
-    quote_cache   = {}
-    news_cache    = {}
-    history_cache = {}
+    quote_cache = {}
+    news_cache  = {}
 
     for ticker in watchlist:
-        process_ticker(ticker, portfolios, quote_cache, news_cache, history_cache)
+        process_ticker(ticker, portfolios, quote_cache, news_cache)
 
     # STEP 5: Generate ticker suggestions
     if ENABLE_SUGGESTIONS:

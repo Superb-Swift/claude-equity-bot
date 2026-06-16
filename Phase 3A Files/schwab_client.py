@@ -16,7 +16,6 @@
 
 import os
 import schwab
-from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -158,51 +157,6 @@ def get_quote(ticker: str) -> dict:
     except Exception as e:
         print(f"[schwab_client] Error fetching quote for {ticker}: {e}")
         return {}
-
-
-# =============================================================================
-# PRICE HISTORY  (H1 — prior-5-day price input)
-# =============================================================================
-
-def get_price_history(ticker: str, days: int = 5) -> list:
-    """
-    Fetch the prior `days` COMPLETED daily closes for a ticker.
-
-    ANALYST NOTE (H1):
-        Phase 2's strongest finding was a 3-5 day confidence update lag —
-        the model's confidence trailed price moves by several sessions
-        (the WMT trace: held 62% through three ~-11% losses, then caught
-        up only as the losses shrank). H1 feeds the recent closing path
-        into the prompt so the model can react to the move now, not later.
-
-        Returns the most recent `days` sessions that have ALREADY closed
-        (today's in-progress candle is excluded), oldest-first:
-            [{"date": "2026-06-05", "close": 211.97}, ...]
-        Returns [] on failure; the prompt builder degrades gracefully.
-    """
-    try:
-        client = get_client()
-        # schwab-py daily-candle convenience method (returns ~1y of candles).
-        response = client.get_price_history_every_day(ticker)
-        candles = response.json().get("candles", [])
-
-        today = datetime.now().date()
-        closes = []
-        for c in candles:
-            ts = c.get("datetime")
-            close = c.get("close")
-            if ts is None or close is None:
-                continue
-            # Schwab candle 'datetime' is epoch milliseconds.
-            cdate = datetime.fromtimestamp(ts / 1000).date()
-            if cdate < today:                 # completed sessions only
-                closes.append({"date": cdate.isoformat(), "close": close})
-
-        return closes[-days:]
-
-    except Exception as e:
-        print(f"[schwab_client] Error fetching price history for {ticker}: {e}")
-        return []
 
 
 # =============================================================================

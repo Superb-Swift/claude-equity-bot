@@ -1,0 +1,17 @@
+I'm continuing work on my claude-equity-bot project. Context:
+- Phase 2 (read-only dry run), Day 5+ of ~15-day test period
+- Two Schwab accounts: Roth IRA + Individual (margin)
+- Stack: Python, schwab-py, anthropic SDK, finnhub, Flask
+- All code at C:\Users\rober\claude-equity-bot
+- GitHub: github.com/Superb-Swift/claude-equity-bot
+- Currently tracking signal outcomes manually in xlsx tracker
+- Recent enhancement: tiered analyzer with near-miss + low-conf HOLD sections
+- Next steps: continue daily runs, fill tracker, evaluate ~June 10
+
+Today's questions: [my question]
+ Some ideas:
+	- The reasoning for CORN is consistently signaling "available news is tangentially related to commodities broadly rather than corn fundamentals specifically.", what would it take to fill that gap between not having the commodities news and corn fundamentals specifically? 
+	- How do I avoid increasing costs to get the info that could enhance reasoning?
+	- maybe asking about https://www.barchart.com/etfs-funds/quotes/CORN/news
+
+WeatherWealth and "Remember when trading commodities, always deploy a risk management strategy, such as stop-loss orders and position sizing, and consider using calendar spreads to isolate the seasonal component of a particular market move."
