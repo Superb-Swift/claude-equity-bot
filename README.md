@@ -288,8 +288,7 @@ A 5% gain in a Roth IRA is structurally different from a 5% gain in a taxable ac
 | Hypothesis harness suite (H1–H4) | ✅ Done |
 | Near-miss registry automation | ✅ Done |
 | Prompt A/B testing harness | ✅ Done |
-| SEC EDGAR fundamentals (Form 4, 8-K, earnings) | ⏸️ Phase 2.5 |
-| 10-Q management discussion summaries | ⏸️ Phase 3 |
+| SEC/EDGAR filing context (Form 4, 8-K, 10-Q/10-K MD&A, fundamentals) | ⏸️ Phase 3 |
 | Paper trading simulation | ⏸️ Phase 3 |
 | Email daily digest | ⏸️ Backlog |
 | Scheduled execution (Task Scheduler) | ⏸️ Backlog |

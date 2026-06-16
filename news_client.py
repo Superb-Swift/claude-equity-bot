@@ -103,6 +103,8 @@ def get_recent_headlines(ticker: str, days_back: int = 7,
         if not articles:
             return []
 
+        articles = sorted(articles, key=lambda a: a.get("datetime", 0), reverse=True)  # guarantee newest-first
+
         # Build headlines list — format as "Source: Headline"
         # ANALYST NOTE: Including the source gives Claude context about
         # credibility. A Bloomberg headline carries different weight than
@@ -152,6 +154,8 @@ def get_headlines_with_summaries(ticker: str, days_back: int = 7,
 
         if not articles:
             return []
+
+        articles = sorted(articles, key=lambda a: a.get("datetime", 0), reverse=True)  # guarantee newest-first
 
         results = []
         for article in articles[:limit]:
