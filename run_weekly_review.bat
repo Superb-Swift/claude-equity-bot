@@ -3,9 +3,12 @@ REM ===========================================================================
 REM run_weekly_review.bat  —  periodic (weekly) analysis, READ-ONLY on tracker
 REM ===========================================================================
 REM PURPOSE:
-REM   Runs the four hypothesis harnesses and regenerates the near-miss
-REM   registry in one go. None of these touch the bot or place orders; they
-REM   only read the tracker, and each prints the 50-59% calibration guardrail.
+REM   Runs the four hypothesis harnesses, regenerates the near-miss registry,
+REM   and refreshes the guardrail-compression trace in one go. None of these
+REM   touch the bot or place orders; they only READ the original tracker. The
+REM   registry tab and the trace chart are written into a COPY
+REM   (tracker_with_registry.xlsx) — the original is never modified — and the
+REM   harnesses print the 50-59% calibration guardrail.
 REM
 REM   This is NOT part of the daily routine — run it weekly (or after a
 REM   meaningful batch of new outcomes) during the reflection step.
@@ -15,9 +18,10 @@ REM     C:\Users\rober\claude-equity-bot> run_weekly_review.bat
 REM
 REM ANALYST NOTE:
 REM   The tracker lives in logs\, but every tool defaults to the bare
-REM   filename, so we pass --tracker explicitly. Markdown exhibits land in
-REM   the project root (override with --out-dir on any single tool). A tool
-REM   erroring prints and continues; the others still run.
+REM   filename, so we pass --tracker explicitly. Markdown exhibits + the
+REM   refreshed tracker_with_registry.xlsx land in the project root (override
+REM   with --out-dir on any single tool). A tool erroring prints and
+REM   continues; the others still run.
 REM ===========================================================================
 
 setlocal
@@ -32,10 +36,11 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ---- Ensure openpyxl is present (the harnesses + registry need it) ----
-python -c "import openpyxl" 2>nul || (
-    echo openpyxl not found - installing into the active venv...
-    python -m pip install openpyxl
+REM ---- Ensure openpyxl + Pillow are present (registry needs openpyxl; the ----
+REM ---- guardrail-trace embed needs matplotlib + Pillow for the chart image) ----
+python -c "import openpyxl, matplotlib, PIL" 2>nul || (
+    echo dependencies missing - installing into the active venv...
+    python -m pip install openpyxl matplotlib pillow
 )
 
 echo.
@@ -57,7 +62,18 @@ python h4_dq_threshold.py --tracker "%TRACKER%"
 
 echo.
 echo ===================== Near-miss registry ========================
-python build_near_miss_registry.py --tracker "%TRACKER%"
+REM --emit-master-copy regenerates the Near-Miss tab inside a COPY
+REM (tracker_with_registry.xlsx); the original tracker is never touched.
+python build_near_miss_registry.py --tracker "%TRACKER%" --emit-master-copy
+
+echo.
+echo ================= Guardrail compression trace ===================
+REM Reads the original tracker (cached outcomes) for the trajectory, then
+REM embeds a refreshed 'Guardrail Trace' sheet (table + chart) into the
+REM registry copy from the step above, producing one tracker_with_registry.xlsx
+REM that carries both the refreshed registry and the chart.
+python guardrail_trace.py --tracker "%TRACKER%" --embed-into tracker_with_registry.xlsx
+echo   (open tracker_with_registry.xlsx in Excel to refresh the formula cache)
 
 echo.
 echo ============================================================

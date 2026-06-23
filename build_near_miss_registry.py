@@ -622,14 +622,29 @@ def main(argv=None):
         # then importing — simplest robust path: load our fresh file and copy cells.
         src = openpyxl.load_workbook(xlsx_path)["Near-Miss BUYs"]
         dst = wb.create_sheet("Near-Miss BUYs")
+        from copy import copy as _copy
         for row in src.iter_rows():
             for c in row:
                 nc = dst.cell(row=c.row, column=c.column, value=c.value)
                 if c.has_style:
-                    nc._style = c._style
+                    # Copy style ATTRIBUTES, not the _style index. StyleArray indices
+                    # point into the SOURCE workbook's number-format/font tables and
+                    # scramble when reused in a different workbook; strings/objects are
+                    # portable. (Symptom of the bug: price cells render as 1900 dates.)
+                    nc.number_format = c.number_format
+                    nc.font = _copy(c.font)
+                    nc.fill = _copy(c.fill)
+                    nc.border = _copy(c.border)
+                    nc.alignment = _copy(c.alignment)
         for dim, d in src.column_dimensions.items():
-            dst.column_dimensions[dim].width = d.width
+            if d.width:
+                dst.column_dimensions[dim].width = d.width
+        for mc in list(src.merged_cells.ranges):
+            dst.merge_cells(str(mc))
         dst.freeze_panes = src.freeze_panes
+        # keep the canonical tab order (Near-Miss BUYs back to position 3)
+        idx = wb.sheetnames.index("Near-Miss BUYs")
+        wb.move_sheet("Near-Miss BUYs", offset=2 - idx)
         wb.save(copy_path)
         print(f"Wrote: {copy_path}  (COPY — original untouched; recalc in Excel/"
               "LibreOffice to refresh formula cache)")
