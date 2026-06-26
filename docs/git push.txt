@@ -1,0 +1,5 @@
+cd C:\Users\rober\claude-equity-bot
+git status
+git add -A
+git commit -m "Phase 3-A Day 6 (6/23): first live +5d (6/15 cohort), guardrail/registry/notes refresh"
+git push

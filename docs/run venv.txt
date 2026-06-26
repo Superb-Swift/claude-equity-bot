@@ -1,0 +1,3 @@
+cmd
+cd claude-equity-bot
+venv\Scripts\activate
