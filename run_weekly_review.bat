@@ -48,15 +48,6 @@ echo ===================== H1 - update lag (WMT) =====================
 python h1_lag_trace.py --tracker "%TRACKER%" --ticker WMT
 
 echo.
-echo ===================== H3 - thesis stability =====================
-python h3_thesis_stability.py --tracker "%TRACKER%"
-
-echo.
-echo ============== H2 - direction asymmetry (baseline) ==============
-python h2_direction_asymmetry.py --tracker "%TRACKER%"
-echo   (after an A/B stretch: python h2_direction_asymmetry.py --logs "logs\signals_*.log")
-
-echo.
 echo ================== H4 - DQ watchdog (demoted) ===================
 python h4_dq_threshold.py --tracker "%TRACKER%"
 
