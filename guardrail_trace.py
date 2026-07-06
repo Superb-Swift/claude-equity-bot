@@ -77,6 +77,18 @@ def is_hit(v):
     return str(v).strip().upper() == "YES"
 
 
+def regime_of(cohort_hit):
+    """Map a cohort-wide +5d hit rate to its regime label. Single source of truth
+    for both the scoreboard's Regime column and the --stratify-regime mode."""
+    if cohort_hit is None:
+        return "\u2013"   # en-dash: no resolved signals
+    if cohort_hit < REGIME_COMPRESSED:
+        return "compressed"
+    if cohort_hit > REGIME_CLEAN:
+        return "clean"
+    return "mixed"
+
+
 def load_cohorts(tracker, since, until):
     """Return ordered list of (date, {band: [hits, n]}) for resolved +5d signals."""
     wb = openpyxl.load_workbook(tracker, data_only=True, read_only=True)
@@ -342,14 +354,7 @@ def build_scoreboard(cohorts, totals, series, dates, phase3a_start):
         idx = date_index[d]
         cl, cr = series[L][idx], series[R][idx]
         cum_lead = (cl - cr) if (cl is not None and cr is not None) else None
-        if cohort_hit is None:
-            regime = "–"
-        elif cohort_hit < REGIME_COMPRESSED:
-            regime = "compressed"
-        elif cohort_hit > REGIME_CLEAN:
-            regime = "clean"
-        else:
-            regime = "mixed"
+        regime = regime_of(cohort_hit)
         rows.append(dict(date=d, n=tn, l_h=l_h, l_n=l_n, l_rate=l_rate, held=held,
                          order=order, cum_lead=cum_lead, cohort_hit=cohort_hit,
                          regime=regime))
@@ -468,6 +473,175 @@ def embed_scoreboard_sheet(rows, embed_path, as_of):
     wb.save(embed_path)
 
 
+def stratify_by_regime(cohorts, totals, phase3a_start):
+    """Pool 50-59% vs 60-69% (+5d) outcomes WITHIN each regime stratum, split by
+    phase (Phase 2 = before phase3a_start, Phase 3-A = on/after). Also pools a
+    'non-compressed' stratum (mixed + clean) and an 'ALL' stratum per phase.
+
+    Returns: {phase: {stratum: {LEAD:[h,n], RIVAL:[h,n], "_cohorts":[date,...]}}}
+    The decisive cell for 're-litigating' Q1 is Phase-2 / non-compressed: if the
+    50-59 lead is real there, the certified guardrail was not just a compressed
+    artifact."""
+    L, R = LEAD_BAND, RIVAL_BAND
+    phases = ("Phase 2", "Phase 3-A")
+    strat = {p: defaultdict(lambda: {L: [0, 0], R: [0, 0], "_cohorts": []})
+             for p in phases}
+
+    def add(phase, stratum, d, bands):
+        cell = strat[phase][stratum]
+        for b in (L, R):
+            h, n = bands.get(b, [0, 0])
+            cell[b][0] += h
+            cell[b][1] += n
+        cell["_cohorts"].append(d)
+
+    for d, bands in cohorts:
+        phase = "Phase 3-A" if d >= phase3a_start else "Phase 2"
+        th, tn = totals.get(d, [0, 0])
+        reg = regime_of((th / tn) if tn else None)
+        add(phase, reg, d, bands)
+        if reg in ("mixed", "clean"):
+            add(phase, "non-compressed", d, bands)
+        add(phase, "ALL", d, bands)
+    return strat
+
+
+def _stratum_stats(cell):
+    """(lead_hits, lead_n, lead_rate, rival_hits, rival_n, rival_rate, lead_gap, n_cohorts)."""
+    L, R = LEAD_BAND, RIVAL_BAND
+    lh, ln = cell[L]
+    rh, rn = cell[R]
+    lr = (lh / ln) if ln else None
+    rr = (rh / rn) if rn else None
+    gap = (lr - rr) if (lr is not None and rr is not None) else None
+    return lh, ln, lr, rh, rn, rr, gap, len(cell["_cohorts"])
+
+
+# A non-compressed Phase-2 lead below this (in points) is treated as "not a real
+# lead" -> the certified guardrail would then be a compressed-regime artifact.
+ARTIFACT_THRESHOLD = 0.03
+
+
+def verdict_lines(strat):
+    """Plain-prose verdict sentences, shared by the console print and the .md."""
+    def gap(phase, s):
+        if s not in strat[phase]:
+            return None
+        return _stratum_stats(strat[phase][s])[6]
+    p2_comp = gap("Phase 2", "compressed")
+    p2_nc = gap("Phase 2", "non-compressed")
+    p2_clean = gap("Phase 2", "clean")
+    p2_mix = gap("Phase 2", "mixed")
+    p2_all = gap("Phase 2", "ALL")
+    p3_nc = gap("Phase 3-A", "non-compressed")
+    p3_all = gap("Phase 3-A", "ALL")
+
+    def pt(x):
+        return "n/a" if x is None else f"{x * 100:+.1f}pt"
+
+    out = []
+    if p2_nc is None:
+        out.append("Insufficient non-compressed Phase 2 data to rule on the question.")
+        return out
+
+    if p2_nc < ARTIFACT_THRESHOLD:
+        out.append(f"Phase 2 50-59 lead in NON-COMPRESSED cohorts is only {pt(p2_nc)} "
+                   f"(compressed {pt(p2_comp)}).")
+        out.append("=> The certified +61.3% guardrail was largely a REGIME ARTIFACT, carried "
+                   "by compressed/down cohorts. Its live failure is mechanically expected: the "
+                   "50-59 > 60-69 ordering was never a calibration law in normal regimes, so it "
+                   "does not generalize to the live (mostly non-compressed) cohorts.")
+    else:
+        out.append(f"Phase 2 50-59 STILL leads in NON-COMPRESSED cohorts: {pt(p2_nc)} "
+                   f"(mixed {pt(p2_mix)}, clean {pt(p2_clean)}; compressed {pt(p2_comp)}, "
+                   f"all-Phase-2 {pt(p2_all)}).")
+        out.append("=> The guardrail was NOT merely a compressed-regime artifact: 50-59 led "
+                   "60-69 across regimes in Phase 2, INCLUDING clean cohorts.")
+        if p3_nc is not None:
+            out.append(f"Yet within the SAME non-compressed regimes, Phase 3-A shows {pt(p3_nc)} "
+                       f"(all-live {pt(p3_all)}).")
+            if p3_nc < 0:
+                out.append("The relationship has FLIPPED between Phase 2 and now within the same "
+                           "regime stratum -> the more interesting story: SOMETHING CHANGED "
+                           "between Phase 2 and live, and regime composition does not explain it. "
+                           "Candidates: a market/volatility shift the hit-rate flag doesn't "
+                           "capture, signal-generator drift between phases (checkable vs the "
+                           "logs), temporal overfitting of Q1, or live small-sample noise.")
+    out.append("NOTE: strata pool small n (especially live 60-69) — read leads as directional, "
+               "weight by n, and let additional live cohorts firm the sign.")
+    return out
+
+
+_STRAT_ORDER = ["compressed", "mixed", "clean", "non-compressed", "ALL"]
+
+
+def print_stratification(strat, phase3a_start):
+    print("\n" + "=" * 72)
+    print("PHASE 2 Q1 RE-EXAMINATION  —  50-59% vs 60-69% (+5d) WITHIN REGIME")
+    print("=" * 72)
+    print(f"Regime = cohort-wide +5d hit rate (compressed <{REGIME_COMPRESSED:.0%}, "
+          f"clean >{REGIME_CLEAN:.0%}, else mixed). Split at {phase3a_start.isoformat()}.")
+    for phase in ("Phase 2", "Phase 3-A"):
+        print(f"\n  {phase}")
+        print(f"    {'stratum':<15}{'coh':>4}  {'50-59% (n)':>14}  "
+              f"{'60-69% (n)':>14}  {'lead':>9}")
+        print("    " + "-" * 62)
+        for s in _STRAT_ORDER:
+            if s not in strat[phase]:
+                continue
+            lh, ln, lr, rh, rn, rr, gap, nc = _stratum_stats(strat[phase][s])
+            ls = f"{lr:.1%} ({ln})" if lr is not None else f"-- ({ln})"
+            rs = f"{rr:.1%} ({rn})" if rr is not None else f"-- ({rn})"
+            gs = f"{gap * 100:+.1f}pt" if gap is not None else "--"
+            mark = "  *" if s == "non-compressed" else ""
+            print(f"    {s:<15}{nc:>4}  {ls:>14}  {rs:>14}  {gs:>9}{mark}")
+    print("\n  " + "-" * 62)
+    print("  VERDICT")
+    for p in verdict_lines(strat):
+        print("  " + p)
+
+
+def write_stratification_md(strat, out_dir, as_of, phase3a_start):
+    L, R = LEAD_BAND, RIVAL_BAND
+    out = []
+    out.append("# Phase 2 Q1 Re-Examination — 50-59% vs 60-69% by Regime")
+    out.append("")
+    out.append(f"*Generated {as_of} · regime = cohort-wide +5d hit rate "
+               f"(compressed &lt;{REGIME_COMPRESSED:.0%}, clean &gt;{REGIME_CLEAN:.0%}, "
+               f"else mixed) · phases split at {phase3a_start.isoformat()} · +5d "
+               f"directional outcomes only*")
+    out.append("")
+    out.append("**Question.** Was the certified **+61.3%** Phase 2 lead of the 50-59% band a "
+               "real, regime-robust calibration feature, or an artifact carried by "
+               "compressed/down cohorts? The decisive cell is the **non-compressed** "
+               "(mixed + clean) Phase 2 row.")
+    out.append("")
+    for phase in ("Phase 2", "Phase 3-A"):
+        out.append(f"## {phase}")
+        out.append("")
+        out.append("| Stratum | Cohorts | 50-59% (n) | 60-69% (n) | Lead (50-59 − 60-69) |")
+        out.append("|---|---:|---:|---:|---:|")
+        for s in _STRAT_ORDER:
+            if s not in strat[phase]:
+                continue
+            lh, ln, lr, rh, rn, rr, gap, nc = _stratum_stats(strat[phase][s])
+            ls = f"{lr:.1%} ({ln})" if lr is not None else f"\u2013 ({ln})"
+            rs = f"{rr:.1%} ({rn})" if rr is not None else f"\u2013 ({rn})"
+            gs = f"**{gap * 100:+.1f}pt**" if gap is not None else "\u2013"
+            label = f"**{s}**" if s == "non-compressed" else s
+            out.append(f"| {label} | {nc} | {ls} | {rs} | {gs} |")
+        out.append("")
+    out.append("## Verdict")
+    out.append("")
+    for p in verdict_lines(strat):
+        out.append(p.replace("=>", "**\u2192**"))
+        out.append("")
+    path = os.path.join(out_dir, "regime_stratification.md")
+    with open(path, "w", newline="\n") as f:
+        f.write("\n".join(out).rstrip() + "\n")
+    return path
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Trace confidence-band guardrail "
                                              "compression cohort-by-cohort.")
@@ -481,6 +655,10 @@ def main(argv=None):
     ap.add_argument("--phase3a-start", default=PHASE3A_START.isoformat(),
                     help="YYYY-MM-DD first live cohort for the scoreboard "
                          f"(default {PHASE3A_START.isoformat()})")
+    ap.add_argument("--stratify-regime", action="store_true",
+                    help="also pool 50-59 vs 60-69 (+5d) WITHIN compressed/mixed/clean "
+                         "regimes, split Phase 2 vs Phase 3-A; prints a table + verdict "
+                         "and writes regime_stratification.md to --out-dir")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.tracker):
@@ -522,6 +700,12 @@ def main(argv=None):
     totals = load_cohort_totals(args.tracker, since, until)
     sb_rows = build_scoreboard(cohorts, totals, series, dates, phase3a_start)
     print_scoreboard(sb_rows)
+
+    if args.stratify_regime:
+        strat = stratify_by_regime(cohorts, totals, phase3a_start)
+        print_stratification(strat, phase3a_start)
+        sp = write_stratification_md(strat, args.out_dir, dates[-1], phase3a_start)
+        print(f"\nWrote: {sp}")
 
     if args.embed_into:
         if not os.path.exists(args.embed_into):

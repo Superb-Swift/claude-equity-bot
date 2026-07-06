@@ -1,6 +1,6 @@
 # Near-Miss BUY Registry — auto-generated
 
-*Source: `t26.xlsx` · Signals tab · generated 2026-06-26 22:11. Near-miss band [60%, 70%); +Nd = trading days (weekends + NYSE holidays excluded). Prices/returns sourced from Signals, never transcribed.*
+*Source: `claude_equity_bot_tracker.xlsx` · Signals tab · generated 2026-06-29 15:14. Near-miss band [60%, 70%); +Nd = trading days (weekends + NYSE holidays excluded). Prices/returns sourced from Signals, never transcribed.*
 
 **Total near-miss BUYs: 19**  (LOCKED 7 + EXTENDED 12)
 
@@ -24,7 +24,7 @@
 *Signals after 2026-06-01. Outcomes fill over time; corroboration only.*
 
 - n = **12** · completed +5d = 12 · hit +5d = **5/12** (41.7%) · avg +5d = **-2.4%**
-- completed +10d = 8 · hit +10d = **0/8** (0.0%) · avg +10d = **-4.2%**
+- completed +10d = 10 · hit +10d = **1/10** (10.0%) · avg +10d = **-3.9%**
 
 | Signal Date | Ticker | Acct | Conf | DQ | Price | +5d Date | +5d Ret | Right 5d | +10d Date | +10d Ret | Right 10d |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -36,8 +36,8 @@
 | 2026-06-08 | NVDA | Scout | 68.0% | MEDIUM | $208.41 | 2026-06-15 | +1.9% | YES | 2026-06-23 | -4.0% | NO |
 | 2026-06-09 | NVDA | Scout | 68.0% | MEDIUM | $207.40 | 2026-06-16 | +0.0% | YES | 2026-06-24 | -4.1% | NO |
 | 2026-06-11 | NVDA | Scout | 65.0% | MEDIUM | $199.94 | 2026-06-18 | +5.1% | YES | 2026-06-26 | -3.7% | NO |
-| 2026-06-12 | NVDA | Scout | 62.0% | MEDIUM | $205.60 | 2026-06-22 | +1.5% | YES | 2026-06-29 | pending | — |
-| 2026-06-12 | VTI | Scout | 68.0% | HIGH | $365.62 | 2026-06-22 | +0.9% | YES | 2026-06-29 | pending | — |
+| 2026-06-12 | NVDA | Scout | 62.0% | MEDIUM | $205.60 | 2026-06-22 | +1.5% | YES | 2026-06-29 | -5.2% | NO |
+| 2026-06-12 | VTI | Scout | 68.0% | HIGH | $365.62 | 2026-06-22 | +0.9% | YES | 2026-06-29 | +0.4% | YES |
 | 2026-06-16 | NVDA | Scout | 65.0% | MEDIUM | $209.12 | 2026-06-24 | -4.8% | NO | 2026-07-01 | pending | — |
 | 2026-06-16 | VTI | Scout | 68.0% | HIGH | $372.15 | 2026-06-24 | -2.3% | NO | 2026-07-01 | pending | — |
 
