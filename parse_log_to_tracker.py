@@ -65,7 +65,12 @@ from pathlib import Path
 #      Accounts can be "Roth IRA", "Individual", "Roth IRA,Individual",
 #      or "—" (em-dash for scout signals).
 JSON_RE    = re.compile(r'Signal JSON:\s*(\{)')
-ACCOUNT_RE = re.compile(r'\[PHASE (?:2 DRY RUN|3-A[^\]]*)\]\s+\[([^\]]+)\]\s+\[(HELD|SCOUT)\]')
+# ANALYST NOTE (2026-07-06, WS2 deploy): phase-agnostic tag match — mirrors
+#   the 2026-06-15 analyze_log.py fix. The original alternation hardcoded
+#   "2 DRY RUN|3-A...", so the Phase 3-B cutover would have silently imported
+#   every row with Account="Unknown" (the same failure class analyze_log hit
+#   at the 3-A cutover). [\w.-]+ matches any phase label (2, 3-A, 3-B, ...).
+ACCOUNT_RE = re.compile(r'\[PHASE [\w.-]+[^\]]*\]\s+\[([^\]]+)\]\s+\[(HELD|SCOUT)\]')
 
 
 def extract_json(line, start_idx):

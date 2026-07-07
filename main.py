@@ -37,9 +37,11 @@ from schwab_client import (
     ACCOUNT_LABELS,
 )
 from claude_signal    import get_signal, print_signal
-from risk_engine      import evaluate_signal, print_risk_report, calculate_position_size
+from risk_engine      import (evaluate_signal, print_risk_report,
+                              calculate_position_size, apply_conf_damping)
 from news_client      import get_recent_headlines
 from ticker_suggester import suggest_tickers, print_suggestions, log_suggestions
+from signal_state     import load_signal_state, save_signal_state, update_signal_state
 
 load_dotenv()
 
@@ -48,7 +50,7 @@ load_dotenv()
 # CONFIGURATION
 # =============================================================================
 
-PHASE = "3-A"   # advisory-only dry run; set to 2 to replay the Phase 2 handler
+PHASE = "3-B"   # advisory-only development (WS2 live); set to 2 to replay the Phase 2 handler
 
 # A/B testing (H2 — direction asymmetry). When AB_TEST is True, every ticker is
 # scored under each prompt variant on identical inputs and logged separately, so
@@ -57,7 +59,12 @@ PHASE = "3-A"   # advisory-only dry run; set to 2 to replay the Phase 2 handler
 # EQUITY_AB_TEST=1) over editing source, so the daily run never accidentally A/Bs.
 AB_TEST = os.environ.get("EQUITY_AB_TEST", "0") == "1"
 AB_VARIANTS = ("A", "B")
-PROMPT_VARIANT = "A"
+# ANALYST NOTE (2026-07-06, WS2): "A-S1D1" is a generator-ERA stamp, not an
+#   A/B arm — the single live arm continues. S1 = prior-signal state input;
+#   D1 = the confidence-damping rule (risk_engine.apply_conf_damping). Never
+#   set this to bare "B": build_system_prompt() and the tracker parser both
+#   treat exact "B" as the retired H2 experimental arm.
+PROMPT_VARIANT = "A-S1D1"
 
 WATCHLIST_SCOUT = [
     "SPY",
@@ -270,7 +277,7 @@ def handle_phase2(ticker: str, signal: dict, position_detail: dict,
 
 def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
                    portfolios: list, price_history: list = None,
-                   variant: str = None) -> None:
+                   variant: str = None, prior_signals: list = None) -> None:
     """
     Phase 3-A: Advisory-only dry run WITH the H1 prior-5-day price input.
 
@@ -291,6 +298,14 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
         appended after the existing fields and is ignored by the parser.
     """
     portfolio = portfolios[0] if portfolios else {}
+
+    # WS2 Lever A (H1 feature-level): mechanical confidence damping runs
+    # BEFORE the risk engine, so risk, print, log, and tracker all see the
+    # OPERATIVE confidence. apply_conf_damping only ever lowers confidence
+    # and always stamps signal["confidence_raw"] — the raw (model-side)
+    # channel stays auditable on every line.
+    signal, damp_meta = apply_conf_damping(signal, price_history)
+
     approved, reason = evaluate_signal(signal, portfolio)
 
     held_marker = "[HELD]" if position_detail.get("is_held") else "[SCOUT]"
@@ -306,8 +321,26 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
             path = ">".join(f"{c:.2f}" for c in closes)
             h1_tag = f"H1[trail{len(closes)}d={trail:+.2f}%; closes={path}]"
 
-    # phase tag carries the A/B variant when running an A/B (H2)
-    phase_tag = f"[PHASE 3-A DRY RUN{(' ' + variant) if variant else ''}]"
+    # S1 tag — the prior-signal state the model saw (two-channel harness).
+    if prior_signals:
+        s1_tag = ("S1[prior=" +
+                  ",".join(str(int(p.get("conf", 0))) for p in prior_signals) +
+                  f"; dconf={int(prior_signals[-1].get('conf', 0)) - int(prior_signals[0].get('conf', 0)):+d}]")
+    else:
+        s1_tag = "S1[no prior state]"
+
+    # D tag — Lever A audit trail (raw vs operative confidence).
+    if damp_meta.get("trail") is None:
+        d_tag = "D[trail n/a]"
+    else:
+        d_tag = (f"D[raw={damp_meta['raw']}; op={damp_meta['op']}; "
+                 f"trail={damp_meta['trail']:+.2f}%; damp={damp_meta['damp']}]")
+
+    # phase tag carries the A/B variant when running an A/B (H2).
+    # ANALYST NOTE (2026-07-06): the tag must keep the literal "DRY RUN" —
+    #   analyze_log.py's summary_pattern anchors on it. The phase token itself
+    #   is regex-agnostic on both parsers as of this deploy.
+    phase_tag = f"[PHASE {PHASE} DRY RUN{(' ' + variant) if variant else ''}]"
     log.info(
         f"Signal JSON: {json.dumps(signal)} | "
         f"{phase_tag} {account_tag} {held_marker} {ticker} | "
@@ -315,12 +348,12 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
         f"Confidence: {signal.get('confidence')}% | "
         f"Risk: {'APPROVED' if approved else 'REJECTED'} | "
         f"Reason: {reason} | "
-        f"{h1_tag}"
+        f"{h1_tag} | {s1_tag} | {d_tag}"
     )
 
     print_signal(signal)
     print_risk_report(signal, portfolio)
-    print(f"  >>> PHASE 3-A (advisory-only): No order placed. "
+    print(f"  >>> PHASE {PHASE} (advisory-only): No order placed. "
           f"Signal logged to {log_filename}\n")
 
 
@@ -330,7 +363,7 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
 
 def process_ticker(ticker: str, portfolios: list,
                    quote_cache: dict, news_cache: dict,
-                   history_cache: dict) -> None:
+                   history_cache: dict, signal_state: dict) -> None:
     """
     Process a single ticker ONCE across all accounts.
 
@@ -412,6 +445,11 @@ def process_ticker(ticker: str, portfolios: list,
         # identical inputs (same quote, news, position, price history).
         log.info(f"Requesting Claude signal for {ticker}...")
         variants = AB_VARIANTS if AB_TEST else (PROMPT_VARIANT,)
+
+        # WS2 Lever B (S1): the model's own prior outputs for this ticker —
+        # RAW confidences (state is updated with confidence_raw below), so
+        # the model-side channel is never contaminated by Lever A's damping.
+        prior_signals = signal_state.get(ticker, [])
         for variant in variants:
             signal = get_signal(
                 ticker=ticker,
@@ -420,6 +458,7 @@ def process_ticker(ticker: str, portfolios: list,
                 headlines=headlines,
                 metrics=None,
                 price_history=price_history,
+                prior_signals=prior_signals,
                 prompt_variant=variant
             )
 
@@ -428,11 +467,27 @@ def process_ticker(ticker: str, portfolios: list,
 
             if PHASE == 2:
                 handle_phase2(ticker, signal, position_detail, portfolios)
-            elif PHASE in ("3-A", "3A", 3):
+            elif PHASE in ("3-A", "3A", 3, "3-B", "3B"):
                 handle_phase3a(ticker, signal, position_detail, portfolios,
-                               price_history, variant=tag_variant)
+                               price_history, variant=tag_variant,
+                               prior_signals=prior_signals)
             else:
                 log.error(f"Phase {PHASE} handler not implemented in this build.")
+
+            # WS2 S1 state update — RAW confidence only (Lever A stamps
+            # confidence_raw before any damping mutates "confidence").
+            # Guards: parse-error signals (error key / conf 0) never enter
+            # the chain; only the first (control) arm writes, so a
+            # re-enabled A/B could never double-write the same date.
+            if variant == variants[0] and not signal.get("error"):
+                raw_conf = signal.get("confidence_raw", signal.get("confidence"))
+                if isinstance(raw_conf, (int, float)) and raw_conf > 0:
+                    update_signal_state(
+                        signal_state, ticker,
+                        datetime.now().strftime("%Y-%m-%d"),
+                        signal.get("signal", ""), int(raw_conf),
+                    )
+                    save_signal_state(signal_state)
 
     except Exception as e:
         log.error(f"Error processing {ticker}: {e}")
@@ -538,8 +593,16 @@ def run_bot():
     news_cache    = {}
     history_cache = {}
 
+    # WS2 S1: per-ticker prior-signal state (raw confidences, last 5
+    # sessions). Missing/corrupt file degrades to {} — the prompt section
+    # renders its "no prior state" form and the chain rebuilds from today.
+    # Re-seedable any time from the tracker via seed_signal_state.py.
+    signal_state = load_signal_state()
+    log.info(f"Prior-signal state loaded: {len(signal_state)} ticker(s)")
+
     for ticker in watchlist:
-        process_ticker(ticker, portfolios, quote_cache, news_cache, history_cache)
+        process_ticker(ticker, portfolios, quote_cache, news_cache,
+                       history_cache, signal_state)
 
     # STEP 5: Generate ticker suggestions
     if ENABLE_SUGGESTIONS:

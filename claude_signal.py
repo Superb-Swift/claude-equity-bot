@@ -34,6 +34,8 @@ You will receive:
 - Current price, intraday change, OHLC, bid/ask, volume
 - 52-week range
 - Prior 5 trading-day closes (recent price trajectory) and the 5-day % change
+- Your own prior signals and confidences for this ticker from recent
+  sessions (when available)
 - For equities: P/E, EPS, dividend yield
 - For ETFs: dividend yield only (P/E and EPS are intentionally omitted
   because they are unreliable for fund products)
@@ -188,6 +190,36 @@ def _build_price_history_section(price_history: list) -> list:
     return lines
 
 
+def _build_prior_signal_section(prior_signals: list) -> list:
+    """
+    Build the prior-signal state section (S1 — the H1 feature-level input).
+
+    ANALYST NOTE (S1):
+        Feature-level implementation of the locked H1 verdict. Each call is
+        otherwise stateless — the model cannot see that its own confidence
+        has not moved while price did. This section feeds back the bot's own
+        last-N outputs for the ticker (RAW confidence — never the damped
+        value, so the model-side channel stays uncontaminated by Lever A)
+        plus the net confidence change over the span, placed directly under
+        the PRICE TRAJECTORY section for juxtaposition. Mechanical, numeric,
+        computed. No behavioral phrasing is added — prompt-level phrasing was
+        retired as a remedy class at the 3-A closeout.
+    """
+    if not prior_signals:
+        return ["\n--- YOUR PRIOR SIGNALS (no prior-signal state available) ---"]
+    lines = [f"\n--- YOUR PRIOR SIGNALS (this ticker, last {len(prior_signals)} sessions) ---"]
+    lines.append(" | ".join(
+        f"{p.get('date', '?')}: {p.get('signal', '?')} {int(p.get('conf', 0))}%"
+        for p in prior_signals
+    ))
+    confs = [p.get("conf") for p in prior_signals if p.get("conf") is not None]
+    if len(confs) >= 2:
+        lines.append(
+            f"Net confidence change over span: {int(confs[-1]) - int(confs[0]):+d} pts"
+        )
+    return lines
+
+
 def _build_position_section(position: dict) -> list:
     """
     Build the position context section.
@@ -247,7 +279,8 @@ def _build_position_section(position: dict) -> list:
 
 def get_signal(ticker: str, quote: dict, position: dict = None,
                headlines: list = None, metrics: dict = None,
-               price_history: list = None, prompt_variant: str = "A") -> dict:
+               price_history: list = None, prior_signals: list = None,
+               prompt_variant: str = "A") -> dict:
     """
     Generate a structured trading signal for a ticker using Claude.
 
@@ -258,6 +291,8 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
         headlines  (list): Optional list of recent headlines
         metrics    (dict): Optional financial metrics
         price_history (list): Optional prior-N-day closes (H1 trajectory input)
+        prior_signals (list): Optional last-N own outputs for this ticker
+                              (S1 prior-signal state input)
         prompt_variant (str): "A" (base build) or "B" (H2 symmetric framing)
 
     Returns:
@@ -267,6 +302,7 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
     prompt_parts.extend(_build_market_data_section(quote))
     prompt_parts.extend(_build_fundamentals_section(quote))
     prompt_parts.extend(_build_price_history_section(price_history))  # H1
+    prompt_parts.extend(_build_prior_signal_section(prior_signals))   # S1 (H1 feature-level)
     prompt_parts.extend(_build_position_section(position))
 
     if headlines:
@@ -342,12 +378,14 @@ def print_signal(signal: dict) -> None:
 
     sig   = signal.get("signal", "HOLD")
     conf  = signal.get("confidence", 0)
+    raw   = signal.get("confidence_raw")
+    conf_str = f"{conf}%" if raw in (None, conf) else f"{conf}% (raw {raw}%)"
     color = COLORS.get(sig, COLORS["RESET"])
 
     print("\n" + "="*60)
     print(f"  SIGNAL: {color}{sig}{COLORS['RESET']}  |  "
           f"Ticker: {signal.get('ticker')}  |  "
-          f"Confidence: {conf}%")
+          f"Confidence: {conf_str}")
     print("="*60)
     print(f"  Reasoning   : {signal.get('reasoning')}")
     print(f"  Bull Case   : {signal.get('bull_case')}")

@@ -30,8 +30,10 @@ USAGE
 from __future__ import annotations
 import argparse
 import datetime as dt
+import glob
 import math
 import os
+import re
 import sys
 
 import openpyxl
@@ -169,11 +171,65 @@ def band_calibration(tracker):
 
 
 # --------------------------------------------------------------------------- #
-def trace(tracker, ticker, window, maxlag):
+def load_raw_conf_map(patterns):
+    """Parse Signal JSON log lines into {(date, TICKER): raw_conf_pct}.
+
+    ANALYST NOTE (WS2 two-channel readout):
+        Lever A logs both confidences on every line — "confidence" is the
+        OPERATIVE (damped) value that flows to the tracker, and
+        "confidence_raw" is the model's own output. The tracker therefore
+        carries the operative channel; this loader recovers the RAW channel
+        straight from the logs so the pre-registered lag test can be run on
+        the model-side series (the honest Lever-B read). Date comes from the
+        filename (signals_YYYY-MM-DD.log). PM diagnostic runs APPEND to the
+        same signals_DATE.log as the AM run, so the FIRST occurrence per
+        (date, ticker) wins — the AM-canonical read — and later PM lines
+        can never shadow it.
+    """
+    tick_re = re.compile(r'"ticker":\s*"([A-Za-z.\-]+)"')
+    raw_re = re.compile(r'"confidence_raw":\s*(\d+)')
+    files = []
+    for p in patterns:
+        hits = sorted(glob.glob(p))
+        files.extend(hits if hits else ([p] if os.path.exists(p) else []))
+    m = {}
+    for fp in files:
+        stem = os.path.splitext(os.path.basename(fp))[0]
+        try:
+            d = dt.date.fromisoformat(stem.replace("signals_", ""))
+        except ValueError:
+            print(f"   [raw-from-logs] skip (no date in filename): {fp}")
+            continue
+        with open(fp, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "Signal JSON" not in line:
+                    continue
+                tm, rm = tick_re.search(line), raw_re.search(line)
+                if tm and rm:
+                    key = (d, tm.group(1).upper())
+                    if key not in m:  # FIRST occurrence wins - AM canonical
+                        m[key] = float(rm.group(1))
+    print(f"   [raw-from-logs] parsed {len(files)} file(s), "
+          f"{len(m)} raw-confidence entrie(s)")
+    return m
+
+
+# --------------------------------------------------------------------------- #
+def trace(tracker, ticker, window, maxlag, raw_map=None):
     rows = load_series(tracker, ticker)
     if not rows:
         sys.exit(f"ERROR: no rows for {ticker} in {tracker}")
 
+    n_raw = 0
+    if raw_map is not None:  # {} still prints the 0-override audit line
+        for x in rows:
+            v = raw_map.get((x["date"], ticker.upper()))
+            if v is not None:
+                x["conf"] = v
+                n_raw += 1
+        print(f"   [raw-from-logs] {n_raw} of {len(rows)} rows use log RAW "
+              f"confidence; remainder keep tracker values (exact for "
+              f"pre-deploy rows, where raw == operative by construction)")
     confs = [x["conf"] for x in rows]
     prices = [x["p0"] for x in rows]
     # trailing window-day move from the signal-capture price series
@@ -269,7 +325,7 @@ def trace(tracker, ticker, window, maxlag):
                 rows=rows, trail=trail, arc=arc, agg=agg)
 
 
-def write_md(res, ticker, window, tracker, out_dir):
+def write_md(res, ticker, window, tracker, out_dir, suffix=""):
     rows, trail = res["rows"], res["trail"]
     lines = [f"# H1 Lag Trace — {ticker}",
              f"*Source: `{os.path.basename(tracker)}` · window {window}d · "
@@ -292,7 +348,7 @@ def write_md(res, ticker, window, tracker, out_dir):
     for b in ("40-49", "50-59", "60-69"):
         h, n = res["agg"][b]
         lines.append(f"- {b}: {h}/{n} = {h/n*100:.1f}%" if n else f"- {b}: —")
-    path = os.path.join(out_dir, f"h1_lag_trace_{ticker}.md")
+    path = os.path.join(out_dir, f"h1_lag_trace_{ticker}{suffix}.md")
     open(path, "w", encoding="utf-8").write("\n".join(lines) + "\n")
     return path
 
@@ -309,6 +365,13 @@ def main(argv=None):
                     help="only analyze rows on/after YYYY-MM-DD (e.g. 2026-06-15 = Phase 3-A only)")
     ap.add_argument("--until", default=None,
                     help="only analyze rows on/before YYYY-MM-DD")
+    ap.add_argument("--raw-from-logs", nargs="*", default=None, metavar="LOG",
+                    help="log files/globs; override tracker confidence with "
+                         "the RAW (pre-damping) confidence parsed from Signal "
+                         "JSON lines — the Lever-B model-side channel")
+    ap.add_argument("--suffix", default="",
+                    help="append to the output MD filename (e.g. _raw) so "
+                         "raw-channel runs don't overwrite the operative MD")
     args = ap.parse_args(argv)
     global SINCE, UNTIL
     if args.since:
@@ -322,8 +385,12 @@ def main(argv=None):
     if not os.path.exists(args.tracker):
         sys.exit(f"ERROR: tracker not found: {args.tracker}")
     os.makedirs(args.out_dir, exist_ok=True)
-    res = trace(args.tracker, args.ticker, args.window, args.maxlag)
-    md = write_md(res, args.ticker, args.window, args.tracker, args.out_dir)
+    raw_map = (load_raw_conf_map(args.raw_from_logs)
+               if args.raw_from_logs else None)
+    res = trace(args.tracker, args.ticker, args.window, args.maxlag,
+                raw_map=raw_map)
+    md = write_md(res, args.ticker, args.window, args.tracker, args.out_dir,
+                  suffix=args.suffix)
     print(f"\nWrote: {md}")
 
 

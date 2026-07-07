@@ -2,7 +2,7 @@
 
 > An AI-powered equity research and signal generation system that combines real-time brokerage data, large language model analysis, and disciplined risk management to produce structured trading signals for human review.
 
-![Phase](https://img.shields.io/badge/Phase-3--A%20Advisory-orange)
+![Phase](https://img.shields.io/badge/Phase-3--B%20Advisory%20Development-orange)
 ![Language](https://img.shields.io/badge/Python-3.14-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-success)
@@ -51,6 +51,8 @@ The system is designed around three principles:
               └──────────────────────────────┘
 ```
 
+Phase 3-B adds a per-ticker **prior-signal state loop**: `main.py` loads `signal_state.json` at run start, feeds each ticker's own last-5 outputs (raw confidences) into the prompt alongside the price trajectory, and writes the updated state back — so the model can see its own staleness against the move it is already shown.
+
 ---
 
 ## Features
@@ -62,8 +64,10 @@ The system is designed around three principles:
 - **Risk engine** — Confidence thresholds, position-size caps, data-quality minimums, and human-approval gates prevent overconfident or low-quality signals from triggering action
 - **Daily ticker suggester** — Claude analyzes portfolio gaps, market themes, and peer companies to suggest new research candidates each day
 - **Audit-ready logging** — Every signal is logged with reasoning, risk flags, and token usage; a daily analyzer produces a one-page digest
-- **Hypothesis-driven validation** — A suite of read-only harnesses (H1–H4) probes signal behavior — trajectory-lag sensitivity, directional asymmetry, thesis stability, and data-quality thresholds — against the accumulated signal logs
-- **Phased rollout** — Phase 2 (read-only calibration) is complete; the system is currently in **Phase 3-A** (advisory-only live signals with empirically-calibrated thresholds), with Phase 3 (paper simulation) and Phase 4 (live trading with approval gates) planned
+- **Hypothesis-driven validation** — Read-only harnesses probed signal behavior against the accumulated logs: the H1 confidence-update-lag finding was certified in Phase 2 and fully replicated live in Phase 3-A, H2/H3 were descoped at the 3-A closeout, and the H4 data-quality watchdog keeps running as a monitor
+- **Prior-signal state input (S1)** — the model receives its own last-5 signals and confidences per ticker, closing the statelessness gap behind the certified lag finding
+- **Confidence damping (D1)** — a deterministic post-model rule damps stale conviction into a material adverse trailing move; every line logs both the raw (model) and operative (damped) confidence, so the model-side channel stays auditable
+- **Phased rollout** — Phases 2 (read-only calibration) and 3-A (live advisory) are complete; the system is currently in **Phase 3-B** (advisory-only development: triple-blend architecture plus the H1 feature-level implementation), with Phase 3-C (EDGAR filing context), paper simulation, and Phase 4 (live trading with approval gates) planned
 
 ---
 
@@ -88,27 +92,29 @@ The system is designed around three principles:
 
 | File | Responsibility |
 |---|---|
-| `main.py` | Orchestrator — pulls portfolios, dedupes the watchlist, coordinates signal generation across modules; carries the active phase flag and the A/B test switch |
+| `main.py` | Orchestrator — pulls portfolios, dedupes the watchlist, coordinates signal generation across modules; carries the active phase flag and the generator-era label (`prompt_variant`); maintains the S1 state each run |
 | `schwab_client.py` | Data layer — authenticates with Schwab, fetches quotes and positions, handles account labeling |
 | `news_client.py` | News layer — fetches recent headlines per ticker from Finnhub |
-| `claude_signal.py` | Signal layer — builds structured prompts (including the prior-5-day price trajectory) and parses Claude's JSON responses |
-| `risk_engine.py` | Decision layer — applies hardcoded rules to approve or reject signals |
+| `claude_signal.py` | Signal layer — builds structured prompts (the prior-5-day price trajectory **and** the S1 prior-signal state) and parses Claude's JSON responses |
+| `risk_engine.py` | Decision layer — applies hardcoded rules to approve or reject signals; hosts the WS2 confidence-damping rule (raw vs operative confidence) |
+| `signal_state.py` | State layer — persistence for the S1 prior-signal input (raw confidences, last 5 per ticker; re-seedable from the tracker) |
+| `seed_signal_state.py` | State layer — one-shot seed/restore of `signal_state.json` from the tracker Signals tab |
 | `ticker_suggester.py` | Generative layer — proposes new tickers based on portfolio gaps, market themes, and peer analysis |
 | `analyze_log.py` | Analytics layer — produces a daily digest of signals, confidence distributions, and data quality breakdowns |
-| `parse_log_to_tracker.py` | Export layer — converts a run's signal log into paste-ready tracker rows (control arm only on A/B days) |
+| `parse_log_to_tracker.py` | Export layer — converts a run's signal log into paste-ready tracker rows (phase-agnostic tag parsing; imports the operative confidence) |
 
 ### Research & validation tooling
 
 | File | Responsibility |
 |---|---|
-| `h1_lag_trace.py` | Hypothesis 1 — price-trajectory lag sensitivity (prior-5-day closes) |
-| `h2_direction_asymmetry.py` | Hypothesis 2 — BUY/SELL directional-asymmetry A/B harness |
-| `h3_thesis_stability.py` | Hypothesis 3 — thesis stability vs news-flow framing |
-| `h4_dq_threshold.py` | Hypothesis 4 — data-quality-conditional threshold watchdog |
+| `h1_lag_trace.py` | Hypothesis 1 — confidence-update-lag tracer; two-channel in 3-B (`--raw-from-logs` recovers the raw model confidence from the logs, AM-canonical; `--suffix` keeps channel MDs separate) |
+| `h2_direction_asymmetry.py` | Hypothesis 2 — directional-asymmetry harness (descoped at the 3-A closeout; retained for archival reproducibility) |
+| `h3_thesis_stability.py` | Hypothesis 3 — thesis-stability harness (descoped at the 3-A closeout; retained for archival reproducibility) |
+| `h4_dq_threshold.py` | Hypothesis 4 — data-quality-conditional threshold watchdog (running monitor) |
+| `guardrail_trace.py` | Scoreboard + guardrail trace; `--stratify-regime` writes `regime_stratification.md` — the Q1-R / T2 tripwire sensors |
 | `build_near_miss_registry.py` | Regenerates the near-miss BUY registry from the signal logs |
 | `run_daily.bat` | Windows runner — venv activate → signals → analyzer → tracker rows |
-| `run_ab_test.bat` | Windows runner — a daily pass with both prompt arms (A/B), control arm only imported |
-| `run_weekly_review.bat` | Windows runner — H1–H4 harnesses + near-miss registry rebuild |
+| `run_weekly_review.bat` | Windows runner — WMT + GM lag tracers (full-series and post-deploy two-channel acceptance slices), H4 watchdog, near-miss registry rebuild, guardrail trace with regime stratification |
 
 All four harnesses accept `--since` / `--until` for phase-scoped analysis (e.g. `--since 2026-06-15` isolates Phase 3-A from the certified Phase 2 window).
 
@@ -133,6 +139,8 @@ All four harnesses accept `--since` / `--until` for phase-scoped analysis (e.g. 
                 risk on fertilizer supply, Cyclical earnings sensitivity
 ============================================================
 ```
+
+*(When damping engages, the header shows both channels: `Confidence: 48% (raw 55%)`.)*
 
 ---
 
@@ -173,7 +181,9 @@ All four harnesses accept `--since` / `--until` for phase-scoped analysis (e.g. 
 |---|---|---|
 | **Phase 1** | ✅ Complete | Foundation — auth, quote retrieval, single-account positions |
 | **Phase 2** | ✅ Complete | Read-only calibration dry run (19 trading days, concluded 2026-06-12) — full signal pipeline, thresholds calibrated, no orders placed |
-| **Phase 3-A** | 🟡 Current | Advisory-only live signals on calibrated thresholds, with prompt A/B testing and the H1–H4 validation harnesses — still no orders placed |
+| **Phase 3-A** | ✅ Complete | Live advisory run (14 sessions, concluded 2026-07-06) — no orders placed. H1 lag verdict locked; the certified Phase 2 guardrail failed to reproduce out-of-sample and was **suspended** before anything relied on it; H2/H3 descoped; the A/B program terminated |
+| **Phase 3-B** | 🟡 Current | Advisory-only development — triple-blend architecture (WS1), the H1 feature-level implementation (S1 prior-signal state + D1 confidence damping; generator era A-S1D1), Q3 commodity-context code (WS3) — still no orders placed |
+| **Phase 3-C** | ⏸️ Planned | EDGAR SEC-filing context (Form 4, 8-K, 10-Q/10-K MD&A) — entry criteria pre-registered in the 3-B exit / 3-C entry decision instrument |
 | **Phase 3** | ⏸️ Planned | Paper simulation — simulated order placement, no real money |
 | **Phase 4** | ⏸️ Planned | Live trading — real orders with mandatory human approval |
 
@@ -194,7 +204,18 @@ REQUIRE_HUMAN_APPROVAL = True   # Always require human approval (Phase 4+)
 MIN_DATA_QUALITY     = "MEDIUM" # Reject LOW-quality signals automatically
 ```
 
-These thresholds were calibrated empirically over Phase 2's 19-trading-day dry run (concluded 2026-06-12): the **50–59% confidence band** proved the best-calibrated cohort (61.3% +5-day hit rate) and now anchors the GO/NO-GO guardrail, and the **near-miss BUY tracking threshold** was set at 70%.
+Phase 3-B adds a deterministic **confidence-damping** layer ahead of these gates (`risk_engine.apply_conf_damping`):
+
+```python
+DAMP_THETA = 5.0%   # trailing 5-day move before damping engages
+DAMP_K     = 1.5    # confidence points removed per % beyond theta
+DAMP_CAP   = 15     # maximum points removed in one session
+DAMP_FLOOR = 35     # damping never pushes below this floor
+```
+
+Damping only ever lowers confidence; both the raw and the operative value are logged on every line.
+
+The base thresholds were calibrated empirically over Phase 2's 19-trading-day dry run (concluded 2026-06-12). Two live updates from Phase 3-A: the **50–59% confidence-band guardrail** certified in Phase 2 **failed to reproduce out-of-sample** and is **suspended as a decision input** (it runs monitor-only, with re-open triggers parked under the Q1-R record) — exactly the failure mode the phase discipline exists to catch — while the **70% near-miss BUY threshold was reinforced** (near-misses failed both forward horizons live).
 
 ---
 
@@ -249,11 +270,17 @@ python analyze_log.py     # Produce the daily digest
 
 # Windows convenience runners
 run_daily.bat             # venv + signals + analyzer + tracker rows
-run_ab_test.bat           # a daily run with both prompt arms (A/B)
-run_weekly_review.bat     # H1–H4 hypothesis harnesses + near-miss registry
+run_weekly_review.bat     # lag tracers (two-channel) + H4 + registry + T2 sensors
+
+# S1 state seed / restore (warm start; recovery after a PM diagnostic run)
+python seed_signal_state.py --tracker tracker_with_registry.xlsx
 
 # Phase-scoped hypothesis analysis (any harness)
 python h1_lag_trace.py --since 2026-06-15
+
+# WS2 acceptance reads (post-deploy, both channels)
+python h1_lag_trace.py --since 2026-07-07 --ticker WMT --suffix _3B
+python h1_lag_trace.py --since 2026-07-07 --ticker WMT --raw-from-logs "logs\signals_*.log" --suffix _raw_3B
 ```
 
 ---
@@ -262,7 +289,7 @@ python h1_lag_trace.py --since 2026-06-15
 
 ### Why Phase Discipline?
 
-Algorithmic trading systems most often fail not because the strategy is wrong, but because the operator skipped validation. Phase 2 forced a minimum of 2-3 weeks of observed signals before any simulated trading began. Phase 3 forces a similar period of paper trading before any real capital is at risk.
+Algorithmic trading systems most often fail not because the strategy is wrong, but because the operator skipped validation. Phase 2 forced a minimum of 2-3 weeks of observed signals before any simulated trading began, and Phase 3 forces a similar period of paper trading before any real capital is at risk. Phase 3-A proved the point in practice: a Phase-2-certified edge inverted out-of-sample and was caught — and suspended — by the advisory run before any capital could have relied on it.
 
 ### Why Human Approval?
 
@@ -287,8 +314,12 @@ A 5% gain in a Roth IRA is structurally different from a 5% gain in a taxable ac
 | Phase 2 calibration (confidence-band + near-miss thresholds) | ✅ Done |
 | Hypothesis harness suite (H1–H4) | ✅ Done |
 | Near-miss registry automation | ✅ Done |
-| Prompt A/B testing harness | ✅ Done |
-| SEC/EDGAR filing context (Form 4, 8-K, 10-Q/10-K MD&A, fundamentals) | ⏸️ Phase 3 |
+| Prompt A/B testing harness | ✅ Done (program terminated at the 3-A closeout; harness archived) |
+| Phase 3-A live advisory run (H1 verdict locked; guardrail suspended) | ✅ Done (2026-07-06) |
+| H1 feature-level implementation — S1 prior-signal state + D1 damping | ✅ Done (2026-07-06) |
+| Triple-blend architecture (WS1) | 🟡 Phase 3-B |
+| Q3 commodity-context modules (WS3) | ⏸️ Phase 3-B |
+| SEC/EDGAR filing context (Form 4, 8-K, 10-Q/10-K MD&A, fundamentals) | ⏸️ Phase 3-C (entry criteria pre-registered) |
 | Paper trading simulation | ⏸️ Phase 3 |
 | Email daily digest | ⏸️ Backlog |
 | Scheduled execution (Task Scheduler) | ⏸️ Backlog |

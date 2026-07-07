@@ -320,3 +320,92 @@ def print_risk_report(signal: dict, portfolio: dict) -> None:
     print(f"    Human approval      : {cfg.REQUIRE_HUMAN_APPROVAL}")
     print(f"    Min data quality    : {cfg.MIN_DATA_QUALITY}")
     print("-"*60 + "\n")
+
+
+# =============================================================================
+# CONFIDENCE DAMPING — WS2 Lever A (H1 feature-level; deployed with S1)
+# =============================================================================
+# ANALYST NOTE:
+#   Implements the locked H1 verdict at feature level. The model's confidence
+#   update lags multi-session price moves by ~5 sessions (certified Phase 2,
+#   fully replicated live in 3-A; prompt-level remedies retired at closeout).
+#   This rule stops waiting for the model: when the trailing 5-day move is
+#   materially ADVERSE to the stance and conviction hasn't adjusted,
+#   confidence is damped mechanically before the risk engine sees it.
+#
+#   Governance fit: this section ADDS a deterministic, auditable rule and can
+#   only ever LOWER confidence — strictly more conservative. It does not
+#   modify or override any RiskConfig rule; evaluate_signal() runs unchanged
+#   on the operative value. Both channels are always preserved:
+#       signal["confidence"]      -> OPERATIVE (damped) — downstream truth
+#       signal["confidence_raw"]  -> the model's own output — audit channel
+#
+#   Parameters sized on the locked WMT arc (held 52-55% through a -9.99%
+#   trailing move; the model's own eventual catch-up step was 55 -> 45).
+#   With the defaults below, trail=-9.99% gives damp ~= 7 -> 55 becomes 48:
+#   the "correct" update in one session instead of five. Change deliberately.
+
+class DampingConfig:
+    """Central damping parameter store — audit and adjust in one place."""
+
+    THETA : float = 5.0   # % trailing move before damping engages
+    K     : float = 1.5   # confidence pts removed per % beyond THETA
+    CAP   : int   = 15    # max pts removed in one session
+    FLOOR : int   = 35    # damping never pushes below this (0 = parse-error code)
+
+
+def compute_trail_pct(price_history: list):
+    """
+    Trailing % change over the prior completed closes — the SAME number the
+    prompt shows the model (closes[-1] vs closes[0]; see the basis footnote
+    in WS2_H1_Feature_Spec.md). Returns None when unavailable.
+    """
+    if not price_history:
+        return None
+    closes = [p.get("close") for p in price_history if p.get("close") is not None]
+    if len(closes) < 2 or not closes[0]:
+        return None
+    return (closes[-1] / closes[0] - 1.0) * 100.0
+
+
+def apply_conf_damping(signal: dict, price_history: list):
+    """
+    Returns (signal, meta). Mutates signal in place:
+      - always stamps signal["confidence_raw"] when a valid confidence exists
+        (era uniformity: every post-deploy row carries both channels, even
+        when damp == 0)
+      - lowers signal["confidence"] to the operative value when the trailing
+        move is adverse to the stance beyond DampingConfig.THETA
+
+    meta = {"active", "trail", "raw", "op", "damp"} — feeds the D[...] log tag.
+    """
+    raw = signal.get("confidence")
+    trail = compute_trail_pct(price_history)
+    meta = {"active": False, "trail": trail, "raw": raw, "op": raw, "damp": 0}
+
+    # Parse-error / missing confidence: never touch (0 is the error code).
+    if not isinstance(raw, (int, float)) or raw <= 0:
+        return signal, meta
+    raw = int(raw)
+    signal["confidence_raw"] = raw
+    meta["raw"] = raw
+    meta["op"] = raw
+    if trail is None:
+        return signal, meta
+
+    sig = str(signal.get("signal", "")).upper()
+    adverse = ((sig in ("BUY", "HOLD") and trail <= -DampingConfig.THETA) or
+               (sig == "SELL" and trail >= DampingConfig.THETA))
+    if not adverse:
+        return signal, meta
+
+    damp = int(round(min(DampingConfig.CAP,
+                         DampingConfig.K * (abs(trail) - DampingConfig.THETA))))
+    op = raw - damp
+    if op < DampingConfig.FLOOR:
+        # Floor clamps the damped value but must never RAISE confidence for
+        # a signal that arrived below the floor already.
+        op = min(raw, DampingConfig.FLOOR)
+    signal["confidence"] = op
+    meta.update(active=True, op=op, damp=damp)
+    return signal, meta

@@ -32,3 +32,6 @@ all_may.tsv
 
 # Tracking spreadsheet — contains personal trading outcomes
 claude_equity_bot_tracker.xlsx
+# WS2 runtime state — bot-maintained prior-signal cache (re-seedable from the
+# tracker via seed_signal_state.py; raw-confidence channel, see signal_state.py)
+signal_state.json

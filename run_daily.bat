@@ -13,8 +13,11 @@ REM
 REM   To skip the tracker parsing step (if you only want bot + analyzer):
 REM     C:\Users\rober\claude-equity-bot> run_daily.bat --no-parse
 REM
-REM   To run an H2 A/B day (both prompt arms, ~2x token cost), use
-REM   run_ab_test.bat instead. The normal daily run below is single-arm.
+REM   PM runs are DIAGNOSTIC-ONLY (the AM 9:30 CST run is canonical). A PM
+REM   run overwrites today's signal_state.json entries and paste_today.tsv -
+REM   do NOT paste PM rows, and re-seed the state afterwards:
+REM     python seed_signal_state.py --tracker tracker_with_registry.xlsx
+REM   (A/B program terminated at the 3-A closeout; run_ab_test.bat retired.)
 REM
 REM ANALYST NOTE:
 REM   This is a thin orchestration layer, not new logic. Each underlying
@@ -23,9 +26,11 @@ REM   exits early with a non-zero code so you know what to investigate.
 REM   The --no-parse flag exists because backfill days won't have a
 REM   matching signals_TODAY.log to parse.
 REM
-REM   Phase / hypotheses are controlled in main.py (PHASE = "3-A"; H1 + H3
-REM   active). This runner is phase-agnostic and does not need to change
-REM   when the phase advances.
+REM   Phase / generator era are controlled in main.py (PHASE = "3-B"; era
+REM   "A-S1D1" = the H1/H3 prompt blocks + S1 prior-signal state input + D1
+REM   confidence damping). main.py maintains signal_state.json automatically
+REM   on every run. This runner stays phase-agnostic and does not need to
+REM   change when the phase advances.
 REM ===========================================================================
 
 setlocal enabledelayedexpansion
@@ -54,6 +59,11 @@ if errorlevel 1 (
 REM ---- Step 2: Run the bot ----
 echo.
 echo [2/4] Running bot (main.py)...
+if not exist "signal_state.json" (
+    echo WARN: signal_state.json not found - the S1 prior-signal input runs
+    echo       cold today. To warm it from the tracker first, run:
+    echo         python seed_signal_state.py --tracker tracker_with_registry.xlsx
+)
 echo ------------------------------------------------------------
 python main.py
 if errorlevel 1 (
@@ -100,6 +110,7 @@ echo ============================================================
 echo   Done.
 echo   Today's log:       logs\signals_%TODAY%.log
 echo   Summary appended:  logs\summary_history.txt
+echo   S1 state updated:  signal_state.json (raw-conf chain, last 5 per ticker)
 if exist "paste_today.tsv" (
     echo   Paste into tracker: paste_today.tsv
 )
