@@ -32,22 +32,22 @@ The system is designed around three principles:
          │                        │                        │
          ▼                        ▼                        ▼
     ┌─────────────────────────────────────────────────────────┐
-    │                       main.py                            │
-    │              (multi-account orchestrator)                │
+    │                       main.py                           │
+    │              (multi-account orchestrator)               │
     └────────────────────────┬────────────────────────────────┘
                              │
                              ▼
               ┌──────────────────────────────┐
-              │       risk_engine.py          │
-              │  (confidence + position size  │
-              │   + data quality gates)       │
+              │       risk_engine.py         │
+              │  (confidence + position size │
+              │   + data quality gates)      │
               └──────────────┬───────────────┘
                              │
                              ▼
               ┌──────────────────────────────┐
-              │  Signal log + daily analyzer  │
-              │  + ticker suggester + tracker │
-              │           export              │
+              │  Signal log + daily analyzer │
+              │  + ticker suggester + tracker│
+              │           export             │
               └──────────────────────────────┘
 ```
 
