@@ -368,44 +368,48 @@ def compute_trail_pct(price_history: list):
     return (closes[-1] / closes[0] - 1.0) * 100.0
 
 
+def damp_confidence_value(conf, direction, trail):
+    """Core D1 damping, reusable on ANY confidence channel (base or WS1 blend).
+
+    Given a confidence, a signal DIRECTION (BUY/HOLD/SELL) and a trailing %,
+    return (damped_confidence, damp_points). Only ever LOWERS; floor-safe;
+    never raises a value that arrived below the floor. Non-positive/missing
+    confidence or missing trail -> returned unchanged with damp 0.
+    """
+    if not isinstance(conf, (int, float)) or conf <= 0:
+        return conf, 0
+    conf = int(conf)
+    if trail is None:
+        return conf, 0
+    d = str(direction or "").upper()
+    adverse = ((d in ("BUY", "HOLD") and trail <= -DampingConfig.THETA) or
+               (d == "SELL" and trail >= DampingConfig.THETA))
+    if not adverse:
+        return conf, 0
+    damp = int(round(min(DampingConfig.CAP,
+                         DampingConfig.K * (abs(trail) - DampingConfig.THETA))))
+    op = conf - damp
+    if op < DampingConfig.FLOOR:
+        op = min(conf, DampingConfig.FLOOR)   # clamp, never RAISE a sub-floor value
+    return op, damp
+
+
 def apply_conf_damping(signal: dict, price_history: list):
     """
-    Returns (signal, meta). Mutates signal in place:
+    Base-path D1 (behavior unchanged). Mutates signal in place:
       - always stamps signal["confidence_raw"] when a valid confidence exists
-        (era uniformity: every post-deploy row carries both channels, even
-        when damp == 0)
-      - lowers signal["confidence"] to the operative value when the trailing
-        move is adverse to the stance beyond DampingConfig.THETA
+      - lowers signal["confidence"] to the operative value on an adverse move
 
     meta = {"active", "trail", "raw", "op", "damp"} — feeds the D[...] log tag.
     """
     raw = signal.get("confidence")
     trail = compute_trail_pct(price_history)
     meta = {"active": False, "trail": trail, "raw": raw, "op": raw, "damp": 0}
-
-    # Parse-error / missing confidence: never touch (0 is the error code).
-    if not isinstance(raw, (int, float)) or raw <= 0:
+    if not isinstance(raw, (int, float)) or raw <= 0:      # parse-error: never touch
         return signal, meta
     raw = int(raw)
     signal["confidence_raw"] = raw
-    meta["raw"] = raw
-    meta["op"] = raw
-    if trail is None:
-        return signal, meta
-
-    sig = str(signal.get("signal", "")).upper()
-    adverse = ((sig in ("BUY", "HOLD") and trail <= -DampingConfig.THETA) or
-               (sig == "SELL" and trail >= DampingConfig.THETA))
-    if not adverse:
-        return signal, meta
-
-    damp = int(round(min(DampingConfig.CAP,
-                         DampingConfig.K * (abs(trail) - DampingConfig.THETA))))
-    op = raw - damp
-    if op < DampingConfig.FLOOR:
-        # Floor clamps the damped value but must never RAISE confidence for
-        # a signal that arrived below the floor already.
-        op = min(raw, DampingConfig.FLOOR)
+    op, damp = damp_confidence_value(raw, signal.get("signal"), trail)
     signal["confidence"] = op
-    meta.update(active=True, op=op, damp=damp)
+    meta.update(raw=raw, op=op, damp=damp, active=(damp != 0))
     return signal, meta

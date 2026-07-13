@@ -38,10 +38,14 @@ from schwab_client import (
 )
 from claude_signal    import get_signal, print_signal
 from risk_engine      import (evaluate_signal, print_risk_report,
-                              calculate_position_size, apply_conf_damping)
+                              calculate_position_size, apply_conf_damping,
+                              damp_confidence_value)
 from news_client      import get_recent_headlines
 from ticker_suggester import suggest_tickers, print_suggestions, log_suggestions
 from signal_state     import load_signal_state, save_signal_state, update_signal_state
+from context_providers import run_blend_scores
+from blend_engine      import blend_confidence
+import blend_providers  # noqa: F401 — registers the sector + regime blend providers
 
 load_dotenv()
 
@@ -64,7 +68,11 @@ AB_VARIANTS = ("A", "B")
 #   D1 = the confidence-damping rule (risk_engine.apply_conf_damping). Never
 #   set this to bare "B": build_system_prompt() and the tracker parser both
 #   treat exact "B" as the retired H2 experimental arm.
-PROMPT_VARIANT = "A-S1D1"
+# ANALYST NOTE (2026-07-10, WS1): "-B1" adds the shadow-parallel triple
+#   blend (C2 sector + C3 regime). Still ONE live arm, not an A/B. The
+#   base signal remains the official advisory output; the blend is logged
+#   (confidence_blend) and measured for G2 but does not drive the gate.
+PROMPT_VARIANT = "A-S1D1-B1"
 
 WATCHLIST_SCOUT = [
     "SPY",
@@ -277,7 +285,8 @@ def handle_phase2(ticker: str, signal: dict, position_detail: dict,
 
 def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
                    portfolios: list, price_history: list = None,
-                   variant: str = None, prior_signals: list = None) -> None:
+                   variant: str = None, prior_signals: list = None,
+                   blend_caches: dict = None) -> None:
     """
     Phase 3-A: Advisory-only dry run WITH the H1 prior-5-day price input.
 
@@ -305,6 +314,18 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
     # and always stamps signal["confidence_raw"] — the raw (model-side)
     # channel stays auditable on every line.
     signal, damp_meta = apply_conf_damping(signal, price_history)
+
+    # WS1 SHADOW-PARALLEL blend (C2 sector + C3 regime). Computed on the model's
+    # RAW confidence and damped through the SAME D1 (via damp_confidence_value)
+    # for an apples-to-apples compare with the base operative. Logged + measured
+    # for G2 but NOT driving the risk gate — the base path above is untouched.
+    trail = damp_meta.get("trail")
+    blend_scores, _blend_metas = run_blend_scores(ticker, blend_caches or {})
+    conf_blend, blend_meta = blend_confidence(signal, blend_scores)
+    conf_blend_op, _ = damp_confidence_value(conf_blend, signal.get("signal"), trail)
+    signal["confidence_blend"] = conf_blend_op
+    signal["sector_score"] = round(blend_scores.get("sector", 0.0), 3)
+    signal["regime_score"] = round(blend_scores.get("regime", 0.0), 3)
 
     approved, reason = evaluate_signal(signal, portfolio)
 
@@ -340,6 +361,11 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
     # ANALYST NOTE (2026-07-06): the tag must keep the literal "DRY RUN" —
     #   analyze_log.py's summary_pattern anchors on it. The phase token itself
     #   is regex-agnostic on both parsers as of this deploy.
+    # B tag — WS1 blend audit (base raw -> pure blend -> blend operative).
+    b_tag = (f"B[sec={signal.get('sector_score')}; reg={signal.get('regime_score')}; "
+             f"w=0.15/0.15; base={damp_meta.get('raw')}; "
+             f"blend={blend_meta.get('blend')}; blend_op={signal.get('confidence_blend')}]")
+
     phase_tag = f"[PHASE {PHASE} DRY RUN{(' ' + variant) if variant else ''}]"
     log.info(
         f"Signal JSON: {json.dumps(signal)} | "
@@ -348,7 +374,7 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
         f"Confidence: {signal.get('confidence')}% | "
         f"Risk: {'APPROVED' if approved else 'REJECTED'} | "
         f"Reason: {reason} | "
-        f"{h1_tag} | {s1_tag} | {d_tag}"
+        f"{h1_tag} | {s1_tag} | {d_tag} | {b_tag}"
     )
 
     print_signal(signal)
@@ -363,7 +389,8 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
 
 def process_ticker(ticker: str, portfolios: list,
                    quote_cache: dict, news_cache: dict,
-                   history_cache: dict, signal_state: dict) -> None:
+                   history_cache: dict, signal_state: dict,
+                   blend_caches: dict = None) -> None:
     """
     Process a single ticker ONCE across all accounts.
 
@@ -470,7 +497,8 @@ def process_ticker(ticker: str, portfolios: list,
             elif PHASE in ("3-A", "3A", 3, "3-B", "3B"):
                 handle_phase3a(ticker, signal, position_detail, portfolios,
                                price_history, variant=tag_variant,
-                               prior_signals=prior_signals)
+                               prior_signals=prior_signals,
+                               blend_caches=blend_caches)
             else:
                 log.error(f"Phase {PHASE} handler not implemented in this build.")
 
@@ -536,6 +564,33 @@ def run_suggester(portfolios: list, news_cache: dict) -> None:
 # MAIN PIPELINE
 # =============================================================================
 
+def prefetch_blend_context(watchlist, days_sector=20, days_regime=20):
+    """Fetch, ONCE per run, the unique sector-backbone ETFs and the regime
+    series (SPY/GLD) the WS1 blend needs. Returns
+    {"sector": {etf: closes}, "regime": {"SPY": closes, "GLD": closes}}.
+    Failures degrade to absent keys (the blend scores those neutral)."""
+    from sector_map import sector_reference
+    sector_cache = {}
+    refs = {sector_reference(t) for t in watchlist}
+    refs.discard(None)
+    for etf in sorted(refs):
+        try:
+            ph = get_price_history(etf, days=days_sector)
+            sector_cache[etf] = [p.get("close") for p in ph if p.get("close") is not None]
+        except Exception as e:
+            log.warning(f"[WS1] sector prefetch failed for {etf}: {e}")
+    regime_cache = {}
+    for a in ("SPY", "GLD"):
+        try:
+            ph = get_price_history(a, days=days_regime)
+            regime_cache[a] = [p.get("close") for p in ph if p.get("close") is not None]
+        except Exception as e:
+            log.warning(f"[WS1] regime prefetch failed for {a}: {e}")
+    log.info(f"[WS1] blend context: {len(sector_cache)} sector ETF(s), "
+             f"regime {sorted(regime_cache)} loaded")
+    return {"sector": sector_cache, "regime": regime_cache}
+
+
 def run_bot():
     """Main execution pipeline — runs once per call."""
     log.info("="*60)
@@ -600,9 +655,12 @@ def run_bot():
     signal_state = load_signal_state()
     log.info(f"Prior-signal state loaded: {len(signal_state)} ticker(s)")
 
+    # WS1 blend context — prefetched once for the whole run.
+    blend_caches = prefetch_blend_context(watchlist)
+
     for ticker in watchlist:
         process_ticker(ticker, portfolios, quote_cache, news_cache,
-                       history_cache, signal_state)
+                       history_cache, signal_state, blend_caches)
 
     # STEP 5: Generate ticker suggestions
     if ENABLE_SUGGESTIONS:
