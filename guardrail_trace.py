@@ -188,6 +188,88 @@ def print_table(table):
               f"{(f'{gap*100:+.1f}pt' if gap is not None else '–'):>8}")
 
 
+def make_chart_weekly(cohorts, series, dates, out_path):
+    """Weekly-aggregated guardrail chart (fixes the unbounded-x squish).
+
+    WHY: one x-tick per cohort grows +1 every trading day (39 -> 49 -> ...),
+    so the axis always eventually squishes. Aggregating cohorts into ISO weeks
+    changes growth to ~+1 tick/week and buries less signal in noise (per-cohort
+    bands swing 33-88% on n=5-11; weekly they read on n=18-57).
+
+    Bars   = that week's own hit rate per band (recent behaviour).
+    Lines  = cumulative hit rate (the long-run trend the trace has always shown).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+    from collections import OrderedDict
+
+    # aggregate per-cohort hits/n into ISO weeks
+    wk = OrderedDict()
+    for (d, bands) in cohorts:
+        key = f"wk{d.isocalendar()[1]}"
+        cell = wk.setdefault(key, {n: [0, 0] for n, _, _ in BANDS})
+        for name, _, _ in BANDS:
+            h, n = bands.get(name, [0, 0])
+            cell[name][0] += h
+            cell[name][1] += n
+    weeks = list(wk.keys())
+    x = list(range(len(weeks)))
+
+    def wrate(name):
+        return [(wk[w][name][0] / wk[w][name][1] if wk[w][name][1] else None)
+                for w in weeks]
+
+    # cumulative value at each week's LAST cohort (reuse the existing series)
+    last_idx, seen = [], set()
+    for i, d in enumerate(dates):
+        seen.add(f"wk{d.isocalendar()[1]}")
+        if len(seen) == len(last_idx) + 1:
+            last_idx.append(i)
+        else:
+            last_idx[-1] = i
+    cum_lead = [series[LEAD_BAND][i] for i in last_idx]
+    cum_rival = [series[RIVAL_BAND][i] for i in last_idx]
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    w = 0.36
+    lead_w = wrate(LEAD_BAND)
+    rival_w = wrate(RIVAL_BAND)
+    ax.bar([i - w / 2 for i in x], [v if v is not None else 0 for v in lead_w],
+           width=w, color="#1a73e8", alpha=0.30, label="50-59% (that week)", zorder=2)
+    ax.bar([i + w / 2 for i in x], [v if v is not None else 0 for v in rival_w],
+           width=w, color="#d93025", alpha=0.30, label="60-69% (that week)", zorder=2)
+    ax.plot(x, cum_lead, "-o", color="#1a73e8", lw=2.4, ms=5,
+            label="50-59% (cumulative)", zorder=4)
+    ax.plot(x, cum_rival, "-o", color="#d93025", lw=2.0, ms=4,
+            label="60-69% (cumulative)", zorder=3)
+
+    ax.axhline(0.50, ls=":", lw=1, color="#9aa0a6", zorder=1)
+    ax.axhline(CERTIFIED_LEAD, ls="--", lw=1, color="#1a73e8", alpha=0.45, zorder=1)
+    ax.text(x[0], CERTIFIED_LEAD + 0.006, "50-59 certified snapshot 61.3%",
+            color="#1a73e8", fontsize=8, ha="left", va="bottom")
+
+    lead_gap = (cum_lead[-1] - cum_rival[-1]) * 100 if cum_lead and cum_rival else 0.0
+    ax.set_title("Guardrail trace (weekly) — bars: that week · lines: cumulative"
+                 f"   |   final lead {lead_gap:+.1f}pt",
+                 fontsize=13, fontweight="bold", pad=12)
+    ax.set_xlabel("ISO week (cohorts aggregated)", fontsize=10)
+    ax.set_ylabel("+5d hit rate", fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(weeks, fontsize=9)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0%}"))
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(axis="y", color="#eee", lw=0.8)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.legend(loc="lower left", frameon=False, fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return weeks
+
+
 def make_chart(table, series, dates, out_path):
     import matplotlib
     matplotlib.use("Agg")
@@ -646,6 +728,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Trace confidence-band guardrail "
                                              "compression cohort-by-cohort.")
     ap.add_argument("--tracker", default="claude_equity_bot_tracker.xlsx")
+    ap.add_argument("--weekly", action="store_true",
+                    help="aggregate cohorts into ISO weeks for the chart "
+                         "(fixes the unbounded-x squish; per-cohort remains the default)")
     ap.add_argument("--since", default=None, help="YYYY-MM-DD inclusive")
     ap.add_argument("--until", default=None, help="YYYY-MM-DD inclusive")
     ap.add_argument("--out-dir", default=".")
@@ -692,7 +777,11 @@ def main(argv=None):
               f"({recent[0] * 100:+.1f}pt -> {recent[-1] * 100:+.1f}pt)")
 
     png = os.path.join(args.out_dir, "guardrail_trace.png")
-    make_chart(table, series, dates, png)
+    if args.weekly:
+        wks = make_chart_weekly(cohorts, series, dates, png)
+        print(f"  [weekly] {len(dates)} cohorts aggregated into {len(wks)} week(s)")
+    else:
+        make_chart(table, series, dates, png)
     print(f"\nWrote: {png}")
 
     # --- Live Cohort Scoreboard (Phase 3-A) ---

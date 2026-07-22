@@ -24,7 +24,7 @@ REM ===========================================================================
 
 setlocal
 set PYTHONUTF8=1
-set TRACKER=tracker_with_registry.xlsx
+set TRACKER=logs\claude_equity_bot_tracker.xlsx
 
 call venv\Scripts\activate
 if errorlevel 1 (
@@ -32,12 +32,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ---- Prefer the root tracker (Guardrail Trace + Scoreboard); fall back to logs\ ----
+REM ---- The MASTER tracker is logs\claude_equity_bot_tracker.xlsx (the file you
+REM      paste into; Excel keeps its formula cache live). tracker_with_registry.xlsx
+REM      is a GENERATED report copy - openpyxl writes it, so its cache is always
+REM      empty. Read the master; fall back to the copy only if the master is gone.
 if not exist "%TRACKER%" (
-    if exist "logs\claude_equity_bot_tracker.xlsx" (
-        set TRACKER=logs\claude_equity_bot_tracker.xlsx
+    if exist "tracker_with_registry.xlsx" (
+        set TRACKER=tracker_with_registry.xlsx
     ) else (
-        echo ERROR: no tracker found ^(tried %TRACKER% and logs\claude_equity_bot_tracker.xlsx^).
+        echo ERROR: no tracker found ^(tried %TRACKER% and tracker_with_registry.xlsx^).
         exit /b 1
     )
 )

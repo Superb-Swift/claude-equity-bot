@@ -30,6 +30,7 @@
 # =============================================================================
 
 import argparse, datetime as dt, sys
+import os
 import openpyxl
 
 LIVE_START = dt.date(2026, 6, 15)
@@ -129,15 +130,27 @@ def fmt(m):
                f"   {abs(lead_gap):.1f}pt {'above trigger' if lead_gap > 0 else 'past trigger'}")
     out.append(f"         non-comp {m['nc_cohorts']} cohorts | 50-59 {m['a59']:.1f}%(n={m['n59']})"
                f"  60-69 {m['a69']:.1f}%(n={m['n69']})")
-    out.append("  -> " + ("*** T2 FIRES — both gates met. Run the Tier-2E diff. ***" if fires
-                          else f"NOT fired ({'depth' if depth_ok else 'neither' if not lead_ok and not depth_ok else 'lead'} "
-                               f"gate open) — the deciding number is the LEAD."))
+    if fires:
+        out.append("  -> *** T2 FIRES — both gates met. Run the Tier-2E diff. ***")
+    else:
+        # name the gate that is NOT satisfied (the one still to be met)
+        if depth_ok and not lead_ok:
+            why = "LEAD gate open (depth is met) — the lead is the deciding number"
+        elif lead_ok and not depth_ok:
+            why = "DEPTH gate open (lead is met) — depth is the deciding number"
+        else:
+            why = "NEITHER gate met"
+        out.append(f"  -> NOT fired: {why}.")
     return "\n".join(out)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Five-second T2 tripwire read from the tracker.")
-    ap.add_argument("--tracker", default="tracker_with_registry.xlsx")
+    ap.add_argument("--tracker",
+                    default=os.path.join("logs", "claude_equity_bot_tracker.xlsx"),
+                    help="the MASTER tracker (the one you paste into; its formula "
+                         "cache is live). tracker_with_registry.xlsx is a GENERATED "
+                         "report copy - never read it as input.")
     ap.add_argument("--history", action="store_true",
                     help="also print the lead/depth trail over the last 8 resolved days")
     args = ap.parse_args()

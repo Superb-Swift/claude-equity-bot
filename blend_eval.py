@@ -32,6 +32,7 @@
 # =============================================================================
 
 import argparse, datetime as dt, glob, json, os, re
+import os
 import openpyxl
 
 HOLD_BAND = 0.03          # +/-3% -> a HOLD was "right"
@@ -97,7 +98,9 @@ def favorable(signal, ret):
 
 def main():
     ap = argparse.ArgumentParser(description="WS1 Gate-G2 base-vs-blend measurement.")
-    ap.add_argument("--tracker", default="tracker_with_registry.xlsx")
+    ap.add_argument("--tracker",
+                    default=os.path.join("logs", "claude_equity_bot_tracker.xlsx"),
+                    help="the MASTER tracker (see t2_check.py note)")
     ap.add_argument("--logs", default=os.path.join("logs", "signals_*.log"))
     ap.add_argument("--since", default=None, help="WS1 deploy date YYYY-MM-DD (post-deploy only)")
     args = ap.parse_args()
