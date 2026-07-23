@@ -17,7 +17,8 @@ WHAT IT PRODUCES
     2. A lag estimate: corr(confidence[t], trailing move[t-L]) scanned over
        L = 0..maxlag; the argmax L is the estimated update lag in sessions.
     3. The forward +10d arc (reproduces WMT -15.19 -> +4.31).
-    4. A calibration guardrail: the cohort-window 3-band +5d hit rates
+    4. A calibration guardrail (RETIRED 2026-07-13, printed as history only):
+       the cohort-window 3-band +5d hit rates
        (50-59% must keep leading).
     5. A SUCCESS-METRIC block: what 3-A must show vs this baseline.
 
@@ -291,9 +292,14 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
         print(f"   first {arc[0]*100:+.2f}%  ->  last {arc[-1]*100:+.2f}%  "
               f"({'self-corrected upward' if arc[-1] > arc[0] else 'no net recovery'})")
 
-    # ---- calibration guardrail ----
-    print("\nCALIBRATION GUARDRAIL — cohort-window +5d band hit rates "
-          "(50-59% must lead):")
+    # ---- calibration guardrail (RETIRED — historical context only) ----
+    # Q1-R was DIAGNOSED and CLOSED 2026-07-13: the 50-59 vs 60-69 inversion was
+    # a go-live calibration IMPROVEMENT (the 60-69 band gained +15.4pt), not a
+    # guardrail failure. The guardrail is RETIRED and T2 is retired with it.
+    # T3 forbids any decision or design relying on confidence-band ordering, so
+    # this block is printed as HISTORY ONLY and carries no PASS/FAIL meaning.
+    print("\nCALIBRATION GUARDRAIL — RETIRED (Q1-R closed 2026-07-13) — "
+          "historical context only; T3: no band-ordering reliance")
     agg = band_calibration(tracker)
     lead = max(agg, key=lambda b: (agg[b][0] / agg[b][1]) if agg[b][1] else -1)
     for b in ("40-49", "50-59", "60-69"):
@@ -302,8 +308,10 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
         mark = "  <-- leads" if b == lead else ""
         print(f"   {b}: {h}/{n} = {rate}{mark}")
     ok_cal = lead == "50-59"
-    print(f"   [{'PASS' if ok_cal else 'WARN'}] 50-59% band "
-          f"{'leads' if ok_cal else 'does NOT lead'}")
+    print(f"   (band ordering shown for the record: {lead} leads this window. "
+          f"NOT a pass/fail signal — the guardrail is retired.)")
+    print("   NOTE: this window is the run's --since/--until slice, so these "
+          "rates will differ from the live 6/15+ figures in the notes.")
 
     # ---- success metric ----
     print("\n" + "-" * 78)
@@ -314,8 +322,8 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
     print(f"   • corr(conf, trailing move) rises (confidence reacts to the recent")
     print(f"     move; this run: {r_now:+.3f})." if r_now is not None
           else "     move).")
-    print(f"   • The 50-59% band keeps leading the +5d calibration "
-          f"({'holds' if ok_cal else 'BROKEN'} here).")
+    print(f"   • (Retired criterion, shown for continuity only: the 50-59 band "
+          f"{'leads' if ok_cal else 'does not lead'} in this window.)")
     print(f"   • {ticker}-type names no longer hold high confidence through a")
     print(f"     multi-session adverse move.")
     print("\n   NOTE: per-ticker n is small (~19 cohorts) — read the trace table as")
@@ -344,7 +352,11 @@ def write_md(res, ticker, window, tracker, out_dir, suffix=""):
     if res["arc"]:
         lines += ["", f"**+10d arc:** {' → '.join(f'{v*100:.2f}' for v in res['arc'])} "
                       f"(first {res['arc'][0]*100:+.2f}% → last {res['arc'][-1]*100:+.2f}%)"]
-    lines += ["", "## Calibration guardrail (cohort-window +5d)"]
+    lines += ["", "## Calibration guardrail — RETIRED (historical context only)",
+              "*Q1-R closed 2026-07-13: the band inversion was a go-live calibration "
+              "improvement, not a guardrail failure. The guardrail and T2 are retired; "
+              "T3 forbids band-ordering reliance. Rates below are for the run's date "
+              "slice and are NOT a pass/fail signal.*", ""]
     for b in ("40-49", "50-59", "60-69"):
         h, n = res["agg"][b]
         lines.append(f"- {b}: {h}/{n} = {h/n*100:.1f}%" if n else f"- {b}: —")

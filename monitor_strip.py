@@ -161,6 +161,7 @@ def ws2_episodes(rows):
         post = [i for i, x in enumerate(ser) if x["date"] >= WS1_DEPLOY or True]  # full series indexable
         pre_eps = post_eps = post_served = 0
         last_ep = None
+        ep_detail = []
         for i, x in enumerate(ser):
             if i < 5 or x["date"] < LIVE_START:
                 continue
@@ -172,16 +173,34 @@ def ws2_episodes(rows):
                 pre_eps += 1
                 continue
             post_eps += 1                        # THIS is the acceptance clock
-            base = x["conf"]
-            window = ser[i + 1: i + 1 + RESPONSE_SESSIONS]
-            if base is not None and any(
-                    (w["conf"] is not None and w["conf"] < base) for w in window):
+            # RESPONSE LAG (corrected 2026-07-23): the criterion is "confidence
+            # responds within <= RESPONSE_SESSIONS of a material trailing move".
+            # The baseline is the confidence BEFORE the slide (window start,
+            # i-5), NOT the confidence at the episode session — otherwise a
+            # same-session (lag-0) response, which is the STRONGEST possible
+            # outcome, scores as "not served" because it demands a FURTHER fall.
+            pre = ser[i - 5]["conf"]
+            lag = None
+            if pre is not None:
+                for k in range(0, RESPONSE_SESSIONS + 1):
+                    if i + k >= len(ser):
+                        break
+                    c = ser[i + k]["conf"]
+                    if c is not None and c < pre:
+                        lag = k
+                        break
+            if lag is not None:
                 post_served += 1
+                drop = pre - ser[i + lag]["conf"]
+                ep_detail.append((x["date"], lag, pre, ser[i + lag]["conf"], drop))
+            else:
+                pending = (i + RESPONSE_SESSIONS) >= len(ser)   # window not elapsed
+                ep_detail.append((x["date"], None, pre, x["conf"], None if pending else 0))
         post_sessions = sum(1 for x in ser if x["date"] >= WS2_DEPLOY)
         sessions_since = (sum(1 for x in ser if x["date"] > last_ep)
                           if last_ep is not None else None)
         out[tk] = dict(episodes=post_eps, served=post_served, pre=pre_eps,
-                       last=last_ep, since=sessions_since,
+                       last=last_ep, since=sessions_since, detail=ep_detail,
                        post_sessions=post_sessions, n=len(ser))
     return out
 
@@ -240,6 +259,7 @@ def collect(tracker, logs):
     nH, aH = _acc([x for x in live if x["dq"] == "HIGH"])
     nM, aM = _acc([x for x in live if x["dq"] == "MEDIUM"])
     return dict(
+        tracker=tracker, logs=logs,
         as_of=max(x["date"] for x in rows), n_rows=len(rows),
         ws1=ws1_blend(rows, blend), ws2=ws2_episodes(rows), nm=near_miss(rows),
         bands=dict(n59=n59, a59=a59, n69=n69, a69=a69),
@@ -254,7 +274,8 @@ def to_markdown(m):
     h4_r_ok = nm["hi_rate"] >= H4_MIN_HIT
     L = []
     L.append("# Monitor strip — open questions")
-    L.append(f"\n*Source: tracker Signals tab + logs · as of {m['as_of']} · "
+    L.append(f"\n*Source: {m.get('tracker','?')} (Signals tab) + {m.get('logs','?')} "
+             f"· as of {m['as_of']} · "
              f"{m['n_rows']} signal rows. Returns computed from the Price columns "
              f"(cache-independent). Episode threshold THETA={THETA:.1f}% from {THETA_SRC}.*\n")
     L.append("| Question | Reading | Bar | State |")
@@ -267,10 +288,15 @@ def to_markdown(m):
     for tk in TRACERS:
         e = ws2[tk]
         last = e["last"].isoformat() if e["last"] else "none"
+        lags = ", ".join(
+            (f"{d} lag {lg} ({pre}→{now}, −{dr}pt)" if lg is not None
+             else f"{d} NO RESPONSE YET" if dr is None else f"{d} no response")
+            for d, lg, pre, now, dr in e.get("detail", []))
         detail = (f"**{e['episodes']} post-deploy episode(s)** in {e['post_sessions']} session(s)"
-                  f" ({e['served']} served ≤{RESPONSE_SESSIONS}); "
+                  f" ({e['served']} responded ≤{RESPONSE_SESSIONS} sessions); "
                   f"{e['pre']} pre-deploy; last episode {last}"
-                  + (f", {e['since']} session(s) ago" if e['since'] is not None else ""))
+                  + (f", {e['since']} session(s) ago" if e['since'] is not None else "")
+                  + (f". Episodes: {lags}" if lags else ""))
         L.append(f"| **WS2 / G1** {tk} clock | {detail} "
                  f"| ≥1 episode with response ≤{RESPONSE_SESSIONS} sessions | "
                  f"{'readable' if e['episodes'] else 'NO TEST CASES YET'} |")
