@@ -221,6 +221,37 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
     if not rows:
         sys.exit(f"ERROR: no rows for {ticker} in {tracker}")
 
+    # ---- FORMULA-CACHE GUARD (added 2026-07-27) --------------------------
+    # Return+5d / Return+10d / Was-Right-5d are FORMULAS. openpyxl reads their
+    # CACHED values, and any openpyxl save blanks that cache — which the daily
+    # runner now does every session when it embeds the Monitor Strip sheet.
+    #
+    # DELIBERATELY A WARNING, NOT A REFUSAL — and the distinction is the point.
+    # h4_dq_threshold.py hard-refuses because its ENTIRE verdict rests on those
+    # cached columns; run blind it printed "STAYS DEMOTED" on zero evidence.
+    # This tool is different: the G1 criterion is the TABLE READ over
+    # Date | Sig | Conf | Trail. Confidence is a raw cell value and the
+    # trailing move is computed from the Price columns, so NEITHER touches the
+    # cache. The acceptance read stays valid; only the context columns degrade.
+    # Refusing here would block a sound read — so warn precisely and continue.
+    cache_blank = bool(rows) and not any((x.get("right5") or "").strip() for x in rows)
+    if cache_blank:
+        print("\n" + "!" * 78)
+        print("WARNING — FORMULA CACHE IS BLANK for this tracker.")
+        print(f"  0 of {len(rows)} {ticker} rows carry a cached Was-Right-5d value.")
+        print("  DEGRADED (display only): the +5d, +10d and R5 columns will read")
+        print("  '—' throughout, and the RETIRED band-calibration block will show")
+        print("  zero counts. Do not read anything into either.")
+        print("  UNAFFECTED: Date | Sig | Conf | Trail — the columns the G1 table")
+        print("  read is scored on. Confidence is a raw value; the trailing move")
+        print("  is computed from the Price columns. THE ACCEPTANCE READ IS VALID.")
+        print("  CAUSE: openpyxl saves clear cached formula values; the daily")
+        print("  runner writes this workbook every session.")
+        print("  FIX: point --tracker at the MASTER (logs\\claude_equity_bot_tracker")
+        print("  .xlsx), which Excel keeps calculated, or open the report copy in")
+        print("  Excel once to refresh, then re-run.")
+        print("!" * 78)
+
     n_raw = 0
     if raw_map is not None:  # {} still prints the 0-override audit line
         for x in rows:
@@ -330,19 +361,40 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
     print("   the primary evidence and the correlations as directional diagnostics.")
 
     return dict(best_L=best_L, r_now=r_now, r_fwd=r_fwd, ok_cal=ok_cal,
+                cache_blank=cache_blank,
                 rows=rows, trail=trail, arc=arc, agg=agg)
 
 
 def write_md(res, ticker, window, tracker, out_dir, suffix=""):
     rows, trail = res["rows"], res["trail"]
+
+    # corr(conf, +5d) is None whenever the Return+5d formula cache is blank.
+    # PRE-EXISTING BUG, found 2026-07-27: this used a bare {:+.3f} format, so a
+    # blank cache raised TypeError HERE — after the full console trace had
+    # already printed and looked correct. The exhibit was then never written and
+    # the PREVIOUS run's .md was left on disk looking current. Since that file
+    # is what the notes cite as G1 evidence, a crashed run could be mistaken for
+    # a completed one. Format defensively and always write the exhibit.
+    def _r(v):
+        return "—" if v is None else f"{v:+.3f}"
+
     lines = [f"# H1 Lag Trace — {ticker}",
              f"*Source: `{os.path.basename(tracker)}` · window {window}d · "
              f"generated {dt.datetime.now():%Y-%m-%d %H:%M}.*", "",
              f"**Estimated update lag: {res['best_L']} session(s)** · "
-             f"corr(conf, trailing move) = {res['r_now']:+.3f} · "
-             f"corr(conf, +5d) = {res['r_fwd']:+.3f}", "",
+             f"corr(conf, trailing move) = {_r(res['r_now'])} · "
+             f"corr(conf, +5d) = {_r(res['r_fwd'])}", "",
              f"| Date | Sig | Conf | Trail{window}d | +5d | +10d | R5 |",
              "| --- | --- | --- | --- | --- | --- | --- |"]
+    if res.get("cache_blank"):
+        lines[4:4] = [
+            "> **FORMULA CACHE WAS BLANK when this exhibit was generated.** The "
+            "`+5d`, `+10d` and `R5` columns below are EMPTY FOR THAT REASON — not "
+            "because the cohorts are unresolved. The retired band-calibration "
+            "block likewise shows zero counts. **The `Conf` and `Trail` columns — "
+            "the ones the G1 table read is scored on — are unaffected**, being a "
+            "raw cell value and a Price-column computation respectively. "
+            "Regenerate against the master tracker for a complete exhibit.", ""]
     for i, x in enumerate(rows):
         lines.append(
             f"| {x['date'].isoformat()} | {x['signal']} | "
@@ -393,7 +445,7 @@ def main(argv=None):
     if SINCE is not None or UNTIL is not None:
         print("")
         print("[DATE SLICE] analyzing " + _window_label())
-        print("   (calibration guardrail uses this same window)")
+        print("   (the retired band-calibration block uses this same window)")
     if not os.path.exists(args.tracker):
         sys.exit(f"ERROR: tracker not found: {args.tracker}")
     os.makedirs(args.out_dir, exist_ok=True)

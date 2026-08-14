@@ -291,7 +291,18 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
     # --- Confidence Stats ---
     confidences = [s["confidence"] for s in signals]
     avg_conf = sum(confidences) / len(confidences)
-    high_conf = sum(1 for c in confidences if c >= 70)
+    # 5b (2026-08-11): this counted EVERY row at >= 70 and labelled the
+    # total "actionable". On a watchlist that runs ~96% HOLD the modal
+    # member of that count is a HOLD, which is not actionable in any sense
+    # -- it is the model declining to act. signal_scan.py already carries
+    # the guard ("a HOLD in that band is not a near-miss BUY - do not pool
+    # them"); it is copied here so the two tools cannot disagree about the
+    # same number. The unguarded total is RETAINED on its own line rather
+    # than deleted, because it is a real distributional fact; what was
+    # wrong was the label, not the arithmetic.
+    high_conf = sum(1 for s in signals
+                    if s["confidence"] >= 70 and s["signal"] in ("BUY", "SELL"))
+    high_conf_any = sum(1 for c in confidences if c >= 70)
     low_conf  = sum(1 for c in confidences if c < 40)
 
     lines.append("  CONFIDENCE STATS")
@@ -299,7 +310,8 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
     lines.append(f"  Average confidence : {avg_conf:.1f}%")
     lines.append(f"  Highest            : {max(confidences)}%")
     lines.append(f"  Lowest             : {min(confidences)}%")
-    lines.append(f"  >= 70% (actionable): {high_conf}")
+    lines.append(f"  >= 70% DIRECTIONAL (actionable) : {high_conf}")
+    lines.append(f"  >= 70% any signal, incl. HOLD   : {high_conf_any}")
     lines.append(f"  <  40% (very weak) : {low_conf}")
     lines.append("")
 
@@ -377,7 +389,19 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
             near_miss.append(s)
 
     # --- TIER 1: ACTIONABLE SIGNALS ---
-    lines.append("  ✅ ACTIONABLE SIGNALS (Risk Engine Approved)")
+    # 5b (2026-08-11): this header read "(Risk Engine Approved)".
+    # classify_directional_signal() tests CONFIDENCE THRESHOLDS ONLY and
+    # never reads the risk engine's Decision, so the label asserted a
+    # disposition the function did not compute -- the same class as D-6
+    # (MAX_POSITION_PCT printed as an Active Rule and never consulted).
+    # It was materially false: under the Phase-2 cap the risk engine
+    # approved ZERO directional signals in 57 cohorts, while any BUY at
+    # >= 70 still printed under this heading. DP-3C-o (iii) now allows real
+    # approvals, which makes an uncomputed claim MORE dangerous, not less,
+    # because it would sometimes be right.
+    lines.append("  ✅ ACTIONABLE SIGNALS (confidence threshold met)")
+    lines.append("     Risk-engine disposition is NOT consulted here -- see")
+    lines.append("     the Risk line in the log for the actual decision.")
     lines.append("  " + "-"*40)
     if actionable:
         for s in sorted(actionable, key=lambda x: -x["confidence"]):

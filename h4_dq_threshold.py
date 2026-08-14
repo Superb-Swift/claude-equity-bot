@@ -18,12 +18,14 @@ It does four things, read-only on the tracker:
     3. "DQ != thesis quality" check — the biggest HIGH-DQ +5d misses.
     4. A COUNTERFACTUAL — if HIGH-DQ near-miss BUYs had been kept at a lowered
        threshold, what would those extra kept signals have returned? (+ the n caveat.)
-Then it applies a REOPENING RULE and prints the verdict, plus the 50-59% guardrail.
+Then it applies a REOPENING RULE and prints the verdict. The band-calibration
+block is also printed, but the guardrail is RETIRED (Q1-R closed 2026-07-13):
+history only, no PASS/FAIL, and T3 forbids relying on band ordering.
 
 USAGE
     python h4_dq_threshold.py
     python h4_dq_threshold.py --tracker claude_equity_bot_tracker.xlsx
-    python h4_dq_threshold.py --reopen-n 10 --reopen-hit 60
+    python h4_dq_threshold.py --reopen-n 12 --reopen-hit 60
 """
 
 from __future__ import annotations
@@ -133,6 +135,28 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
     if not rows:
         sys.exit(f"ERROR: no signals in {tracker}")
 
+    # ---- FORMULA-CACHE GUARD (added 2026-07-27) --------------------------
+    # Return+5d and Was-Right-5d are FORMULAS. openpyxl reads their CACHED
+    # values, and any openpyxl save blanks that cache — which the daily runner
+    # now does every session when it embeds the Monitor Strip sheet. Run
+    # against a freshly generated tracker_with_registry.xlsx, this script
+    # therefore saw 0 resolved rows out of 2,390 formula cells and printed
+    # "STAYS DEMOTED" — a VERDICT WITH NO EVIDENCE BEHIND IT, and the exact
+    # failure class this harness exists to avoid. It now refuses instead.
+    # monitor_strip.py is immune because it computes returns from the Price
+    # columns; this script reads the formula columns by design.
+    resolved_any = sum(1 for x in rows if x["right5"] in ("YES", "NO"))
+    if resolved_any == 0:
+        sys.exit(
+            "\nERROR: 0 of %d rows have a resolved Was-Right-5d value.\n"
+            "  This is almost certainly a BLANKED FORMULA CACHE, not missing data.\n"
+            "  Return+5d / Was-Right-5d are formulas; openpyxl reads cached values,\n"
+            "  and any openpyxl save (the daily Monitor Strip embed) clears them.\n"
+            "  FIX: run against the MASTER (logs\\claude_equity_bot_tracker.xlsx),\n"
+            "  which Excel keeps calculated — or open the report copy in Excel once\n"
+            "  to refresh the cache, then re-run.\n"
+            "  Refusing to print a verdict on zero evidence." % len(rows))
+
     print("\n" + "=" * 80)
     print(f"H4 WATCHDOG — DQ-conditional threshold (DEMOTED)   "
           f"source: {os.path.basename(tracker)}")
@@ -184,7 +208,13 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
             nm_high = (h, n, rate, avg)
         if sub:
             print(f"   {tier:<7}{len(sub):>7}{f'{h}/{n}':>10}{fmt(rate,1,'%'):>8}{fmt(avg,2,'%'):>13}")
-    print(f"   ({len(nm)} near-miss BUYs total — cross-checks the Q2 registry of 17.)")
+    # FIXED 2026-08-13: "17" was a hardcoded Phase-2 figure printed against a
+    # live registry that had grown to 43 - a cross-check that could not fail
+    # and therefore checked nothing. The registry is now recomputed here from
+    # the SAME rule build_near_miss_registry.py uses (BUY, conf in [60,70)),
+    # so a divergence between the two instruments is a real, visible finding.
+    print(f"   ({len(nm)} near-miss BUYs total, recomputed from the master on "
+          f"the build_near_miss_registry rule: BUY and 60 <= conf < 70.)")
 
     # ---- 4. DQ != thesis quality ----
     print("\nDQ != THESIS QUALITY — biggest HIGH-DQ +5d misses (input completeness")
@@ -225,8 +255,30 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
     reopen = c1 and c2 and c3
     print(f"\n   VERDICT: H4 {'REOPENS — re-scope a DQ-conditional threshold' if reopen else 'STAYS DEMOTED (backlog)'}.")
     if not reopen:
-        print("   The binding gap is sample size on HIGH-DQ near-misses; only a larger")
-        print("   3-A near-miss sample can reopen it. Re-run as 3-A near-misses accrue.")
+        # CORRECTED 2026-08-04. This block used to print a hardcoded
+        # "the binding gap is sample size" regardless of which condition
+        # actually failed. On 2026-07-28 n passed at 11 while the RATE failed,
+        # so the tool explained its own verdict incorrectly — the same class of
+        # defect (a tool reporting something it did not compute) cleared four
+        # times that week. The explanation is now derived from c1/c2/c3.
+        gaps = []
+        if not c1:
+            gaps.append(f"sample size (n {h_n} < {reopen_n})")
+        if not c2:
+            gaps.append(f"hit rate ({fmt(h_rate,1,'%')} < {reopen_hit}%)")
+        if not c3:
+            gaps.append("HIGH-DQ overall accuracy is not ≥ MEDIUM")
+        print("   Binding gap: " + "; ".join(gaps) + ".")
+        if not c1 and c2:
+            print("   Only a larger resolved near-miss sample can reopen it.")
+        elif c1 and not c2:
+            print("   Sample size is NOT the constraint — the rate is. More rows")
+            print("   alone will not reopen it.")
+    else:
+        print(f"   NOTE: this is ONE reading. The 2026-07-28 ruling requires the")
+        print(f"   pass to hold on TWO CONSECUTIVE readings at n ≥ {reopen_n} before")
+        print(f"   any DQ-conditional design work. This tool does not track prior")
+        print(f"   readings and therefore does NOT assert that condition.")
 
     # ---- guardrail ----
     agg = {"40-49": [0, 0], "50-59": [0, 0], "60-69": [0, 0]}
@@ -242,13 +294,25 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
         if x["right5"] == "YES":
             agg[b][0] += 1
     lead = max(agg, key=lambda b: (agg[b][0] / agg[b][1]) if agg[b][1] else -1)
-    print("\nCALIBRATION GUARDRAIL — cohort-window +5d bands (50-59% must lead):")
+    # ---- calibration guardrail (RETIRED — historical context only) ----
+    # Q1-R was DIAGNOSED and CLOSED 2026-07-13: the 50-59 vs 60-69 inversion was
+    # a go-live calibration IMPROVEMENT (the 60-69 band gained +15.4pt), not a
+    # guardrail failure. The guardrail is RETIRED and T2 is retired with it.
+    # T3 forbids any decision or design relying on confidence-band ordering, so
+    # this block is printed as HISTORY ONLY and carries no PASS/FAIL meaning.
+    # Patched 2026-07-27 to match the treatment already applied in
+    # h1_lag_trace.py; until then this file still printed a live [PASS/WARN].
+    print("\nCALIBRATION GUARDRAIL — RETIRED (Q1-R closed 2026-07-13) — "
+          "historical context only; T3: no band-ordering reliance")
     for b in ("40-49", "50-59", "60-69"):
         h, n = agg[b]
-        print(f"   {b}: {h}/{n} = {h/n*100:.1f}%" + ("  <-- leads" if b == lead else "")
-              if n else f"   {b}: —")
-    ok = lead == "50-59"
-    print(f"   [{'PASS' if ok else 'WARN'}] 50-59% band {'leads' if ok else 'does NOT lead'}")
+        rate = f"{h/n*100:.1f}%" if n else "—"
+        mark = "  <-- leads" if b == lead else ""
+        print(f"   {b}: {h}/{n} = {rate}{mark}")
+    print(f"   (band ordering shown for the record: {lead} leads this window. "
+          f"NOT a pass/fail signal — the guardrail is retired.)")
+    print("   NOTE: this window is the run's --since/--until slice, so these "
+          "rates will differ from the live 6/15+ figures in the notes.")
 
     # ---- markdown ----
     md = [f"# H4 Watchdog — DQ-conditional threshold (DEMOTED)",
@@ -278,8 +342,8 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="H4 DQ-conditional-threshold watchdog.")
     ap.add_argument("--tracker", default="claude_equity_bot_tracker.xlsx")
-    ap.add_argument("--reopen-n", type=int, default=10,
-                    help="min resolved HIGH-DQ near-misses to consider reopening (default 10)")
+    ap.add_argument("--reopen-n", type=int, default=12,
+                    help="min resolved HIGH-DQ near-misses to consider reopening (default 12; raised from 10 on 2026-07-28)")
     ap.add_argument("--reopen-hit", type=float, default=60.0,
                     help="min HIGH-DQ near-miss hit%% to consider reopening (default 60)")
     ap.add_argument("--out-dir", default=".")
@@ -296,7 +360,7 @@ def main(argv=None):
     if SINCE is not None or UNTIL is not None:
         print("")
         print("[DATE SLICE] analyzing " + _window_label())
-        print("   (calibration guardrail uses this same window)")
+        print("   (the retired band-calibration block uses this same window)")
     if not os.path.exists(args.tracker):
         sys.exit(f"ERROR: tracker not found: {args.tracker}")
     os.makedirs(args.out_dir, exist_ok=True)

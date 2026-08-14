@@ -37,24 +37,40 @@ from schwab_client import (
     ACCOUNT_LABELS,
 )
 from claude_signal    import get_signal, print_signal
-from risk_engine      import (evaluate_signal, print_risk_report,
+from risk_engine      import (evaluate_signal, evaluate_signal_per_account,
+                              print_risk_report,
                               calculate_position_size, apply_conf_damping,
                               damp_confidence_value)
 from news_client      import get_recent_headlines
 from ticker_suggester import suggest_tickers, print_suggestions, log_suggestions
 from signal_state     import load_signal_state, save_signal_state, update_signal_state
-from context_providers import run_blend_scores
+from context_providers import run_blend_scores, run_prompt_context
 from blend_engine      import blend_confidence
 import blend_providers  # noqa: F401 — registers the sector + regime blend providers
 
 load_dotenv()
+
+# Phase 3-C: registering edgar_client is what puts the EDGAR section on the
+# prompt-provider registry. Gated so that run_prompt_context() stays generic —
+# a future WS3 commodity provider would register independently of this flag.
+if os.environ.get("EQUITY_EDGAR", "0") == "1":
+    import edgar_client  # noqa: F401 — registers the EDGAR prompt provider
 
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-PHASE = "3-B"   # advisory-only development (WS2 live); set to 2 to replay the Phase 2 handler
+PHASE = "3-C"   # advisory-only development (WS2 live); set to 2 to replay the Phase 2 handler
+# CHANGE-ORDER STEP 7 + 7b, 2026-08-11 — BOUND TOGETHER, DO NOT SPLIT.
+#   D-8: this constant and the dispatch tuple below are independent, and
+#   moving PHASE without extending the tuple sends EVERY ticker to the
+#   else-branch log.error at the dispatch. The run then emits ZERO
+#   "Signal JSON:" lines while STILL having spent all 24 API calls
+#   (get_signal is called before the dispatch) and STILL advancing
+#   signal_state.json (the S1 write sits outside the dispatch). The
+#   parser audit cannot see it because it never executes main.py.
+#   phase_dispatch_audit.py now gates exactly this pairing.
 
 # A/B testing (H2 — direction asymmetry). When AB_TEST is True, every ticker is
 # scored under each prompt variant on identical inputs and logged separately, so
@@ -72,7 +88,22 @@ AB_VARIANTS = ("A", "B")
 #   blend (C2 sector + C3 regime). Still ONE live arm, not an A/B. The
 #   base signal remains the official advisory output; the blend is logged
 #   (confidence_blend) and measured for G2 but does not drive the gate.
-PROMPT_VARIANT = "A-S1D1-B1"
+# ANALYST NOTE (2026-08-02, Phase 3-C / EW1): "-E1" adds the EDGAR SEC filing
+#   prompt section. Still ONE live arm, not an A/B (DP-2 default; DP-2 is not
+#   yet ruled — rule it at the kickoff review before EQUITY_EDGAR is set).
+#
+#   THE FLAG AND THE ERA STAMP MOVE TOGETHER, DELIBERATELY. E4 stratifies
+#   pre/post-EDGAR cohorts on the era stamp. If EDGAR could go live while the
+#   stamp still read "A-S1D1-B1", treated rows would be filed as control rows
+#   and the endpoint would be silently poisoned with no way to recover the
+#   split after the fact. Deriving one from the other makes that
+#   unrepresentable rather than merely discouraged.
+#
+#   DEFAULT OFF. EW2 order is non-negotiable: pre-deploy parser audit -> PM
+#   diagnostic smoke -> go-live next AM. Set EQUITY_EDGAR=1 at go-live only.
+EDGAR_ENABLED = os.environ.get("EQUITY_EDGAR", "0") == "1"
+
+PROMPT_VARIANT = "A-S1D1-B1-E1" if EDGAR_ENABLED else "A-S1D1-B1"
 
 WATCHLIST_SCOUT = [
     "SPY",
@@ -80,6 +111,7 @@ WATCHLIST_SCOUT = [
     "VTI",
     "NVDA",
     "GLD",
+    "SPCX",
 ]
 
 MONITOR_HOLDINGS = True
@@ -286,7 +318,7 @@ def handle_phase2(ticker: str, signal: dict, position_detail: dict,
 def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
                    portfolios: list, price_history: list = None,
                    variant: str = None, prior_signals: list = None,
-                   blend_caches: dict = None) -> None:
+                   blend_caches: dict = None, edgar_meta: dict = None) -> None:
     """
     Phase 3-A: Advisory-only dry run WITH the H1 prior-5-day price input.
 
@@ -306,6 +338,11 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
         shape that parse_log_to_tracker.py expects; the H1[...] marker is
         appended after the existing fields and is ignored by the parser.
     """
+    # D-1 (RULED RW 2026-08-11): `portfolios[0]` fed the risk engine ONE
+    # arbitrary account. It is retained ONLY for print_risk_report and the
+    # display path below; every RISK DECISION now goes through
+    # evaluate_signal_per_account(), which walks every account. Do not
+    # reintroduce `portfolio` as a risk input.
     portfolio = portfolios[0] if portfolios else {}
 
     # WS2 Lever A (H1 feature-level): mechanical confidence damping runs
@@ -327,7 +364,11 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
     signal["sector_score"] = round(blend_scores.get("sector", 0.0), 3)
     signal["regime_score"] = round(blend_scores.get("regime", 0.0), 3)
 
-    approved, reason = evaluate_signal(signal, portfolio)
+    # D-1/D-2 + DP-3C-o (ii), RW 2026-08-11: per-account evaluation.
+    # position_detail carries account_breakdown for held names; a scout
+    # has none, and every account is then a candidate for the BUY.
+    approved, reason = evaluate_signal_per_account(
+        signal, portfolios, position_detail.get("account_breakdown"))
 
     held_marker = "[HELD]" if position_detail.get("is_held") else "[SCOUT]"
     accounts = ",".join(position_detail.get("held_in_accounts", []))
@@ -366,6 +407,18 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
              f"w=0.15/0.15; base={damp_meta.get('raw')}; "
              f"blend={blend_meta.get('blend')}; blend_op={signal.get('confidence_blend')}]")
 
+    # E tag — Phase 3-C EDGAR filing context (Scope Spec §3). Appended AFTER
+    # B[...]. ANALYST NOTE (E3, verified 2026-08-02 on synthetic 3-C lines):
+    #   both parsers tolerate trailing tags — analyze_log.py absorbs them into
+    #   its `reason` capture and parse_log_to_tracker.py never reads past
+    #   [HELD|SCOUT]. The ERA STAMP stays in the JSON prompt_variant field and
+    #   NEVER inside the phase bracket: analyze_log.py hardcodes
+    #   `DRY RUN(?: A)?\]` and returns ZERO signals silently on anything else.
+    e_tag = ""
+    if EDGAR_ENABLED:
+        from edgar_client import edgar_tag
+        e_tag = f" | {edgar_tag(edgar_meta)}"
+
     phase_tag = f"[PHASE {PHASE} DRY RUN{(' ' + variant) if variant else ''}]"
     log.info(
         f"Signal JSON: {json.dumps(signal)} | "
@@ -374,11 +427,13 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
         f"Confidence: {signal.get('confidence')}% | "
         f"Risk: {'APPROVED' if approved else 'REJECTED'} | "
         f"Reason: {reason} | "
-        f"{h1_tag} | {s1_tag} | {d_tag} | {b_tag}"
+        f"{h1_tag} | {s1_tag} | {d_tag} | {b_tag}{e_tag}"
     )
 
     print_signal(signal)
-    print_risk_report(signal, portfolio)
+    # D-1: pass the decision that was actually logged, and every account,
+    # so the console cannot print a second, differently-computed verdict.
+    print_risk_report(signal, portfolio, approved, reason, portfolios)
     print(f"  >>> PHASE {PHASE} (advisory-only): No order placed. "
           f"Signal logged to {log_filename}\n")
 
@@ -390,7 +445,8 @@ def handle_phase3a(ticker: str, signal: dict, position_detail: dict,
 def process_ticker(ticker: str, portfolios: list,
                    quote_cache: dict, news_cache: dict,
                    history_cache: dict, signal_state: dict,
-                   blend_caches: dict = None) -> None:
+                   blend_caches: dict = None,
+                   prompt_caches: dict = None) -> None:
     """
     Process a single ticker ONCE across all accounts.
 
@@ -477,6 +533,18 @@ def process_ticker(ticker: str, portfolios: list,
         # RAW confidences (state is updated with confidence_raw below), so
         # the model-side channel is never contaminated by Lever A's damping.
         prior_signals = signal_state.get(ticker, [])
+
+        # Phase 3-C: prompt-mode provider registry (EDGAR filings section).
+        # Returns "" when no provider is registered or the fetch degraded —
+        # the run then proceeds on price + news exactly as before. This ONE
+        # PARAMETER is the entire integration (Scope Spec §3); it never
+        # touches confidence, the blend or the risk gate (DP-4).
+        extra_context = run_prompt_context(ticker, prompt_caches or {})
+        edgar_meta = {}
+        if EDGAR_ENABLED:
+            from edgar_client import last_meta
+            edgar_meta = last_meta(ticker)
+
         for variant in variants:
             signal = get_signal(
                 ticker=ticker,
@@ -486,7 +554,8 @@ def process_ticker(ticker: str, portfolios: list,
                 metrics=None,
                 price_history=price_history,
                 prior_signals=prior_signals,
-                prompt_variant=variant
+                prompt_variant=variant,
+                extra_context=extra_context
             )
 
             signal["lastPrice"] = quote.get("lastPrice", 0)
@@ -494,11 +563,12 @@ def process_ticker(ticker: str, portfolios: list,
 
             if PHASE == 2:
                 handle_phase2(ticker, signal, position_detail, portfolios)
-            elif PHASE in ("3-A", "3A", 3, "3-B", "3B"):
+            elif PHASE in ("3-A", "3A", 3, "3-B", "3B", "3-C", "3C"):
                 handle_phase3a(ticker, signal, position_detail, portfolios,
                                price_history, variant=tag_variant,
                                prior_signals=prior_signals,
-                               blend_caches=blend_caches)
+                               blend_caches=blend_caches,
+                               edgar_meta=edgar_meta)
             else:
                 log.error(f"Phase {PHASE} handler not implemented in this build.")
 
@@ -658,9 +728,18 @@ def run_bot():
     # WS1 blend context — prefetched once for the whole run.
     blend_caches = prefetch_blend_context(watchlist)
 
+    # Phase 3-C: warm the CIK map + per-ticker submissions once per run.
+    # Bounded by EDGAR_MAX_SECONDS; any failure degrades that ticker to
+    # no-EDGAR rather than failing the run (E3 graceful degradation).
+    prompt_caches = {}
+    if EDGAR_ENABLED:
+        from edgar_client import prefetch_edgar_context
+        prompt_caches = prefetch_edgar_context(watchlist)
+
     for ticker in watchlist:
         process_ticker(ticker, portfolios, quote_cache, news_cache,
-                       history_cache, signal_state, blend_caches)
+                       history_cache, signal_state, blend_caches,
+                       prompt_caches)
 
     # STEP 5: Generate ticker suggestions
     if ENABLE_SUGGESTIONS:

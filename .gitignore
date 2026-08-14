@@ -26,6 +26,10 @@ logs/
 paste_today.tsv
 backfill.tsv
 all_may.tsv
+tracker_with_registry.xlsx
+near_miss_registry.xlsx
+actionable_registry.xlsx
+monitor_strip*.png
 
 # Personal workflow docs (keep local, not in repo)
 *.docx
@@ -35,3 +39,4 @@ claude_equity_bot_tracker.xlsx
 # WS2 runtime state — bot-maintained prior-signal cache (re-seedable from the
 # tracker via seed_signal_state.py; raw-confidence channel, see signal_state.py)
 signal_state.json
+edgar_cache/

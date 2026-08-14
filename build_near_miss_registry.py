@@ -175,9 +175,18 @@ def load_near_misses(tracker_path: str, lock_cutoff: dt.date) -> list[NearMiss]:
 
     rows: list[NearMiss] = []
     blank_streak = 0
-    for r in range(FIRST_DATA_ROW, LAST_DATA_ROW_CAP):
-        d = as_date(ws.cell(row=r, column=COL["date"]).value)
-        tk = ws.cell(row=r, column=COL["ticker"]).value
+    # 2026-08-13: SINGLE PASS via iter_rows. On a read_only worksheet every
+    # ws.cell() call can re-walk the sheet, so the old per-cell scan was O(rows^2)
+    # and took minutes at 1,460 rows. Behaviour is identical -- same columns, same
+    # blank-streak break, same order -- only the access pattern changed.
+    for vals in ws.iter_rows(min_row=FIRST_DATA_ROW, max_row=LAST_DATA_ROW_CAP,
+                             min_col=1, max_col=COL["notes"], values_only=True):
+        def g(name):
+            i = COL[name] - 1
+            return vals[i] if i < len(vals) else None
+
+        d = as_date(g("date"))
+        tk = g("ticker")
         if d is None and not tk:
             blank_streak += 1
             if blank_streak >= 25:          # well past the data; stop scanning
@@ -186,23 +195,20 @@ def load_near_misses(tracker_path: str, lock_cutoff: dt.date) -> list[NearMiss]:
         blank_streak = 0
         if d is None:
             continue
-        sig = ws.cell(row=r, column=COL["signal"]).value
-        conf = ws.cell(row=r, column=COL["conf"]).value
+        sig = g("signal")
+        conf = g("conf")
         if not (is_buy(sig) and in_band(conf)):
             continue
         rows.append(NearMiss(
             date=d,
             ticker=str(tk).strip(),
-            account=str(ws.cell(row=r, column=COL["account"]).value or "").strip(),
+            account=str(g("account") or "").strip(),
             conf=conf if conf <= 1.0 else conf / 100.0,
-            dq=str(ws.cell(row=r, column=COL["dq"]).value or "").strip(),
-            p0=ws.cell(row=r, column=COL["p0"]).value,
-            p5=ws.cell(row=r, column=COL["p5"]).value,
-            p10=ws.cell(row=r, column=COL["p10"]).value,
-            r5=ws.cell(row=r, column=COL["r5"]).value,
-            r10=ws.cell(row=r, column=COL["r10"]).value,
-            right5_src=ws.cell(row=r, column=COL["right5"]).value,
-            notes=str(ws.cell(row=r, column=COL["notes"]).value or "").strip(),
+            dq=str(g("dq") or "").strip(),
+            p0=g("p0"), p5=g("p5"), p10=g("p10"),
+            r5=g("r5"), r10=g("r10"),
+            right5_src=g("right5"),
+            notes=str(g("notes") or "").strip(),
             d5=add_trading_days(d, 5, NYSE_HOLIDAYS),
             d10=add_trading_days(d, 10, NYSE_HOLIDAYS),
             segment="LOCKED" if d <= lock_cutoff else "EXTENDED",
@@ -547,9 +553,25 @@ def console_digest(rows, locked, extended, expect_locked):
           locked["n"] == expect_locked)
     check("every row has a valid +5d / +10d trading date",
           all(r.d5 and r.d10 for r in rows))
-    check("no signal misclassified (all in [60%,70%) BUY)",
-          all(is_buy(BUY_LABEL) for _ in [0]) and
+    # 2026-08-13: the former first conjunct read `all(is_buy(BUY_LABEL) for _ in
+    # [0])` -- i.e. is_buy("BUY"), a literal compared against itself. It was
+    # unconditionally True and tested nothing. Removed; only the band half ever
+    # did work, and a reconciliation that CAN fail is added below.
+    check("no signal misclassified (all in [60%,70%))",
           all(BAND_LOW <= r.conf * 100 < BAND_HIGH for r in rows))
+    # 2026-08-13: right5_src is pulled from the master's own "Was Claude Right?
+    # (5d)" column and was previously never read -- the sheet writes its own
+    # =IF(r5>0,...) formula instead, so the master was silently NOT cross-checked.
+    # This makes the comparison real. A disagreement means the master's rightness
+    # column and the registry's sign test have diverged, which is a finding.
+    def _mismatch(r):
+        if r.r5 is None or r.right5_src is None:
+            return False
+        return str(r.right5_src).strip().upper() != ("YES" if r.r5 > 0 else "NO")
+    bad = [f"{r.date} {r.ticker}" for r in rows if _mismatch(r)]
+    check("registry sign test reconciles with the master's Right?(5d) column"
+          + (f" -- MISMATCHES: {', '.join(bad)}" if bad else ""),
+          not bad)
     # reconcile the immutable locked baseline
     b = LOCKED_BASELINE
     check(f"locked hit +5d == {b['hit5']}/{b['comp5']}",

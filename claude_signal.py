@@ -280,7 +280,7 @@ def _build_position_section(position: dict) -> list:
 def get_signal(ticker: str, quote: dict, position: dict = None,
                headlines: list = None, metrics: dict = None,
                price_history: list = None, prior_signals: list = None,
-               prompt_variant: str = "A") -> dict:
+               prompt_variant: str = "A", extra_context: str = "") -> dict:
     """
     Generate a structured trading signal for a ticker using Claude.
 
@@ -294,6 +294,18 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
         prior_signals (list): Optional last-N own outputs for this ticker
                               (S1 prior-signal state input)
         prompt_variant (str): "A" (base build) or "B" (H2 symmetric framing)
+        extra_context (str): Optional pre-rendered prompt sections from the
+                             WS1 provider registry (context_providers.
+                             run_prompt_context). Phase 3-C: the EDGAR SEC
+                             filing section. "" contributes nothing.
+
+    ANALYST NOTE (2026-08-02, Phase 3-C / EW1):
+        extra_context is THE ENTIRE INTEGRATION SURFACE for prompt-mode
+        context providers — one parameter, appended as a prompt section.
+        It is deliberately opaque: this module never parses it, never
+        inspects it, and never lets it reach confidence, the blend or the
+        risk gate. DP-4 holds — filings shape the signal only through the
+        model's reasoning on the text below.
 
     Returns:
         dict: Structured signal, or error dict
@@ -316,6 +328,11 @@ def get_signal(ticker: str, quote: dict, position: dict = None,
         prompt_parts.append("\nKey Financial Metrics:")
         for key, value in metrics.items():
             prompt_parts.append(f"  {key}: {value}")
+
+    # Provider-registry sections (WS1 registry, mode="prompt"). Phase 3-C:
+    # the EDGAR SEC filings section. Empty string contributes nothing.
+    if extra_context:
+        prompt_parts.append("\n" + extra_context.strip())
 
     prompt_parts.append("\nBased on this data, generate your structured JSON signal.")
 

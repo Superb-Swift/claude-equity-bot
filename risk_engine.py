@@ -98,7 +98,8 @@ class RiskConfig:
 # RISK EVALUATION
 # =============================================================================
 
-def evaluate_signal(signal: dict, portfolio: dict) -> tuple[bool, str]:
+def evaluate_signal(signal: dict, portfolio: dict,
+                    held_value: float = None) -> tuple[bool, str]:
     """
     Evaluate a Claude signal against all risk rules.
 
@@ -178,14 +179,92 @@ def evaluate_signal(signal: dict, portfolio: dict) -> tuple[bool, str]:
         )
 
     # ------------------------------------------------------------------
-    # CHECK 6: Portfolio concentration — too many open positions
+    # CHECK 6: Portfolio concentration — MONITORING-BURDEN FLAG, NOT A GATE
+    #
+    # RULED 2026-08-11 — DP-3C-o (i) + (iii). RW.
+    #   (i)  D-3: the cap applies to BUY only. A SELL REDUCES the position
+    #        count, so rejecting one for "too many open positions" is the
+    #        rule firing in the opposite direction to its own purpose. This
+    #        is what rejected CBRS's SELL at conf 68 on 2026-06-26, which
+    #        stands in the DP-3C-l ledger as "REJECTED — position count".
+    #   (iii) The check no longer REJECTS. It records a flag and the signal
+    #        proceeds to the human-approval gate.
+    #
+    # RATIONALE OF RECORD: MAX_OPEN_POSITIONS is a monitoring-burden cap,
+    # not a risk cap, and RiskConfig's own note (L59-63) says so in as many
+    # words — "Fewer positions = more concentration risk but easier to
+    # monitor. More positions = more diversification but harder to track."
+    # By its own comment the cap BUYS monitoring convenience by ACCEPTING
+    # concentration risk. A rule that increases the risk it is filed under
+    # should not hold a veto over the signal.
+    #
+    # PRESERVED FINDING, REQUIRED BY THE RULING AND NOT TO BE ERASED:
+    #   Under the Phase-2 cap the risk engine approved ZERO directional
+    #   signals across 57 cohorts. That is the pre-change record. This
+    #   amendment makes the approval rate look better BY CONSTRUCTION, so
+    #   any future reading of approval counts MUST date-split on 2026-08-11
+    #   rather than pool across it. Recorded as making the record look
+    #   better, which is the direction warranting the most scepticism.
+    #
+    # NOT ADOPTED: DP-3C-o (ii) — enforcing MAX_POSITION_PCT inside
+    # evaluate_signal — is NOT ruled and is NOT implemented. The rule that
+    # actually sizes a position therefore still does not run inside this
+    # function. Recorded as an OPEN ITEM, because demoting CHECK 6 without
+    # (ii) leaves no position-concentration rule enforced at evaluation
+    # time; calculate_position_size still bounds the RECOMMENDED share
+    # count downstream, but nothing bounds concentration at the gate.
+    #
+    # PRE-CONDITION SATISFIED: D-7's approval-path audit passes as of
+    # 2026-08-11 — the parsers have now seen an APPROVED directional row
+    # carrying the multi-sentence PENDING HUMAN APPROVAL reason. Touching
+    # CHECK 6 before that audit existed would have shipped a never-parsed
+    # line shape into a canonical cohort.
     # ------------------------------------------------------------------
     open_positions = portfolio.get("positions", [])
-    if len(open_positions) >= cfg.MAX_OPEN_POSITIONS:
-        return False, (
-            f"Too many open positions: {len(open_positions)} >= "
-            f"max {cfg.MAX_OPEN_POSITIONS}."
+    if sig == "BUY" and len(open_positions) >= cfg.MAX_OPEN_POSITIONS:
+        signal.setdefault("risk_flags", []).append(
+            f"RISK-ENGINE: {len(open_positions)} open positions at or above "
+            f"the monitoring cap of {cfg.MAX_OPEN_POSITIONS} "
+            f"(CHECK 6, non-blocking per DP-3C-o)"
         )
+
+    # ------------------------------------------------------------------
+    # CHECK 6b: POSITION CONCENTRATION — MAX_POSITION_PCT, ENFORCED
+    #
+    # RULED 2026-08-11 — DP-3C-o (ii). RW.
+    #   MAX_POSITION_PCT was printed as an Active Rule on every signal and
+    #   consulted by NOTHING inside evaluate_signal (D-6: calculate_position_
+    #   size is imported at main.py L41 and never called, so the cap was
+    #   advertised everywhere and enforced nowhere — the thirteenth instance
+    #   of the tool-reports-a-value-it-did-not-compute class and the first
+    #   found in the risk engine). This is the rule that actually measures
+    #   concentration risk, so this is the rule that now runs.
+    #
+    # WHY THIS ENFORCES WHILE CHECK 6 ONLY FLAGS: MAX_POSITION_PCT is a REAL
+    # risk cap — its own note says it "prevents catastrophic loss if one
+    # position goes to zero". MAX_OPEN_POSITIONS is a monitoring-burden cap
+    # by its own note. The real cap gates; the burden cap reports.
+    #
+    # DENOMINATOR: `portfolio` is ONE ACCOUNT, per D-1/D-2 (RW 2026-08-11).
+    # `held_value` is this ticker's market value IN THAT SAME ACCOUNT. Both
+    # sides of the comparison are therefore account-scoped, which is the
+    # whole point of the D-1 ruling: 5% of the account that actually holds
+    # the position, never 5% of a blended total.
+    #
+    # held_value=None means the caller did not supply per-account holdings,
+    # and the check is SKIPPED rather than guessed. A concentration rule
+    # evaluated against an unknown denominator would be worse than none.
+    # ------------------------------------------------------------------
+    if sig == "BUY" and held_value is not None:
+        pvalue = portfolio.get("portfolio_value", 0) or 0
+        if pvalue > 0:
+            cap_dollars = cfg.MAX_POSITION_PCT * pvalue
+            if held_value >= cap_dollars:
+                return False, (
+                    f"Position concentration: {ticker} is already "
+                    f"${held_value:,.0f} in this account, at or above the "
+                    f"{cfg.MAX_POSITION_PCT:.0%} cap of ${cap_dollars:,.0f}."
+                )
 
     # ------------------------------------------------------------------
     # CHECK 7: Duplicate position guard
@@ -229,6 +308,107 @@ def evaluate_signal(signal: dict, portfolio: dict) -> tuple[bool, str]:
 
     # All checks passed
     return True, "Passed all risk checks. Ready for execution."
+
+
+# =============================================================================
+# D-1 / D-2 -- PER-ACCOUNT EVALUATION
+# =============================================================================
+# RULED 2026-08-11 -- D-1 / D-2. RW: PER-ACCOUNT, not consolidated.
+#
+# THE DEFECT: main.py L339 passed `portfolios[0] if portfolios else {}` into
+# evaluate_signal -- whichever account Schwab happened to return first. Every
+# risk decision in 57 cohorts was therefore computed against ONE arbitrary
+# account while the bot trades across Roth IRA, Individual and Scout.
+# `print_aggregate_summary` and `build_consolidated_position` both walk every
+# portfolio correctly; the risk engine alone did not. The rejection that
+# killed NVDA and CBRS -- "Too many open positions: 16 >= max 8" -- cited a
+# count describing a fraction of the portfolio.
+#
+# RULING RATIONALE OF RECORD (RW): per-account is tighter and more accurate.
+# Consolidation invites misleading aggregates and blurs the case where 5% of
+# the combined value exceeds 5% of the account actually holding the position.
+#
+# TARGETING:
+#   SELL -> only accounts that HOLD the ticker. You cannot sell what is not
+#           there, so a SELL is never evaluated against an account with no
+#           position in the name.
+#   BUY  -> EVERY account (RW 2026-08-11). A new position could land in any
+#           of them, so no account is privileged by assumption.
+#
+# COLLAPSE (RW 2026-08-11): the single Risk: token reads APPROVED when the
+# signal is actionable in AT LEAST ONE account. The per-account split is
+# preserved verbatim in the reason rather than discarded, because "actionable
+# in the Roth but not the Individual" is the actual answer and collapsing it
+# to one bit destroys the fact the D-1 ruling exists to expose.
+#
+# THE REASON CONTAINS NO " | ". main.py joins the log line's fields with
+# " | ", so a pipe inside the reason would truncate every downstream parser's
+# capture at the wrong point. Separator is "; " deliberately. D-7 established
+# that the parsers tolerate a long multi-sentence reason; it did NOT establish
+# that they tolerate one containing the field delimiter, and this code must
+# not be the thing that finds out.
+# =============================================================================
+
+def evaluate_signal_per_account(signal: dict, portfolios: list,
+                                account_breakdown: list = None) -> tuple[bool, str]:
+    """Evaluate one signal against each relevant account separately.
+
+    Returns the same (approved, reason) contract as evaluate_signal, so the
+    log line shape is unchanged -- only the reason TEXT grows.
+    """
+    cfg = RiskConfig()
+    sig = signal.get("signal", "HOLD")
+
+    held = {}
+    for h in (account_breakdown or []):
+        lbl = h.get("account_label")
+        if lbl is not None:
+            held[lbl] = h.get("market_value", 0.0) or 0.0
+
+    # No portfolios at all: degrade to the documented empty-portfolio path
+    # rather than inventing an approval.
+    if not portfolios:
+        return evaluate_signal(signal, {})
+
+    results = []
+    for p in portfolios:
+        label = p.get("account_label", "?")
+        if sig == "SELL" and label not in held:
+            continue
+        probe = dict(signal)
+        probe["risk_flags"] = []
+        ok, why = evaluate_signal(probe, p, held_value=held.get(label))
+        results.append((label, ok, why, probe.get("risk_flags") or []))
+
+    if not results:
+        # A SELL on a ticker held nowhere. Real, and not an approval.
+        return False, (
+            f"{signal.get('ticker', 'UNKNOWN')}: SELL signal but the ticker "
+            f"is not held in any account."
+        )
+
+    # Engine-generated flags carry the account they came from, otherwise a
+    # flag reading "16 open positions" is the same ambiguity D-1 just fixed.
+    merged = signal.setdefault("risk_flags", [])
+    for label, _ok, _why, flags in results:
+        for f in flags:
+            merged.append(f"[{label}] {f}")
+
+    approved = any(ok for _l, ok, _w, _f in results)
+    split = "; ".join(
+        f"{label}={'APPROVED' if ok else 'REJECTED'}"
+        for label, ok, _w, _f in results)
+
+    if approved:
+        base = next(why for _l, ok, why, _f in results if ok)
+        blocked = [f"{label}: {why.rstrip('.')}"
+                   for label, ok, why, _f in results if not ok]
+        detail = (" NOT actionable in " + "; ".join(blocked) + ".") if blocked else ""
+        return True, f"{base} PER-ACCOUNT: {split}.{detail}"
+
+    worst = "; ".join(f"{label}: {why.rstrip('.')}"
+                      for label, _ok, why, _f in results)
+    return False, f"Rejected in every account. PER-ACCOUNT: {split}. {worst}."
 
 
 # =============================================================================
@@ -280,7 +460,9 @@ def calculate_position_size(portfolio_value: float,
 # RISK REPORT
 # =============================================================================
 
-def print_risk_report(signal: dict, portfolio: dict) -> None:
+def print_risk_report(signal: dict, portfolio: dict,
+                      approved: bool = None, reason: str = None,
+                      portfolios: list = None) -> None:
     """
     Print a human-readable risk evaluation report to the terminal.
 
@@ -293,7 +475,28 @@ def print_risk_report(signal: dict, portfolio: dict) -> None:
         signal    (dict): Signal from claude_signal.get_signal()
         portfolio (dict): Portfolio summary from schwab_client.get_portfolio_summary()
     """
-    approved, reason = evaluate_signal(signal, portfolio)
+    # D-1 (RW 2026-08-11) -- DO NOT RE-EVALUATE HERE.
+    #
+    # This function used to call evaluate_signal() itself, independently of
+    # the caller. That was survivable while both calls saw the same input.
+    # It stopped being survivable the moment the LOG began deciding
+    # per-account: main.py would log the per-account verdict and this
+    # function would print a SECOND verdict computed against portfolios[0]
+    # alone. A signal approved in Individual but rejected in the Roth would
+    # have LOGGED APPROVED and PRINTED REJECTED, on the same row, in the
+    # same run -- two computations of one value that can disagree, which is
+    # the defect class this file has now produced three times (D-5, D-6,
+    # and the CHECK 6 label).
+    #
+    # It also double-appended: CHECK 6 mutates signal["risk_flags"], so a
+    # second evaluation of the same dict added the flag twice. The logged
+    # JSON escaped that only because main.py logs BEFORE printing.
+    #
+    # The caller now passes the decision it actually made and logged. The
+    # fallback re-evaluates only when a caller supplies neither -- which is
+    # the dead handle_phase2 path and any external caller of this helper.
+    if approved is None or reason is None:
+        approved, reason = evaluate_signal(signal, portfolio)
 
     status_color = "\033[92m" if approved else "\033[91m"
     reset        = "\033[0m"
@@ -304,14 +507,29 @@ def print_risk_report(signal: dict, portfolio: dict) -> None:
     print(f"  Decision : {status_color}{'APPROVED' if approved else 'REJECTED'}{reset}")
     print(f"  Reason   : {reason}")
 
-    if approved and signal.get("signal") == "BUY":
-        price  = signal.get("lastPrice", 0)
-        pvalue = portfolio.get("portfolio_value", 0)
-        if price and pvalue:
-            shares = calculate_position_size(pvalue, price)
-            print(f"  Shares   : {shares} shares recommended")
-
     cfg = RiskConfig()
+
+    # D-1 (RW 2026-08-11): size PER ACCOUNT. MAX_POSITION_PCT is a
+    # percentage OF AN ACCOUNT, so a single recommendation computed from
+    # portfolios[0] is a share count for an account the approval may not
+    # even apply to. Each account is sized against its OWN value; the
+    # per-account approval split is in the Reason line above.
+    if approved and signal.get("signal") == "BUY":
+        price = signal.get("lastPrice", 0)
+        accounts = portfolios if portfolios else ([portfolio] if portfolio else [])
+        printed = False
+        for p in accounts:
+            pvalue = p.get("portfolio_value", 0)
+            if not (price and pvalue):
+                continue
+            label = p.get("account_label", "Account")
+            shares = calculate_position_size(pvalue, price)
+            print(f"  Shares   : {shares} shares in {label} "
+                  f"({cfg.MAX_POSITION_PCT:.0%} of ${pvalue:,.0f})")
+            printed = True
+        if not printed:
+            print("  Shares   : not sized -- no account value available")
+
     print(f"\n  Active Rules:")
     print(f"    Min BUY confidence  : {cfg.MIN_CONFIDENCE_BUY}%")
     print(f"    Min SELL confidence : {cfg.MIN_CONFIDENCE_SELL}%")
