@@ -1,0 +1,281 @@
+=============================================================================
+COMMIT BACKLOG RUNBOOK — 2026-08-10
+Claude Equity Bot · repo Superb-Swift/claude-equity-bot
+ONE COMMAND AT A TIME. Batch sequences have failed on push before.
+Read the STOP conditions. Do not skip Phase 0.
+=============================================================================
+
+Everything post-2026-07-27 is untracked on one disk. This retires it.
+Zero code risk — nothing here changes behaviour. It is copying work to a
+second location. Roughly 20 minutes at one command at a time.
+
+
+=============================================================================
+PHASE 0 — SAFETY PRE-FLIGHT. Do not skip. Do not batch.
+=============================================================================
+The single worst outcome today is committing a credential to a repo. Two
+files in this project carry secrets:
+    token.json   Schwab OAuth refresh token — full account read access
+    .env         SEC_USER_AGENT, and whatever else lives there
+A third, edgar_cache\, is large, derived and re-fetchable and must not go in.
+
+--- 0.1 Where you are and what git thinks is going on
+cd C:\Users\rober\claude-equity-bot
+
+--- 0.2
+git status
+
+    Read the untracked list. If token.json, .env, or edgar_cache\ appear
+    under "Untracked files", that is expected right now — 0.4 fixes it.
+
+--- 0.3 Is anything sensitive ALREADY tracked from an earlier commit?
+git ls-files | findstr /I "token .env secret key credential"
+
+    STOP CONDITION. Any output here means a secret is already in history.
+    Do not proceed. Removing it needs `git rm --cached` plus a rotated
+    Schwab token, and history rewriting if it was ever pushed. Tell me and
+    we will work it properly rather than layering a commit on top.
+
+--- 0.4 What does .gitignore currently say?
+type .gitignore
+
+    It must contain, at minimum:
+        token.json
+        .env
+        edgar_cache/
+        __pycache__/
+        venv/
+        *.pyc
+    If any are missing, add them in the editor NOW, save, and continue.
+    If .gitignore does not exist at all, create it with those six lines.
+
+--- 0.5 Confirm the ignores actually bite
+git status --short
+
+    STOP CONDITION. If token.json, .env or edgar_cache/ still appear,
+    the ignore is not taking effect (usually because the file was tracked
+    once). Stop and tell me before committing anything.
+
+--- 0.6 Confirm the remote is reachable BEFORE you build up commits
+git remote -v
+
+--- 0.7
+git fetch origin
+
+    STOP CONDITION. If this fails on auth, fix credentials first. Building
+    six commits and discovering you cannot push is the failure mode this
+    runbook exists to avoid.
+
+--- 0.8 Are you behind?
+git status -sb
+
+    If behind origin, `git pull --rebase` before continuing.
+
+
+=============================================================================
+PHASE 1 — .gitignore first, alone, so every later commit is protected by it
+=============================================================================
+--- 1.1
+git add .gitignore
+
+--- 1.2
+git commit -m "chore: ignore credentials, EDGAR cache, venv"
+
+--- 1.3 Prove the push path works while only one harmless commit is at risk
+git push origin main
+
+    (If the branch is not `main`, substitute. `git status -sb` told you.)
+    STOP CONDITION. If this fails, stop here and fix it. Everything below
+    assumes push works.
+
+
+=============================================================================
+PHASE 2 — CODE. Grouped by what they are, one commit each.
+=============================================================================
+--- 2.1 EDGAR client and its pre-deploy audit (Phase 3-C EW1)
+git add edgar_client.py edgar_parser_audit.py
+
+--- 2.2
+git commit -m "feat(3-C): edgar_client.py prompt provider + pre-deploy parser audit
+
+EW1 build, 2026-08-02. ContextProvider(mode=prompt) on the WS1 registry.
+CIK map, submissions fetch, cache, MD&A + XBRL extraction, E[...] log tag.
+102 self-test assertions. edgar_parser_audit.py runs the real parsers
+against a synthesised 24-row 3-C log (E3 gate).
+
+Known open: N-1 (YTD figures under a quarter label) is UNFIXED. EDGAR is
+not live; EQUITY_EDGAR is unset and every cohort since 8/03 is a control."
+
+--- 2.3
+git push origin main
+
+--- 2.4 Integration points
+git add main.py claude_signal.py
+
+--- 2.5
+git commit -m "feat(3-C): EQUITY_EDGAR flag, era derivation, extra_context wiring
+
+main.py: EQUITY_EDGAR gates registration; EDGAR_ENABLED and PROMPT_VARIANT
+are derived from one another so EDGAR cannot go live under the pre-EDGAR
+stamp. claude_signal.py: extra_context appended as a prompt section.
+
+Carried defect: the phase bracket still reads [PHASE 3-B DRY RUN] on a 3-C
+cohort. Not fixed here — the parsers key on that token and the fix must
+land with the parser updates and a passing audit in one change."
+
+--- 2.6
+git push origin main
+
+--- 2.7 Daily harnesses added 2026-07-30
+git add signal_scan.py log_tracker_crosscheck.py retired_criteria_audit.py
+
+--- 2.8
+git commit -m "feat(tools): signal_scan, log/master cross-check, retired-criteria audit
+
+signal_scan.py — run integrity, per-ticker channel table, channel
+reconciliation, cohort profile. Caught the D1 damp question and the
+confidence_blend naming collision unprompted.
+log_tracker_crosscheck.py — daily 24/24 reconciliation; HARD-REFUSES
+tracker_with_registry.xlsx as an input (exit 2).
+retired_criteria_audit.py — scans for retired questions still stated in
+live-criterion grammar. Known blind spot: workbook tabs.
+
+Both harnesses are formula-cache immune by construction and write nothing."
+
+--- 2.9
+git push origin main
+
+--- 2.10 The new guard built today
+git add outcome_sanity.py
+
+--- 2.11
+git commit -m "feat(tools): outcome_sanity.py — magnitude guard for manual outcome columns
+
+Closes the only manual-entry surface with no gate. On 2026-08-07 a WMT
+close was entered as 11.85 instead of 111.85 and corrupted three cohorts
+at once, because every trading day is simultaneously the +5d, +10d and
++20d resolution date for three cohorts. recalc.py passed (11.85 is a valid
+number) and log_tracker_crosscheck.py passed (it reads columns A-G; the
+outcome prices are in H/I/J).
+
+Four checks: quote-vs-close against the same-day Px@signal already in the
+master; cross-horizon agreement; horizon-scaled magnitude; cohort
+dispersion. Derives the trading-day index from the master's own cohort
+dates — no holiday table, no second source of truth.
+
+Regression-tested against the re-injected 8/07 defect: caught on all three
+cells plus the dispersion tell. Found two previously undetected entries on
+first run (AG 2026-06-26, GLD 2026-07-02) — both open."
+
+--- 2.12
+git push origin main
+
+--- 2.13 Runners and the 8/04 monitor patches
+git add scan.bat run_daily_review.bat monitor_strip.py h4_dq_threshold.py
+
+--- 2.14
+git commit -m "fix(monitor): coalesced episode date; H4 bar at n>=12 on two readings
+
+monitor_strip.py — the WMT clock printed 'last episode 2026-07-24', a date
+the 7/27 coalescing correction retired. Now derives from the coalesced
+ledger. Outstanding since 7/30 across five sessions.
+h4_dq_threshold.py — the H4 card printed the n>=10 bar superseded 7/28 by
+n>=12 on two consecutive readings.
+
+Adds scan.bat and run_daily_review.bat.
+
+Carried, not fixed: the run_daily_review.bat closing banner still prints
+live-criterion grammar for G2 (DESCOPED) and G1 (INSUFFICIENT TEST
+CONDITIONS). Housekeeping item."
+
+--- 2.15
+git push origin main
+
+
+=============================================================================
+PHASE 3 — THE RECORD. Separate from code, deliberately.
+=============================================================================
+The notes are the G6 instrument. They get their own commit so the history
+shows when the record was brought current, independent of code changes.
+
+--- 3.1 Paste the 8/05, 8/06 and 8/07 splices into docs\analyst_notes.md
+        FIRST — as PLAIN TEXT — and delete the old Upcoming block so exactly
+        one remains. Then:
+git add docs/analyst_notes.md
+
+--- 3.2
+git commit -m "docs(record): analyst notes spliced through 2026-08-07
+
+Three sessions. DP-3C-m (gate-cleared ledger coalesces) and DP-3C-n (E4-2
+stratifies on volatility) ruled and entered. Band-breach identity closed as
+definitional (1,160/1,160 HOLD rows); the r=-0.9650 proxy retired as
+non-reproducing. Px@signal correction: returns are quote-to-close, so an
+off-canonical run is not immaterial. Drift established as a second
+independent breach driver alongside dispersion, with 2026-06-16 as the
+falsifying case. WMT 2026-08-07 entry error recorded with attribution."
+
+--- 3.3
+git push origin main
+
+--- 3.4 Instruments and workflow
+git add Daily_Workflow_v6_0_Phase3C.docx Phase3C_E4_Endpoint_PreRegistration_v1.md Phase3C_Kickoff_Prompt.md Phase3B_Closeout_Memo.md
+
+    (Adjust paths to wherever these actually live.)
+
+--- 3.5
+git commit -m "docs(3-C): workflow v6.0, E4 pre-registration, kickoff, 3-B closeout memo
+
+Workflow v6.0 is effective 2026-08-03 (EDGAR go-live) and supersedes v5.3.
+E4 pre-registration is v1.0 as written before go-live; the v1.1 amendments
+for DP-3C-l/m/n are drafted and NOT yet applied — they land next."
+
+--- 3.6
+git push origin main
+
+
+=============================================================================
+PHASE 4 — VERIFY, THEN STOP
+=============================================================================
+--- 4.1
+git status
+
+    Expect: nothing to commit, working tree clean. If logs\ or *.xlsx show
+    as untracked, that is a separate decision — see the note below.
+
+--- 4.2
+git log --oneline -8
+
+--- 4.3
+git status -sb
+
+    Expect "## main...origin/main" with no ahead/behind. If it says ahead,
+    a push did not land. Push again.
+
+--- 4.4 Confirm on the remote, in a browser
+    https://github.com/Superb-Swift/claude-equity-bot
+    Check the commit list and spot-check one file's contents.
+
+    Until you have seen the files on GitHub, the backlog is NOT retired.
+
+
+=============================================================================
+OPEN DECISION — NOT PART OF TODAY, RAISED SO IT IS NOT DECIDED BY DEFAULT
+=============================================================================
+logs\signals_*.log and logs\claude_equity_bot_tracker.xlsx.
+
+DP-3C-i ruled that the E[...] tag must carry filing dates BECAUSE
+edgar_cache\ is gitignored and deletable, so window membership "survives
+nowhere permanent." That reasoning assumes the LOGS are the durable record.
+If the logs are not tracked, they are as impermanent as the cache, and
+E4-2's ADJACENT/COVERED-QUIET split is not reconstructible after a disk
+loss — which is the exact hazard DP-3C-i was written to close.
+
+The master carries the same argument with more force: it is manual-entry-
+only, it is the ground truth every harness reads, and it exists in one
+place.
+
+Neither is decided here. Both belong in a dated ruling, because tracking
+binaries and a growing log directory has real costs (repo size, diff
+noise, and a workbook that changes on every save). Flagging it so the
+answer is a decision rather than an omission.
+=============================================================================

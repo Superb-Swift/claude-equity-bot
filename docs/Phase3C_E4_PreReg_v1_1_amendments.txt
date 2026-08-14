@@ -1,0 +1,152 @@
+=============================================================================
+AMENDMENT PACK — Phase3C_E4_Endpoint_PreRegistration_v1.md  ->  v1.1
+Drafted 2026-08-05. Three drop-in blocks, marked A / B / C.
+Rulings entered: DP-3C-l (2026-08-04), DP-3C-m (2026-08-05), DP-3C-n (2026-08-05).
+PASTE AS PLAIN TEXT.
+=============================================================================
+
+-----------------------------------------------------------------------------
+BLOCK A — replace the document's italic header line
+-----------------------------------------------------------------------------
+
+*Claude Equity Bot · v1.1 · v1.0 drafted 2026-08-02 and written BEFORE go-live as Kickoff §5 requires · AMENDED 2026-08-05, still before the E4 clock starts. Provenance unchanged for v1.0. The v1.1 amendments enter three rulings that previously existed only in `docs\analyst_notes.md` — DP-3C-l (2026-08-04), DP-3C-m and DP-3C-n (both 2026-08-05) — and rewrite §3's E4-2 block per DP-3C-n. No acceptance threshold, robustness condition or n is changed by this revision; §3.1 states that explicitly. Advisory-only · no orders · not financial advice.*
+
+-----------------------------------------------------------------------------
+BLOCK B — replace §3's "E4-2 · Filing-adjacent accuracy (primary)" section
+in its entirety with the following
+-----------------------------------------------------------------------------
+
+### E4-2 · Filing-adjacent accuracy *(primary)* — AMENDED 2026-08-05 per DP-3C-n
+
+**Question.** On a given session, do names with a recent filing score better than covered names without one?
+
+**AMENDMENT NOTICE.** v1.0 specified a within-cohort comparison of raw accuracy between ADJACENT and COVERED-QUIET arms. That specification is superseded. **It measured realised volatility, not EDGAR**, for the reason set out in §3.0 below. The amendment changes the *comparison unit* and the *reporting set*. **It changes no threshold, no robustness condition and no n** — see §3.1.
+
+---
+
+#### 3.0 · Why the v1.0 read was invalid
+
+`[V]` 2026-08-05, from `logs\claude_equity_bot_tracker.xlsx` column formulas and all 1,160 resolved HOLD rows.
+
+Column N reads `=IF(H="","",IF(D="HOLD",IF(ABS(K)<0.03,"YES","NO"),…))` and column K reads `(H−G)/G`. For a HOLD row, **"Was Claude Right (5d)" *is* `|Return+5d| < 3%`** — the exact complement of a band breach. Tested across every resolved HOLD row: `(N=="YES") ⟺ (|ret5| < 3%)` holds **1,160 of 1,160**. On the HOLD population accuracy and `1 − breach rate` are **the same number**; the correlation between them is `r = −1.000000` by construction.
+
+E4-2's population is HOLD rows only. Substituting the identity, the v1.0 read asked:
+
+> *Do names that just filed an 8-K or Form 4 cross the ±3% band **less often** than covered names that did not?*
+
+8-Ks are earnings and material events. Form 4 clusters follow corporate events. **Those windows carry elevated realised volatility by construction.** The v1.0 read therefore had a **mechanically expected negative sign independent of any treatment effect**, and its pre-committed NEGATIVE disposition would have fired on a volatility artifact and entered the permanent record as evidence that EDGAR harms the signal.
+
+This is the same trap this document caught once and half-fixed. §3 v1.0 correctly rejected a pre/post read because dispersion varies *across time*, and moved to within-cohort. **Within-cohort holds the market constant. It does not hold name-level event volatility constant — and event volatility is precisely what defines the strata.**
+
+Direct precedent: **Q4-R** found data quality's raw +15.5pt accuracy gap collapse to **+0.5pt across 9 tickers** once volatility was held constant within-ticker, because MEDIUM-DQ names simply move about twice as much.
+
+---
+
+#### 3.1 · What does NOT change
+
+Stated first, and separately, because amending an endpoint is exactly where a bar slips quietly.
+
+| Carried over unchanged | |
+|---|---|
+| Effect-size threshold | **≥ 5pt** |
+| Robustness condition 1 | sign survives **leave-one-cohort-out** |
+| Robustness condition 2 | sign survives **dropping the largest single ticker** |
+| Pre-registered n | **150 resolved ADJACENT rows** |
+| Population | **HOLD rows only** |
+| Arm definitions | ADJACENT / COVERED-QUIET / DARK, K = 5 trading days, unchanged |
+| Disposition vocabulary | POSITIVE / NEGATIVE / INSUFFICIENT, unchanged |
+
+**Nothing in this amendment lowers a bar.** If the amended design cannot reach its n inside the phase, the endpoint is entered **INSUFFICIENT TEST CONDITIONS** under Kickoff §5's binding rule, and the bar is not lowered to manufacture a close.
+
+---
+
+#### 3.2 · PRIMARY READ — within-ticker paired difference
+
+For each covered ticker (T-A and T-B) that supplies **at least 3 resolved rows in each arm**:
+
+```
+d_ticker = breach_rate(ADJACENT rows, +5d) − breach_rate(COVERED-QUIET rows, +5d)
+```
+
+Pool the per-ticker differences `d_ticker`. **The same instrument appears in both arms, so volatility is held exactly constant by construction** — the design Q4-R's decisive control used.
+
+Report: the pooled mean `d`, the per-ticker table of `d_ticker` with each ticker's n in each arm, and the count of tickers qualifying.
+
+**Sign convention, stated before any number is seen:** a **negative** `d` means ADJACENT names breach *less* often, i.e. the treatment arm scores *better*. POSITIVE / NEGATIVE dispositions are read on the accuracy-equivalent, not on the breach rate, to keep §3.1's threshold in its original units.
+
+---
+
+#### 3.3 · FALLBACK — volatility-tier matching
+
+For covered tickers that cannot supply both arms at n ≥ 3, pool by **volatility tier**.
+
+- **Tier assignment:** each ticker's own historical **median |+5d move|** computed from `logs\claude_equity_bot_tracker.xlsx` across the full record, cut into three tiers.
+- **The tier table is built and FROZEN before the first E4 cohort resolves.** This is a **go-live prerequisite** that did not exist before 2026-08-05. It is entered as **change-order step 8b** (RW 2026-08-05), on equal footing with step 8's audit and selftest, because both gate the same event — the end of the control-cohort window. Freezing the table after the first E4 cohort resolves would be fitting a control to the data it exists to control for.
+- Compare ADJACENT vs COVERED-QUIET **within tier**, pooled across tiers.
+
+Report the count of tickers reading under §3.2 and the count falling to §3.3, always. A read dominated by the fallback is weaker than one dominated by the primary and must say so.
+
+---
+
+#### 3.4 · Mandatory reporting — REPLACED
+
+v1.0 required *"every accuracy figure is reported with its band-breach count."* **That safeguard is vacuous.** On a HOLD-only population it reports one number twice, so it detects nothing.
+
+**Replaced by, for every stratum:**
+
+1. **Mean signed return** — not determined by accuracy.
+2. **Dispersion (sd, population)** — not determined by accuracy.
+3. **UP / DOWN breach split** — distinguishes a rising tape from a falling one.
+4. **Per-ticker split**, with WMT's share stated explicitly (carried from v1.0).
+5. **The raw unadjusted ADJACENT-vs-COVERED-QUIET gap**, reported as a **DESCRIPTIVE CONTROL that is EXPECTED NEGATIVE on volatility grounds alone**. Pre-registering that expectation is the point: it prevents a figure such as −8pt being read later as a treatment effect.
+
+---
+
+#### 3.5 · Rate and time-to-read — REVISED, and the revision may cost time
+
+v1.0 measured ~7.6 ADJACENT rows/session (32% of output), giving 150 rows in ~20 sessions.
+
+**The row supply is unchanged. The *usable* supply may be lower**, because the primary read requires a ticker to appear in **both** arms:
+
+- **A name that is almost always ADJACENT contributes nothing to §3.2.** WMT supplies 24% of all Form 4 volume and is the leading candidate; MSFT and JPM follow.
+- Names that are almost always QUIET are equally uninformative.
+
+**Recorded as a benefit, and flagged because it looks convenient:** this is *also* the fix for §2's concentration warning. A within-ticker design automatically neutralises the single-name footprint that made G2 unscoreable — the same change solves both problems. It is recorded because it follows from the design, not because it is welcome.
+
+**Pre-committed now, while it is still a forecast rather than a concession:** if the amended design does not reach **150 resolved ADJACENT rows with an adequate qualifying-ticker count** by the exit review, E4-2 is flagged **INSUFFICIENT TEST CONDITIONS** and **the bar is not lowered**. The qualifying-ticker count is reported at the first read (~10 cohorts) as an early supply check, and if it is starved at that point, say so then rather than at the exit.
+
+---
+
+-----------------------------------------------------------------------------
+BLOCK C — append to §5 "Decision points this document assumes",
+after the existing DP-3C-g block
+-----------------------------------------------------------------------------
+
+**RULED 2026-08-04 — DP-3C-l. GATE-CLEARED DIRECTIONAL LEDGER.** A separate ledger is opened for directional signals that clear their **own** confidence gate — BUY at conf ≥ 70 or SELL at conf ≥ 65 — **regardless of risk-engine disposition**, applied retroactively across the full record. **DESCRIPTIVE ONLY:** it modifies nothing, gates nothing, and carries no pass/fail standard. Membership is deliberately independent of the `Decision` field so that a future change to `MAX_OPEN_POSITIONS` cannot silently redefine the population. Read: the existing +5d sign test, with the risk-engine `Decision` and its verbatim reason reported alongside each row and **not stratified on**. **Standard: NONE. Exit disposition, PRE-COMMITTED: INSUFFICIENT TEST CONDITIONS**, on measured supply of 2 events in 54 cohorts = 0.037/session, requiring ~540 sessions for n=20; stressed at **triple** the observed rate it still needs ~180 sessions, past any plausible 3-C exit, so the conclusion survives the uncertainty on a two-event estimate. Kickoff §5's binding rule applies: an endpoint whose supply cannot deliver a read inside the phase is entered as a **stated limitation**, not pre-registered and discovered later. **This is the first time in the project a starved endpoint was identified BEFORE the data arrived rather than at the exit review.** KEEP 70% is unchanged and remains supported at 13/32 = 40.6%.
+
+**RULED 2026-08-05 — DP-3C-m. THE GATE-CLEARED LEDGER COALESCES.** DP-3C-l opened the ledger with per-row membership and no coalescing rule; one session later NVDA supplied a second row. **Ruling: consecutive sessions on the same ticker whose directional signal is unbroken and continues to clear its own gate constitute ONE episode, dated at FIRST CLEARANCE**, with the confidence path recorded and the +5d outcome measured from the first-clearance row. An episode **ends** when the ticker reverts to HOLD, flips direction, or falls below its gate for at least one session; a later re-clearance opens a new episode. Membership is otherwise unchanged. **Precedent: DP-6**, which moved G1 from cohorts to coalesced episodes on the ground that a period carrying no independent information must not be counted as though it did.
+
+*Evidence `[V]`:* NVDA reads HOLD 55/49/46/49/50 through 2026-07-31, then BUY **68 (8/03) → 72 (8/04) → 74 (8/05)** — one regime change followed by a strengthening stance, not three independent draws. The 8/04 and 8/05 rows share four of five resolution days, so their outcomes agree by construction.
+
+*Ledger under the ruling — 3 rows become 2 episodes:*
+
+| # | Opened | Signal | Ticker | Conf path | Risk decision | +5d |
+|---|---|---|---|---|---|---|
+| 1 | 2026-06-26 | SELL | CBRS | 68 | REJECTED — position count | +14.61% → **NO** |
+| 2 | 2026-08-04 | BUY | NVDA | 72 → 74 | REJECTED — position count | resolves **2026-08-11** |
+
+*Boundary note, not arbitrary:* the NVDA BUY run begins 8/03 but the **episode** begins 8/04, because membership keys on **gate clearance** and 8/03's 68 did not clear. The 8/03 row belongs to the KEEP-70 near-miss registry instead, so one continuous three-day BUY run contributes exactly one row to KEEP-70 and one episode here, with no double-count.
+
+*Supply recomputed:* row-count basis 3/55 = 0.0545/session; **coalesced basis 2/55 = 0.0364/session**. Both sit inside DP-3C-l's pre-committed ×3 stress band (0.111/session), so **the INSUFFICIENT TEST CONDITIONS forecast stands without revision** and is strengthened.
+
+*Known limitation, deliberately unfixed:* **the same serial-dependence problem applies to KEEP-70** — 25 of its 32 resolved rows are NVDA (78.1%), many consecutive-session repeats of one stance. DP-3C-m **does not touch KEEP-70**, because it is a currently readable criterion at n=32 and attaching a coalescing rule mid-flight would redefine a working gate's denominator — the hazard DP-3C-l rejected as option (D). Recorded as a limitation of KEEP-70's evidence base, not as a fixed problem, and it belongs in the memo explicitly if the 70% gate is ever revisited.
+
+**RULED 2026-08-05 — DP-3C-n. E4-2 STRATIFIES ON VOLATILITY.** §3 is rewritten accordingly: primary read becomes a **within-ticker paired difference**, with **volatility-tier matching** as the fallback and the tier table **frozen before the first read**; mandatory reporting is replaced because the accuracy-plus-breach-count pairing is vacuous on a HOLD-only population. **No threshold, robustness condition or n is changed** (§3.1). Rationale of record: the band-breach identity is definitional (verified 1,160/1,160), so the v1.0 read measured realised volatility rather than the treatment, and its NEGATIVE disposition would have fired on an artifact. Q4-R is the direct precedent for the confound and for the within-ticker remedy.
+
+*Timing is the reason this is ruled now rather than later:* **the E4 clock has not started**, so amending costs nothing, whereas the same amendment after the first read would be moving a criterion with data in view. This is the DP-3C-g argument applied a second time.
+
+*Direction:* the ruling makes the phase **harder** — it converts a ready endpoint into one requiring a frozen vol-tier table as a new go-live prerequisite, and it may extend time-to-read. It runs against convenience and is recorded as such.
+
+---
+
+*Advisory-only · no orders · not financial advice.*

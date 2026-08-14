@@ -1,0 +1,19 @@
+(venv) C:\Users\rober\claude-equity-bot>python edgar_client.py --ticker DOW
+--- DOW ---
+--- SEC FILINGS (recent, as of 2026-08-04) ---
+8-K (material events, last 30d): 2
+  - 2026-07-23 Item 2.02 results of operations — "Document Exhibit 99.1 July 23, 2026 Dow reports second quarter 2026 results FINANCIAL HIGHLIGHTS • Net sales were $12.1 billion, up 20% year-over-year, reflecting increases in all operating segments and regions. • Local price increased 20% versus the year-ago period, led by gains in Packaging & Specialty Plastics, with higher polyethylene prices in all regions. Currency increased 1% year-over-year. • Volume decreased 1% year-over-year. Gains in …"
+  - 2026-07-10 Item 8.01 other events — "Dow Inc. (the “Company”) is registering 5,410,000 shares (the “Shares”) of its common stock, par value $0.01 per share, under the Company’s registration statement on Form S-3 (File No. 333-288028) (the “Registration Statement”), to be issued pursuant to the base prospectus contained therein, as supplemented by a prospectus supplement, dated as of July 10, 2026, filed with the U.S. Securities and Exchange Commission on July 10, 2026 (the …"
+Form 4 (insider, last 30d): 1 filing(s); no open-market purchases or sales (1 grant/award entries only — compensation mechanics, not a discretionary view)
+Latest periodic: 10-Q filed 2026-07-24 — MD&A extract: "Net Sales The following tables summarize net sales and sales variances by operating segment and geographic region from the prior year: Summary of Sales Results Three Months Ended Six Months Ended In millions Jun 30, 2026 Jun 30, 2025 Jun 30, 2026 Jun 30, 2025 Net sales $ 12,092 $ 10,104 $ 21,886 $ 20,535 Sales Variances by Operating Segment and Geographic Region Three Months Ended Jun 30, 2026 Six Months Ended Jun 30, 2026 Local Price & Product Mix Currency Volume Total Local Price & Product Mix Currency Volume Total Percentage change from prior year Packaging & Specialty Plastics 30 % 1 % (4) % 27 % 10 % 2 % (3) % 9 % Industrial Intermediates & Infrastructure 15 1 (2) 14 3 3 (3) 3 Performance Materials & Coatings 4 1 6 11 — 2 4 6 Total 20 % 1 % (1) % 20 % 6 % 2 % (1) % 7 % Total, excluding the Hydrocarbons & Energy business 18 % 1 % — % 19 % 6 % 2 % — % 8 % U.S. & Canada 17 % — % 3 % 20 % 5 % — % (1) % 4 % EMEAI 21 3 (4) 20 7 6 (4) 9 Asia Pacific 14 — (9) 5 3 1 (5) (1) Latin America 32 — 9 41 12 — 9 21 Total 20 % 1 % (1) % 20 % 6 % 2 % (1) % 7 % Net sales in the second quarter of 2026 were $12.1 billion, up 20 percent from $10.1 billion in the second quarter of 2025, with local …"
+Financial statements (XBRL, 10-Q Q1 FY2026, period ended 2026-03-31):
+  NOTE: these are the PRIOR period's figures — XBRL data for the 10-Q covering 2026-06-30 is not yet published by SEC.
+  Revenue                      $9.8B  YoY -6.1%
+  Net income                $-533.0M  vs $-307.0M prior year
+  Diluted EPS                  -0.74  vs -0.44 prior year
+  Operating cash flow          $1.1B  YoY +1135.2%
+  Total assets                $59.8B  YoY +4.0%
+  Shareholders equity         $15.2B  YoY -9.2%
+  Cash and equivalents         $4.1B  YoY +180.5%
+
+log tag: E[8k=2; form4=1f; periodic=10-Q@2026-07-24; fin=7@2026-03-31]

@@ -1,0 +1,129 @@
+REM ===========================================================================
+REM git_push_docs.txt  —  the docs commit (gitignore hardening + manifest + notes)
+REM ===========================================================================
+REM Run from the project root in cmd.exe. Everything here is optional/tidy-up:
+REM the T2 monitor tools are already pushed (cb79987). This bundles three
+REM harmless-but-nice things into one clean commit:
+REM   1. .gitignore hardening  — stop weekly outputs + splice scaffolding +
+REM      the stray duplicate folder from ever auto-staging
+REM   2. Manifest v2           — refresh docs/Phase3B_Session_Manifest.md
+REM   3. analyst_notes.md      — splice through 7/9 (apply the splice first)
+REM
+REM LESSONS BAKED IN (from the pushes on 7/7 and 7/9):
+REM   - Empty-message abort: ALWAYS commit with -m (never bare `git commit`,
+REM     which opens an editor and aborts on an empty message).
+REM   - Stray "Phase 3B Manifest/" folder: NEVER `git add .` or `git add -A`.
+REM     Stage every path explicitly (that folder got committed by accident once).
+REM   - Secrets false positive: `findstr /i "signal_state"` matches the CODE
+REM     filenames (seed_signal_state.py etc.). Use the /r pattern below, which
+REM     targets only the actual secret FILES.
+REM   - Push rejected (fetch first) + "cannot pull with rebase: unstaged
+REM     changes": stash -> pull --rebase -> push -> stash pop. See Step 6.
+REM ===========================================================================
+
+cd C:\Users\rober\claude-equity-bot
+
+REM ===========================================================================
+REM STEP 0 — pre-flight
+REM ===========================================================================
+git status
+
+REM Corrected secrets check — matches only the real secret FILES (regex, /r).
+REM MUST return nothing. (The old loose "signal_state" pattern matched the .py
+REM module names, which is a false positive — this one does not.)
+git ls-files | findstr /i /r "token\.json \.env signal_state\.json"
+
+REM ===========================================================================
+REM STEP 1 — remove the stray duplicate folder (local backup? keep it, but it
+REM          must never enter git; Step 3 ignores it either way)
+REM ===========================================================================
+REM Delete it locally (recommended — it's a dead duplicate of the root code):
+REM   rmdir /s /q "Phase 3B Manifest"
+REM Or keep it on disk and rely on the .gitignore rule from Step 2.
+
+REM ===========================================================================
+REM STEP 2 — .gitignore hardening
+REM ===========================================================================
+REM Append the block below to .gitignore. Paste this whole here-style chunk
+REM (cmd has no heredoc; use the >> lines exactly as written).
+>>.gitignore echo.
+>>.gitignore echo # --- Weekly-review outputs (regenerated each run; frozen snapshots live in docs\Archived\) ---
+>>.gitignore echo /h1_lag_trace_*.md
+>>.gitignore echo /h4_dq_threshold_baseline.md
+>>.gitignore echo /near_miss_registry.md
+>>.gitignore echo /near_miss_registry.xlsx
+>>.gitignore echo /regime_stratification.md
+>>.gitignore echo /guardrail_trace.png
+>>.gitignore echo # --- Notes splice scaffolding (content gets pasted into analyst_notes.md) ---
+>>.gitignore echo docs/analyst_notes_*splice*.md
+>>.gitignore echo # --- Stray duplicate folder ---
+>>.gitignore echo Phase 3B Manifest/
+
+REM Verify the untracked clutter is now ignored (these should print nothing/ignored):
+git status --short
+git check-ignore h1_lag_trace_WMT.md regime_stratification.md "Phase 3B Manifest/" docs\analyst_notes_splice_2026-07-09.md
+
+REM ===========================================================================
+REM STEP 3 — place the refreshed files (do these in Explorer or via copy)
+REM ===========================================================================
+REM (a) Manifest v2 -> overwrite the existing docs manifest (keep ONE canonical
+REM     file; git sees a modification, not a second manifest). Adjust the source
+REM     path to wherever you saved the download.
+REM   copy /y "%USERPROFILE%\Downloads\Phase3B_Session_Manifest_v2.md" docs\Phase3B_Session_Manifest.md
+REM
+REM (b) analyst_notes.md -> apply the 7/9 splice (you already applied 7/7):
+REM     insert the dated bullet after the 7/7 entry and replace the Upcoming
+REM     block, per analyst_notes_splice_2026-07-09.md. Save docs\analyst_notes.md.
+
+REM ===========================================================================
+REM STEP 4 — stage EXPLICITLY (never add . / -A)
+REM ===========================================================================
+git add .gitignore
+git add docs\Phase3B_Session_Manifest.md
+git add docs\analyst_notes.md
+
+REM ===========================================================================
+REM STEP 5 — review, commit (-m always), push
+REM ===========================================================================
+git status
+git diff --cached --stat
+
+git commit -m "Docs: refresh Session Manifest to post-WS2 state; splice notes through 7/9; harden .gitignore" -m "Manifest v2 matches the current repo (S1/D1 modules, era A-S1D1, two-channel logging, live repo-pull, Tier-0 signal_state.json). analyst_notes spliced through the 7/9 monitoring session. .gitignore now excludes regenerated weekly-review outputs, notes-splice scaffolding, and the stray duplicate folder."
+
+git push
+git log --oneline -4
+
+REM ===========================================================================
+REM STEP 6 — RECOVERY: only if `git push` is rejected with "fetch first"
+REM ===========================================================================
+REM Cause: origin/main has a commit you don't have locally (web edit / other
+REM machine). If you ALSO have unstaged changes (e.g. tracker_with_registry.xlsx),
+REM a plain `git pull --rebase` errors with "cannot pull with rebase: unstaged
+REM changes" — so stash first. Full dance:
+REM
+REM   git stash
+REM   git pull --rebase origin main
+REM   git push
+REM   git stash pop
+REM
+REM Notes:
+REM   - `git stash` parks unstaged changes safely; `git stash pop` restores them
+REM     after the rebase (your tracker edits survive untouched).
+REM   - If `git stash pop` reports a conflict, your data is still in the stash:
+REM       git stash list          (confirm it is there)
+REM     resolve the file, `git add <file>`, then it is done. To bail out of a
+REM     mid-rebase entirely: git rebase --abort
+REM   - The LF/CRLF warnings during add/stash are cosmetic (git normalizing line
+REM     endings on Windows) — safe to ignore.
+
+REM ===========================================================================
+REM WHAT STAYS OUT OF THIS COMMIT (by design)
+REM ===========================================================================
+REM   tracker_with_registry.xlsx   — tracked but your convention keeps data in
+REM                                  its own commit; leave it unstaged
+REM   *.docx (Daily_Workflow_v4, exit/EDGAR criteria) — gitignored; export to
+REM                                  PDF if you ever want a repo copy
+REM   signal_state.json            — gitignored runtime cache (re-seedable)
+REM   token.json / .env            — gitignored secrets
+REM   the *_splice_*.md files       — scaffolding; now gitignored (Step 2)
+REM ===========================================================================

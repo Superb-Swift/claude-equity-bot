@@ -1,0 +1,2826 @@
+# Claude Equity Bot — Analyst Notes (ARCHIVE, through 2026-07-28)
+
+**Project:** claude-equity-bot
+**Covers:** 2026-05-18 through 2026-07-28 — all of Phase 2, all of Phase 3-A, Phase 3-B days 1–16
+**Maintainer:** Robert
+
+> **DERIVED READING COPY — NOT THE RECORD.** `docs\analyst_notes.md` is THE MASTER and remains whole.
+> Generated 2026-08-04. Frozen at the 7/28 entry; entries from 7/29 onward are in
+> `analyst_notes_current.md` and in the master. Historical entries are never rewritten, so this file
+> does not require updating. Upload only when a question reaches back before 7/29.
+
+\---
+
+
+**Project:** claude-equity-bot
+**Phase:** 2 (read-only dry run)
+**Window:** 2026-05-18 to 2026-06-12 (closed)
+**Maintainer:** Robert
+
+This file documents structural findings, calibration evidence, and
+decisions during Phase 2. Entries are organized into two sections:
+**Reference** (glossary, definitions — stable) and **Findings**
+(dated entries — chronological).
+
+\---
+
+# Reference
+
+## Glossary — Metric Definitions
+
+Locked in 2026-05-28 to prevent terminology drift over the remaining
+\~7 days of Phase 2.
+
+### "Hit" — Was Claude Right?
+
+A "hit" means Claude's signal was correct on a given row. The formula
+in the tracker's column N evaluates each signal type differently:
+
+|Signal|"Right" Means|Tracker Formula|
+|-|-|-|
+|HOLD|Stock stayed within ±3% over 5 days|`IF(ABS(K\_) < 0.03, "YES", "NO")`|
+|BUY|Stock went up (positive return)|`IF(K\_ > 0, "YES", "NO")`|
+|SELL|Stock went down (negative return)|`IF(K\_ < 0, "YES", "NO")`|
+
+A hit count of 9 means Claude's call was correct on 9 signals.
+A hit rate of 37.5% means 9 out of 24 evaluated signals were correct.
+
+### Why "Hit" Instead of "Accuracy"
+
+"Accuracy" implies a single binary outcome, but Claude's "rightness"
+means different things across signal types. A HOLD is right when
+*nothing happens*. A BUY is right when *the predicted direction
+happens*. The hit framework collapses those into one comparable
+yes/no per row, enabling cross-signal-type aggregation.
+
+### The ±3% HOLD Threshold
+
+A HOLD is correct if the stock moves less than 3% in either direction
+over 5 days. This threshold is a design choice, not a universal truth:
+
+* Tighter (2%) → HOLD hit rates drop
+* Looser (5%) → HOLD hit rates rise
+
+Example boundary cases from the May 19 cohort:
+
+* JPM moved +0.02% → YES (well within threshold)
+* MSFT moved -2.53% → YES (within threshold)
+* NTR moved -3.16% → NO (just outside, by 16 bps)
+* CBRS moved -15.5% → NO (decisively outside)
+
+**Phase 2 decision:** Do not adjust this threshold mid-test. Moving
+the goalposts would invalidate the data. Revisit in Phase 3 as a
+calibration question if needed.
+
+### Hit Rate — Denominator Rules
+
+```
+Hit Rate = (Count of YES) / (Count of YES + Count of NO)
+```
+
+* The denominator counts only signals where +5d price has been entered
+* Blank +5d rows do NOT appear in the denominator
+* This is why Cohort Analysis tab shows 0% for cohorts before their
++5d completion date
+
+### Cohort
+
+A "cohort" = all signals from one signal date (e.g., the May 19
+cohort = the 24 signals produced by the bot on 2026-05-19). Each
+cohort completes its +5d evaluation exactly 5 trading days later.
+
+### Near-Miss
+
+A "near-miss" = a BUY signal at 60-69% confidence, rejected by the
+70% risk-engine threshold. These are tracked as their own cohort in
+the Near-Miss BUYs tab because they directly test threshold
+calibration.
+
+### Pattern Holds? (Cohort Analysis tab)
+
+The Pattern Holds? cell in the Cohort Analysis tab evaluates ONE
+specific question: Is the 50-59% confidence band the highest hit
+rate band for this cohort? Formula:
+
+```
+=IF(AND(50-59% > 40-49%, 50-59% > 60-69%), "✓ YES", "NO")
+```
+
+It does NOT check whether the 40-49% band is the lowest. That's a
+separate, secondary claim that may or may not hold independently.
+
+### Quick Reference Table
+
+|Term|Definition|
+|-|-|
+|Hit|One signal where Claude was right|
+|Miss|One signal where Claude was wrong|
+|Hit count|Number of YES rows|
+|Hit rate|Hit count / (Hit count + Miss count)|
+|Cohort|All signals from one signal date|
+|Near-miss|BUY signal 60-69% conf, rejected by 70% threshold|
+|Pattern Holds?|"Is 50-59% the highest hit-rate band for this cohort?"|
+|+5d / +10d / +20d|5, 10, 20 trading-day evaluation windows|
+|Was Claude Right?|The YES/NO column in the tracker|
+
+\---
+
+## Structural Gap Taxonomy
+
+Locked in 2026-05-26. The four chronic-LOW tickers represent three
+distinct gap types, each requiring a different Phase 3 response.
+
+|Type|Definition|Tickers|Phase 3 Fix|
+|-|-|-|-|
+|**Type 1: Asset-class mismatch**|Pipeline built for equities; ticker is a commodity ETF. News flows around the underlying, not to the ticker.|CORN, GLD|`commodity\_context.py` module|
+|**Type 2: Driver context gap**|Right data source, but dominant price driver is an exogenous commodity not in news feed.|AG (silver)|`commodity\_backed\_equity\_context.py`|
+|**Type 3: News density gap**|Right source, insufficient ticker coverage (e.g., recent IPO).|CBRS|Time only — or exclude from auto-analysis|
+
+**Key insight:** Three of four chronic-LOW tickers share the same root
+cause — pipeline treats every ticker as an equity, but commodity ETFs
+and commodity-backed equities have different dominant price drivers.
+
+### Phase 3 Priority Order
+
+1. `commodity\_context.py` — fixes CORN + GLD + future commodity ETFs
+2. `commodity\_backed\_equity\_context.py` — fixes AG + future miners
+3. CBRS exclusion config change (5 minutes)
+
+\---
+
+# Findings (Chronological)
+
+## 2026-05-26 — Structural Data Gap: CORN (Commodity ETF Class)
+
+**Phase:** 2 (read-only dry run), Day 6 of \~15 (pattern first observed Day 5, 2026-05-22)
+**Severity:** Medium — does not block Phase 2; deferred decision for Phase 3
+**Status:** Documented, no action taken in Phase 2 to preserve test integrity
+
+### Finding
+
+Claude has consistently flagged CORN with LOW data quality across days
+1, 3, and 5+, with reasoning that repeatedly cites:
+
+> "Available news is tangentially related to commodities broadly rather
+> than corn fundamentals specifically."
+
+This is **not a bot defect** — it is correct epistemic behavior. The
+bot is accurately reporting a real gap in input data.
+
+### Root Cause
+
+Finnhub's `company\_news` endpoint returns articles tagged with the
+ticker symbol. For equity tickers (e.g., NVDA, AAPL) this is rich and
+relevant. For commodity ETFs like CORN, the actual price drivers —
+USDA WASDE reports, Corn Belt weather, ethanol demand, ag exports,
+futures roll dynamics — generate news that is tagged under
+"agriculture," "commodities," "USDA," or "corn futures," rarely under
+the ticker CORN itself.
+
+**Classification:** Asset-class data-routing mismatch. The pipeline
+is built for equity tickers; CORN is a commodity ETF.
+
+### Evidence (Days 1-5)
+
+|Day|Date|Data Quality|Reasoning Pattern|
+|-|-|-|-|
+|1|2026-05-18|LOW|Thin news, low volume, no catalysts|
+|2|2026-05-19|n/a|Consolidated out|
+|3|2026-05-20|LOW|Tangential commodity news, no corn-specific drivers|
+|4|2026-05-21|LOW|Same pattern|
+|5|2026-05-22|LOW|Same pattern|
+
+### Why Not Fix in Phase 2
+
+1. Mid-test pipeline changes would contaminate the evaluation dataset
+2. The bot's current behavior is working as designed — LOW data quality
+correctly triggers auto-rejection of any non-HOLD signal via
+`MIN\_DATA\_QUALITY = "MEDIUM"`. The risk engine is doing its job.
+3. The persistent low-confidence HOLD output is the *correct* output
+for a ticker the bot cannot confidently analyze.
+
+### Deferred Decision (June 10 Review)
+
+Three paths to evaluate against \~15 days of CORN data:
+
+* **Path A — Exclude CORN from auto-analysis.** Move to manual monthly
+review around WASDE release dates. Lowest effort.
+* **Path B — Build `commodity\_context.py` module in Phase 3.** Free
+data sources (USDA WASDE schedule + NASS QuickStats API + yfinance
+ZC=F + NOAA Corn Belt outlook during growing season). Adds
+\~$0.06/month in Claude tokens. \~3 hours build. Module would also
+serve GLD and any future commodity ETFs.
+* **Path C — Keep current behavior.** Accept that LOW data quality
+is honest signal and the auto-rejection is the correct outcome.
+
+### Rejected Approaches (and Why)
+
+|Approach|Reason Rejected|
+|-|-|
+|Barchart CORN news page|Public page requires scraping (ToS risk); their `getNews` API is paid (Barchart OnDemand).|
+|WeatherWealth subscription|Paid (\~$25-50/mo). Violates the "no added subscription cost" constraint.|
+|Increase Finnhub `NEWS\_LIMIT` for CORN|Doesn't address relevance — more tangential headlines ≠ better signal.|
+|Add commodity risk-mgmt rules (stop-loss, calendar spreads)|Belongs in Phase 4 execution, not Phase 2 analysis. Stop-loss already in risk engine; calendar spreads not applicable to ETF holdings.|
+
+### Next Touch Points
+
+* June 10, 2026 — Phase 2 evaluation; decide Path A/B/C
+* Next WASDE release: June 11, 2026 (one day after eval — useful as
+natural catalyst test for whichever path is chosen)
+
+\---
+
+## 2026-05-26 — Structural Gap Taxonomy: Chronic-LOW Ticker Class
+
+Extending the CORN analysis above, applied same diagnostic lens to
+AG, GLD, CBRS. Full taxonomy now lives in the Reference section above.
+
+Quick summary:
+
+|Ticker|Gap Type|Phase 3 Action|
+|-|-|-|
+|CORN|Asset-class mismatch|`commodity\_context.py`|
+|GLD|Asset-class mismatch|Same module as CORN|
+|AG|Driver context gap (silver spot missing)|`commodity\_backed\_equity\_context.py`|
+|CBRS|News density gap (recent IPO)|Exclude until Q4 2026|
+
+See CORN entry above for full evidence and rejected approaches.
+
+\---
+
+## 2026-05-26 — May 18 Cohort Day-5 Outcomes: First Calibration Signal
+
+**Phase:** 2 (read-only dry run), Day 6 of \~15
+**Status:** First completed +5d cohort, 30 data points
+**Significance:** First evidence that confidence calibration may be working
+
+### Headline Result
+
+Hit rate by confidence band on the May 18 HOLD cohort:
+
+|Confidence Band|Sample|Hit Rate|Avg Abs Return|
+|-|-|-|-|
+|60-69%|5|40%|6.42%|
+|**50-59%**|**17**|**59%**|**3.48%**|
+|40-49%|8|25%|7.17%|
+
+The 40-49% band (low conviction) correctly fails more often AND
+correlates with larger actual moves — exactly what an honestly
+calibrated "I don't know" signal should look like.
+
+The 50-59% band (moderate conviction) has both the highest hit rate
+AND the lowest average move magnitude — strong evidence that when
+Claude says "this isn't moving," moderate confidence is meaningful.
+
+### Why This Matters
+
+This is the **first quantitative evidence in Phase 2** that confidence
+numbers carry signal, not noise. If it holds across the next 2-3
+cohorts (5/19, 5/20, 5/21 completing 5/27-5/29), we have a foundation
+for advancing to Phase 3.
+
+### Caveats — Don't Overweight This Result
+
+1. **All 30 signals were HOLD.** This measures HOLD calibration only;
+says nothing yet about BUY or SELL signal accuracy.
+2. **60-69% band is n=5.** WMT (held twice in tracker due to pre-dedup)
+and PM dragged that bucket down. Could easily revert when sample grows.
+3. **One trading week, one cohort.** Statistical significance requires
+at least 3-4 completed cohorts.
+
+### LOW Data Quality Outperformed MEDIUM (Confounded Finding)
+
+LOW: 75% hit rate (n=4). MEDIUM: 42% (n=26).
+
+This is **not** evidence that LOW signals are more trustworthy. The
+LOW bucket is biased toward sleepy tickers (CORN, SND) that stay
+range-bound by structural inactivity rather than by Claude correctly
+predicting flatness. Don't trust LOW signals more on the basis of
+this finding.
+
+### Notable Misses
+
+|Ticker|Conf|Return|Notes|
+|-|-|-|-|
+|CBRS|42%|-18.6%|Confirms chronic-LOW structural-gap diagnosis|
+|WMT (x2)|62%|-11.1%|Highest-conf miss in dataset|
+|GM (x2)|42-45%|+9.1%|Low conf HOLD that arguably should have been BUY|
+|DOW (x2)|48-52%|-8.6%|Confirms chronic-low ticker pattern|
+|AIQ|55%|+7.4%|Low-vol breakout — missed catalyst|
+
+### Notable Hits
+
+|Ticker|Conf|Return|Notes|
+|-|-|-|-|
+|GLD|48%|-1.1%|Scout signal|
+|SPY|48%|+1.6%|Scout signal|
+|MSFT (x2)|52%|-1.7%|Mega-cap noise band|
+|RTX|52%|+1.9%|Mega-cap noise band|
+
+Pattern: best hits are large, liquid index/mega-cap names where
+±2% over 5 days is normal noise. Claude correctly identifies the
+"no-signal regime" for liquid tickers.
+
+### Decision Implications for June 10 Review
+
+1. If 50-59% calibration holds across 5/19-5/21 cohorts → advance Phase 3
+2. If 60-69% band continues underperforming with more data → consider
+the BUY threshold of 70% may be correctly calibrated to filter
+"tempting but not quite there" signals
+3. The chronic-LOW ticker decisions (CORN/GLD/AG/CBRS) are now
+reinforced by data — CBRS being the worst miss is consistent
+with the gap diagnosis
+
+\---
+
+## 2026-05-27 — Day 7 Run: Two Structural-Gap Confirmations
+
+**Phase:** 2 (read-only dry run), Day 7 of \~15
+**Status:** Two diagnoses validated by data within 24 hours
+
+### Finding 1: CBRS Reverted to LOW Data Quality
+
+Day 6 produced the first zero-LOW day in Phase 2 (HIGH at 37.5%).
+Day 7 reverted to 1 LOW signal — and it was CBRS, exactly the ticker
+we diagnosed as a Type 3 structural gap (news density / recent IPO).
+
+**Why this matters:** Day 6's apparent improvement was a news-cycle
+artifact (Iran-deal headlines providing macro anchors), not a
+structural shift. CBRS will continue cycling between LOW and MEDIUM
+regardless of news flow because the underlying issue is ticker-level
+coverage thinness, not transient news drought.
+
+**Implication for June 10:** CBRS Path A (exclude from auto-analysis
+until Q4 2026) remains the right call. Path B is not available
+because no data pipeline change fixes a coverage problem.
+
+### Finding 2: NVDA Triple Near-Miss BUY Pattern
+
+Day 7 produced the THIRD NVDA near-miss BUY in 9 days. Verified
+against the tracker:
+
+|Date|Ticker|Conf|Price|Tracking +5d|
+|-|-|-|-|-|
+|2026-05-19|NVDA|62%|$220.58|2026-05-27|
+|2026-05-22|NVDA|62%|$216.77|2026-06-02|
+|2026-05-27|NVDA|63%|$209.84|2026-06-03|
+
+**Why this matters:** Three near-misses on the same ticker, at
+descending prices, with consistent 62-63% conviction across 8 trading
+days. This is a sustained directional view, not three independent
+coin flips. Two competing interpretations:
+
+* **Bullish read:** bot is right; entry keeps improving (averaging-down
+logic). Each rejection at 70% is "protective" because the next day
+offers a better price.
+* **Bearish read:** bot is wrong; conviction without learning from
+adverse price action is a calibration failure.
+
+The three +5d outcomes will discriminate cleanly between these. This
+is the single most informative natural experiment in Phase 2.
+
+**Notable detail:** Today's NVDA reasoning explicitly flagged
+"below-average volume on a down day could signal fading momentum
+rather than healthy consolidation" — meaning the bot is aware of the
+bearish interpretation and still produced a BUY. This is a cleaner
+conviction signal than a BUY with no acknowledged risk.
+
+Also new in the cohort:
+
+* 2026-05-21: SCHD 68% BUY at $32.11 (Roth IRA scout signal). +5d due 5/29
+* 2026-05-26: VTI 68% BUY at $370.15. +5d due 6/2
+
+Cohort total: 5 near-miss BUYs, +5d outcomes complete by 6/3.
+
+### Day 7 Headline Stats
+
+|Metric|Day 6|Day 7|Δ|
+|-|-|-|-|
+|Avg confidence|52.7%|52.8%|Flat|
+|HIGH data quality|9|8|-1|
+|LOW data quality|0|1 (CBRS)|+1|
+|Near-miss BUY|VTI 68%|NVDA 63%|New data point|
+|Cost|$0.2245|$0.2274|+1.3%|
+
+### Decision Implications
+
+1. CBRS structural-gap diagnosis is now data-confirmed → lock Path A
+2. NVDA paired near-miss is the strongest BUY-threshold evidence so
+far → ensure all three +5d outcomes are tracked in their own block
+3. Phase 2 trajectory remains on schedule for 6/12 evaluation
+
+\---
+
+## 2026-05-27 — May 19 Cohort Day-5 Outcomes: Mixed Calibration Signal
+
+**Phase:** 2 (read-only dry run), Day 7 of \~15
+**Status:** Second completed +5d cohort, 24 data points
+**Significance:** Primary calibration pattern replicated; secondary did NOT
+
+### Headline Result
+
+Hit rate by confidence band on the May 19 HOLD cohort:
+
+|Confidence Band|Sample|Hit Rate|Avg Abs Return|
+|-|-|-|-|
+|60-69%|7|14% (1/7)|5.25%|
+|**50-59%**|**10**|**50% (5/10)**|**4.90%**|
+|40-49%|7|43% (3/7)|5.74%|
+
+**Pattern Holds (50-59% is the highest band): ✓ YES**
+
+This confirms the central calibration claim — when Claude is moderately
+confident, it is most accurate. 50% is still the highest hit rate of
+the three bands, even though the margin shrank from 59% on May 18.
+
+### What Did NOT Replicate
+
+The *secondary* finding from May 18 — "40-49% band is the least
+accurate" — did NOT hold. May 19's 40-49% band beat the 60-69% band
+43% to 14%. Two interpretations:
+
+1. **Sample noise (n=7 each).** The 60-69% bucket got hit hard by
+AAPL (+4.7%), FTI (-7.5%), WMT (-11.6%), NTR (-3.2%), and NVDA
+(-3.6%). Five HOLDs that all moved 3%+, plus the NVDA BUY that
+lost ground. Brutal lineup.
+2. **Real signal.** 60-69% confidence may be overconfident; 50-59%
+may be where genuine equilibrium lives. The 40-49% band may
+benefit from being applied to sleepy tickers.
+
+Either way, the simple v1 framing — "low conviction = worst,
+moderate = best, high = better" — is **less clean than after one
+cohort.** Wait for Cohort 3 (May 20, due 5/28) before drawing real
+conclusions about the secondary pattern.
+
+### Cumulative Calibration Status
+
+|Cohort|Sample|40-49%|50-59%|60-69%|Pattern Holds?|
+|-|-|-|-|-|-|
+|2026-05-18|30|25% (2/8)|59% (10/17)|40% (2/5)|✓ YES|
+|2026-05-19|24|43% (3/7)|50% (5/10)|14% (1/7)|✓ YES|
+|**Combined**|**54**|**33% (5/15)**|**56% (15/27)**|**25% (3/12)**|**✓ YES**|
+
+**2 of 2 cohorts confirm the primary pattern.** Across 54 evaluated
+signals, the 50-59% band still leads decisively. Q1 of the
+Phase 2 → Phase 3 worksheet is trending toward CALIBRATED but
+requires one more cohort to lock in.
+
+### Notable Misses on May 19
+
+|Ticker|Conf|Move|Notes|
+|-|-|-|-|
+|**GM +18.2%**|52% HOLD|Biggest miss of cohort|Second cohort in a row with GM running away upward|
+|CBRS -15.5%|42% HOLD|Already on chronic-LOW list|Reinforces Type 3 structural gap|
+|WMT -11.6%|62% HOLD with HIGH DQ|High-conf miss again|WMT is now chronic high-confidence miss across both cohorts|
+|AIQ +8.9%|52% HOLD|Tech rally caught HOLD signal|AI thematic momentum signal missed|
+
+### Diagnostic Watchlist — WMT and GM
+
+**WMT and GM are emerging as the two most diagnostic tickers in the
+portfolio.** WMT keeps producing high-confidence HOLD calls and then
+dropping double-digit. GM keeps producing low-confidence HOLD calls
+and then rallying double-digit. These are inverse patterns:
+
+* WMT: bot is **overconfident** on a stock it shouldn't be confident on
+* GM: bot is **missing a real catalyst** it should have a view on
+
+Worth adding both to a Phase 3 diagnostic list alongside the
+chronic-LOW work.
+
+### First Near-Miss BUY Result — NVDA 5/19
+
+|Field|Value|
+|-|-|
+|Signal|BUY at 62% conf|
+|Price at signal|$220.58|
+|Price +5d|$212.60|
+|Return +5d|-3.62%|
+|Was Claude Right?|NO|
+
+**First piece of Q2 outcome data.** Early evidence favors "70%
+threshold is correctly tight" — but n=1, and the remaining 4
+near-miss BUYs (SCHD due 5/29, NVDA #2 + VTI due 6/2, NVDA #3 due
+6/3) will fill out the picture. Specifically, the NVDA triple
+pattern becomes testable across the next 6 trading days.
+
+### Reading Lesson From Cohort 2
+
+When evaluating a cohort, the right reading sequence is:
+
+1. **Glance at the Pattern Holds? cell** — that's the formula's
+binary verdict on the central claim
+2. **Look at the three hit-rate cells** to see the magnitude of the
+pattern
+3. **Note the absolute return** in the 60-69% band — if it's still
+highest, you have a separate "extreme confidence = volatile
+outcomes" finding worth tracking
+
+Avoid: starting with the cell values and building a narrative. Trust
+the formula's verdict first, then explain.
+
+
+
+## 2026-05-28 — Day 8 Run: First Pure-HOLD Day, NVDA Conviction Reverts
+
+**Phase:** 2 (read-only dry run), Day 8 of \~15
+**Status:** First day with zero BUY signals and zero near-misses
+
+### Headline
+
+|Metric|Day 7|Day 8|Note|
+|-|-|-|-|
+|Signals|24|24|Stable|
+|Avg confidence|52.8%|51.3%|Lowest of Phase 2 so far|
+|Signal distribution|23H/1B|24H/0B|First pure-HOLD day|
+|HIGH data quality|8|7|Stable|
+|LOW data quality|1 (CBRS)|0|CBRS climbed back to MEDIUM|
+|Cost|$0.2274|$0.2258|Stable|
+
+### NVDA Conviction Drop — Diagnostic
+
+After three straight days of NVDA near-miss BUYs (5/19, 5/22, 5/27),
+today NVDA reverted to a 45% HOLD at $212.09. Price moved up slightly
+from yesterday's $209.84; conviction dropped 18 percentage points.
+
+**Interpretation:** The bot's bullish thesis on NVDA was at least
+partially "buy the dip." Higher price → less attractive entry →
+weaker BUY conviction. This is internally consistent disciplined
+behavior, NOT mechanical bullishness.
+
+**Implication for Q2:** Mild support for the bullish read on the NVDA
+triple near-miss — the bot is NOT producing reflexive BUY signals
+on this ticker. The three +5d outcomes (one in, two pending) will
+still discriminate the broader question.
+
+### Bug Fixed
+
+run\_daily.bat threw ". was unexpected at this time" after parser
+completed. Cause: unquoted `if exist paste\_today.tsv echo ...` line
+in summary block. Fixed by parenthesizing the conditional echo.
+
+\---
+
+## 2026-05-28 — May 20 Cohort: Calibration Verdict Reached
+
+**Phase:** 2 (read-only dry run), Day 8 of \~15
+**Status:** Third completed +5d cohort. Q1 calibration threshold MET.
+
+### Headline Result
+
+The May 20 cohort produced the THIRD consecutive Pattern Holds = ✓ YES
+result. The worksheet's 3+ cohort threshold for Q1 (calibration
+working) is now met.
+
+|Cohort|40-49%|50-59%|60-69%|Pattern Holds?|
+|-|-|-|-|-|
+|2026-05-18|25% (2/8)|59% (10/17)|40% (2/5)|✓ YES|
+|2026-05-19|43% (3/7)|50% (5/10)|14% (1/7)|✓ YES|
+|2026-05-20|36% (5/14)|43% (3/7)|33% (1/3)|✓ YES|
+|**Combined**|**34% (10/29)**|**53% (18/34)**|**27% (4/15)**|**✓ YES**|
+
+### Three-Cohort Synthesis
+
+**Locked in:**
+
+* Primary calibration claim (50-59% is most accurate band) is confirmed
+* Across 78 evaluated signals, 50-59% leads at 53% hit rate
+* 60-69% band underperforms (27% hit rate, n=15) — small sample but
+consistent across all three cohorts. Worth flagging but not yet conclusive.
+
+**Q1 Verdict:** CALIBRATED.
+
+### May 20 Headline Numbers
+
+|Metric|May 18|May 19|May 20|
+|-|-|-|-|
+|Hit rate|47%|37.5%|37.5%|
+|Mean abs return|4.95%|5.25%|5.54%|
+|Biggest miss|CBRS -18.6%|CBRS -15.5%|CBRS -24.8%|
+|Biggest win|GM +9.1%|GM +18.2%|GM +13.3%|
+
+**CBRS / GM pattern stability:** 3 of 3 cohorts have CBRS as the
+biggest miss and GM as the biggest win. This is no longer noise.
+
+### Data Quality Signal — First Clean Result
+
+|Quality|Sample|Hit Rate|Abs Return|
+|-|-|-|-|
+|HIGH|3|100%|1.98%|
+|MEDIUM|19|26%|5.30%|
+|LOW|2|50%|13.16%|
+
+Three HIGH-quality May 20 signals (SCHD, XLU, NVDA scout) all hit.
+Sample tiny (n=3), but directionally encouraging.
+
+\---
+
+## 2026-05-28 — Diagnostic Deep Dive: WMT and GM Patterns
+
+**Severity:** High — these are now confirmed as the two most diagnostic
+tickers in the portfolio
+**Status:** Phase 3 prompt-revision candidates
+
+### The Pattern
+
+WMT and GM have been the #1 miss in every completed cohort, in
+opposite directions:
+
+|Ticker|All 3 cohorts|Direction|Avg Move|Confidence|
+|-|-|-|-|-|
+|**WMT**|-11.1%, -11.6%, -11.4%|DOWN|-11.3%|62% HOLD|
+|**GM**|+9.1%, +18.2%, +13.3%|UP|+13.5%|42-52% HOLD|
+
+### Finding 1: Claude IS Adapting, Just Slowly
+
+Confidence trajectories show the bot DID update — but with 3-5 day lag:
+
+**WMT confidence:** 62% → 62% → 62% → 48% → 45% → 52% → 55% → 55%
+(Dropped 17pt AFTER the -11% move had already happened on 5/21)
+
+**GM confidence:** 42% → 52% → 45% → 52% → 52% → 52% → 62% → 58%
+(Rose 20pt over the run, but always trailing the rally)
+
+**Implication:** The bot has a price-update lag. Updates eventually
+arrive but after the move has already played out.
+
+### Finding 2: Two Distinct Biases
+
+|Bias|WMT Example|GM Example|
+|-|-|-|
+|Mean-reversion (near 52w high → HOLD)|"Near $135 high, P/E 42x → HOLD"|n/a|
+|Anchoring (slow to update)|Repeated valuation framing as price fell|Repeated "cyclical P/E elevated" as price rose|
+|Valuation-heavy framing|-11% move was tariff-driven, not valuation|+13% rally was NASA contract, not earnings|
+
+### Finding 3: HIGH Data Quality Did NOT Save the Bot
+
+WMT was flagged HIGH data quality on 3 of 4 completed cohorts.
+Bot still missed by -11% each time.
+
+**Implication:** HIGH data quality reflects input quality, not thesis
+quality. The prompt may not be distinguishing these clearly enough.
+
+### Phase 3 Hypotheses to Test
+
+|#|Hypothesis|Test|
+|-|-|-|
+|1|Anchoring on cost-basis P/E for cyclicals|Add momentum/trend-strength field for GM-class signals|
+|2|Defensive staples need tariff/news weighting|News-category tagging; penalize HOLD when tariff is dominant|
+|3|5-day conviction-update lag|Inject prior-day price change explicitly into prompt|
+|4|Symmetric stuckness near 52w highs and lows|Force directional bias when 5-day trend exceeds 5%|
+
+These are experiments, not fixes. Phase 3 must verify they improve
+WMT/GM accuracy WITHOUT breaking the confirmed 50-59% calibration.
+
+
+
+\---
+
+## 2026-05-29 — Day 9 Run: Fix Verified, Log Recovery, AM/PM Diagnostic
+
+**Phase:** 2 (read-only dry run), Day 9 of \~15
+**Status:** run\_daily.bat fix verified; bot ran cleanly; log file
+incident discovered and recovered
+
+### Headline
+
+|Metric|Value|
+|-|-|
+|Signals|24 (23 HOLD / 1 BUY)|
+|Avg confidence|52.8%|
+|HIGH data quality|10 (41.7%) — highest of Phase 2|
+|LOW data quality|2 (CBRS + SND)|
+|Near-miss BUY|NVDA 68% at $215.95 (5th in cohort)|
+|Cost|$0.2251|
+
+### Bug Fix Verification
+
+The `. was unexpected at this time` error in run\_daily.bat is gone.
+Root cause was an unquoted `if not exist` block where the variable
+expansion `%TODAY%.log` confused cmd.exe's parser. Single fix:
+quoted the path in line `if not exist "logs\\signals\_%TODAY%.log"`.
+Verified by clean run today. Lesson learned: yesterday's fix
+targeted the wrong block; should have asked to see the file
+contents before claiming a fix.
+
+### Log File Truncation Incident
+
+After today's morning run, `signals\_2026-05-29.log` was found
+truncated to 3 bytes. Most likely cause: a second run of
+run\_daily.bat (to verify the fix worked) opened the log in write
+mode, truncating it, then got interrupted before writing signals.
+
+**Recovery:** Reconstructed the log file from the saved PowerShell
+output. All 24 Signal JSON entries preserved (66 KB log file).
+Signal data was already in the tracker from the morning paste, so
+no actual analytical loss.
+
+**Phase 3 fix candidate:** Modify the bot's logging to open in
+append mode OR back up existing log to `.bak` before truncating.
+This is the cheapest "data loss prevention" change in the codebase.
+
+### AM/PM Diagnostic Comparison
+
+As a side effect of testing the fix, the bot ran twice today
+(9:31 AM CST and 3:36 PM CST). The PM run is NOT used for the
+Phase 2 cohort (AM remains canonical for methodological
+consistency), but the comparison surfaced a Phase 3 finding:
+
+**9 of 24 signals changed between AM and PM. 6 of 24 changed data
+quality.** Most striking:
+
+* VTI: HOLD 52% → BUY 68% on a +0.10% price move
+* GM:  HOLD 62% → HOLD 55% on a -0.62% move
+* GLD: HOLD 42% → HOLD 52% on a +0.18% move
+
+**Implication:** Bot signals are highly news-sensitive within a
+single trading day. The "3-5 day update lag" we documented in
+WMT/GM is the same phenomenon at a longer timescale. Confidence
+updates appear to track news flow more than price action.
+
+**Phase 3 hypothesis to add:** Test whether explicit prompt
+language about "stable thesis confidence" vs "news-flow conviction"
+reduces intraday volatility while preserving cohort-level
+calibration. The PM run is archived as
+`logs/diagnostic\_2026-05-29\_PM.txt`.
+
+\---
+
+## 2026-05-29 — May 21 Cohort: First Pattern-Holds = NO, SCHD Near-Miss Wins
+
+**Phase:** 2 (read-only dry run), Day 9 of \~15
+**Status:** Fourth completed +5d cohort. Q1 calibration robust to
+one non-confirming cohort. First near-miss BUY win.
+
+### Headline Result
+
+Hit rate by confidence band on the May 21 cohort:
+
+|Confidence Band|Sample|Hit Rate|Avg Abs Return|
+|-|-|-|-|
+|40-49%|9|33%|6.31%|
+|50-59%|12|42%|4.70%|
+|**60-69%**|**3**|**67%**|**2.70%**|
+
+**Pattern Holds: ✗ NO** — first non-confirming cohort.
+
+The 60-69% band led at 67% hit rate. However, n=3 is very small,
+and the bucket consisted of PM, PWR, and SCHD — two
+defensive/dividend HOLDs (PM, PWR) that don't move much by design,
+plus the SCHD BUY signal. PM and PWR hit; SCHD also hit (covered
+below).
+
+### Why This Doesn't Reverse the Q1 Verdict
+
+|Cohort|Pattern Holds?|
+|-|-|
+|2026-05-18 (n=30)|✓ YES|
+|2026-05-19 (n=24)|✓ YES|
+|2026-05-20 (n=24)|✓ YES|
+|2026-05-21 (n=24)|✗ NO|
+|**Combined (n=102)**|**50-59% still leads (50%) vs 40-49% (34%) and 60-69% (33%)**|
+
+3 of 4 cohorts confirm. The combined sample at n=102 still strongly
+supports the calibration claim. The Q1 worksheet threshold required
+"3+ cohorts," which is met. Yesterday's CALIBRATED verdict holds.
+
+**Lesson on noise vs signal:** This is exactly why the worksheet
+required multiple cohorts. A single non-confirming sample with
+n=3 in the deciding bucket is the kind of noise the framework
+should absorb without reversing. Phase 2 was designed with this
+robustness in mind.
+
+### SCHD Near-Miss BUY: First Win
+
+|Field|Value|
+|-|-|
+|Signal date|2026-05-21 (Roth IRA scout signal)|
+|Conviction|68% BUY, HIGH data quality|
+|Price at signal|$32.11|
+|Price +5d (2026-05-29)|$32.50|
+|Return +5d|**+1.22%**|
+|Was Claude Right?|**YES**|
+
+**Near-miss BUY cohort running tally (2 of 5 complete):**
+
+|Date|Ticker|Conf|DQ|Return|Right?|
+|-|-|-|-|-|-|
+|2026-05-19|NVDA|62%|MEDIUM|-3.62%|NO|
+|2026-05-21|SCHD|68%|HIGH|+1.22%|YES|
+|2026-05-22|NVDA|62%|MEDIUM|due 6/2|—|
+|2026-05-26|VTI|68%|HIGH|due 6/2|—|
+|2026-05-27|NVDA|63%|MEDIUM|due 6/3|—|
+|2026-05-29|NVDA|68%|MEDIUM|due 6/5|—|
+
+(Note: 5/29 NVDA brings the cohort to 6 total, not 5 as previously
+counted. The 6/5 outcome is the last Q2 (near-miss BUY) data point;
++10d outcomes continue arriving through 6/12, the review day.)
+
+**Pattern observation:** The two HIGH-data-quality near-miss BUYs
+are 1 for 1 (SCHD won; VTI pending). The MEDIUM-DQ near-misses are
+0 for 1 (NVDA 5/19 lost). If this pattern holds across the
+remaining outcomes, the Phase 3 conclusion would NOT be "lower
+the threshold to 65%" — it would be "make the threshold
+conditional on data quality."
+
+### Notable Misses (May 21 Cohort)
+
+|Ticker|Conf|DQ|Return|Note|
+|-|-|-|-|-|
+|**CBRS**|42%|MEDIUM|-17.40%|4th consecutive cohort as worst miss|
+|SND|42%|MEDIUM|-11.82%|Frac sand small-cap weakness|
+|**GM**|52%|MEDIUM|+9.24%|4th consecutive cohort as biggest win|
+|AIQ|55%|HIGH|+9.02%|AI thematic rally caught HOLD|
+|MSFT|55%|HIGH|+8.04%|High-conf miss on tech rally|
+|AG|52%|MEDIUM|+7.72%|Silver miner participated in rally|
+|DOW|45%|MEDIUM|-6.82%|Continued chemical sector pressure|
+|PM|62%|HIGH|-6.49%|High-conf miss (PM only hits 60-69% bucket *because* it's defensive — and even defensive names break sometimes)|
+
+### CBRS — Path A Now Unambiguous
+
+|Cohort|CBRS Return|
+|-|-|
+|2026-05-18|-18.6%|
+|2026-05-19|-15.5%|
+|2026-05-20|-24.8%|
+|2026-05-21|-17.4%|
+
+**Four consecutive cohorts as the worst miss.** The Q3 worksheet
+flag on the CBRS Path C decision should be resolved to Path A
+(exclude until Q4 2026). The structural-gap diagnosis is
+data-confirmed.
+
+\---
+
+## 2026-05-29 — Diagnostic Deep Dive Update: WMT and GM (Cohort 4)
+
+**Phase:** 2 (read-only dry run), Day 9 of \~15
+**Status:** New evidence on the 3-5 day update lag finding
+
+### WMT — The Lag Played Out
+
+The Day 8 WMT/GM diagnostic predicted that confidence updates lag
+price moves by 3-5 days. The May 21 WMT data tests this:
+
+|Date|Conf|DQ|Return +5d|Right?|
+|-|-|-|-|-|
+|2026-05-18|62%|MEDIUM|-11.06%|NO|
+|2026-05-19|62%|HIGH|-11.64%|NO|
+|2026-05-20|62%|MEDIUM|-11.37%|NO|
+|**2026-05-21**|**48%**|**HIGH**|**-5.10%**|**NO**|
+
+**Confidence dropped 14 points** AFTER three consecutive
+double-digit misses. The bot updated. The miss is still in the
+wrong direction, but its magnitude shrank 56% (from -11% to -5%).
+This is the lag finding playing out in real time — exactly as
+predicted, with measurable closure.
+
+### GM — Lag Still in Effect
+
+|Date|Conf|DQ|Return +5d|Right?|
+|-|-|-|-|-|
+|2026-05-18|42%|MEDIUM|+9.14%|NO|
+|2026-05-19|52%|MEDIUM|+18.23%|NO|
+|2026-05-20|45%|MEDIUM|+13.25%|NO|
+|**2026-05-21**|**52%**|**MEDIUM**|**+9.24%**|**NO**|
+
+Confidence drifted from 42 → 52 — modest update. Move magnitude
+shrank from +18% to +9%. The bot is recognizing GM's strength,
+but with much less responsiveness than WMT. Possible explanations:
+
+1. **Direction asymmetry:** Bot may be more reactive to losses
+than gains (loss-aversion-like behavior in the prompt).
+2. **News density:** WMT generated more news during the run than
+GM, providing more update triggers.
+3. **Valuation anchoring:** "P/E too high" is a sticky bear
+narrative for cyclicals; it may take a fundamental catalyst
+beyond price action to dislodge.
+
+### Phase 3 Hypotheses — Updated
+
+|#|Hypothesis|Evidence|Test|
+|-|-|-|-|
+|1|3-5 day update lag|Confirmed on WMT (5/21 update after 3 prior misses); partially on GM|Add prior-5-day price change to prompt input; measure lag reduction|
+|2|Direction asymmetry (loss > gain reactivity)|WMT updated faster than GM|A/B test prompts with symmetric framing|
+|3|Intraday news sensitivity|9 signal changes between AM and PM today|Test "stable thesis" prompt language|
+|4|Data quality matters for threshold|HIGH-DQ near-misses 1/1, MEDIUM 0/1 (small n)|Continue tracking; if pattern holds, recommend DQ-conditional threshold|
+
+These are now four distinct Phase 3 experiments. Each is testable
+without breaking the confirmed 50-59% calibration. Each has
+documented baseline behavior from the Phase 2 data.
+
+### Phase 2 Review Date Moved to Fri 6/12
+
+Originally targeted for Wed 6/10 (Day 17), the Phase 2 → Phase 3
+review has been moved to **Fri 6/12 (Day 19)**. Rationale:
+
+* 6/10 would force review with +10d data on only 8 of 9 cohorts
+(5/28 +10d lands 6/11; 5/29 +10d lands 6/12).
+* 6/12 gives complete +5d and +10d data for all 9 cohorts.
+* Dataset is now a clean **4 complete trading weeks**
+(2026-05-18 through 2026-06-12) with one documented holiday
+closure (Memorial Day 5/25).
+* Methodology statement: "Phase 2 was a 4-trading-week dry run
+with 9 cohorts of 24 signals each, evaluated at +5d and +10d
+windows. One trading day lost to Memorial Day. No other
+interruptions."
+
+Worksheet rebuilt as v3 with 6/12 review date locked.
+
+## 2026-05-29 — Phase 3 Reference Design: Documented Separately
+
+**Phase:** 2 (read-only dry run), Day 9 of 19
+**Status:** Phase 3 design thinking moved to dedicated file
+**Decision type:** Document hygiene — keep analyst\_notes focused on Phase 2 execution
+
+### Summary
+
+Two external reference frameworks studied today:
+
+* **The Claude Portfolio** (@theaiportfolios on X) — concentrated single-name
+bot with deep per-position thesis and stateful tracking. Currently
+UNDERPERFORMING SPY (+2.6% vs +8.3% first 2 months).
+* **The Grok Portfolio** (same operator, Dr. Lopez-Lira / AI Finance Labs) —
+portfolio-level architecture with sector ETF backbone, cross-asset (bonds
+via TLT), and explicit risk discipline. Currently OUTPERFORMING SPY
+(+59% vs +36% over 9 months).
+
+User is considering a "triple blend" Phase 3 design: Grok's portfolio-level
+architecture + Claude Portfolio's per-position depth + our bot's calibrated
+daily analysis and tax-aware reasoning.
+
+### Decision Logged
+
+|Decision|Rationale|Revisit|
+|-|-|-|
+|No bot changes during Phase 2|Calibration dataset integrity|Post-6/12|
+|No new hypothesis added to worksheet|Worksheet stays locked for review|Phase 3-A scoping|
+|Phase 3 design thinking moved to dedicated file|Keep analyst\_notes focused on Phase 2 execution and findings|n/a|
+
+### Where to Find the Design Thinking
+
+**Document:** `phase3\_design\_concepts.md` (in project root)
+
+**When to read it:** AFTER Phase 2 close on 2026-06-12, alongside the
+locked Decision Worksheet v3 verdicts.
+
+**What it contains:** Full framework comparison (A/B/C), borrowable
+design patterns by layer (architecture/reasoning/risk), 6 Phase 3
+hypotheses (4 from Phase 2 evidence + 2 framework-borrowed), 5 open
+design questions, observation plan for remaining Phase 2 days, and
+operational plan for the document itself.
+
+### Lesson Worth Naming
+
+"Don't change anything" is the hardest call in any project — there's
+always a more sophisticated framework available to implement. The
+discipline is recognizing when you don't yet have the data to know
+whether more sophistication helps. Phase 2 is exactly that moment.
+Logging this here so future-us doesn't second-guess the hold pattern
+when something shiny appears.
+---
+
+## 2026-06-02 — May 18 Cohort: First +10d Outcomes — HOLD Theses Have a Shelf Life
+
+**Phase:** 2 (read-only dry run), Day 11 of 19
+**Status:** First cohort to reach +10d. New structural finding — the marquee measurement of Week 3.
+
+> ⚠️ FORWARD-POINTER (added 2026-06-05): This entry's "accuracy decays at +10d"
+> claim was the FIRST LOOK and did not fully replicate. Across 4 +10d cohorts
+> the final tally is: absolute-move growth replicated 4/4, but accuracy-decay
+> is a coin flip (2 decayed, 2 did not). The durable claim is magnitude-growth,
+> NOT accuracy-decay. Do not quote this entry's decay figure in isolation —
+> see 2026-06-03 and 2026-06-05 entries for the resolved picture.
+
+### Headline Result
+
+The May 18 cohort is the first to complete its +10d window. Comparing
+the two horizons on the same 24 signals:
+
+|Window|Hit Rate|Avg Return|Avg Abs Move|
+|-|-|-|-|
+|+5d|12/24 = 50.0%|-0.32%|4.51%|
+|+10d|10/24 = 41.7%|-0.58%|5.69%|
+
+**Finding:** +10d outcomes systematically differ from +5d, and in a
+specific direction — HOLD accuracy DECAYS over the longer window
+(-8.3 pt), while the average absolute move GROWS (4.51% -> 5.69%).
+The mechanism is clean: the bot's output is \~95% HOLD, and a HOLD is
+"right" only if the stock stays within +/-3%. Give prices twice the time
+and more of them breach the band. **The bot's HOLD-heavy output has a
+shelf life, and +10d is past it for a meaningful fraction of positions.**
+
+### 10 of 24 Positions Flipped Between Windows
+
+|Ticker|+5d|+10d|Mechanism|
+|-|-|-|-|
+|MSFT|Y (-1.65%)|N (+4.32%)|Recovered up — HOLD missed upside|
+|NVDA|N (-3.35%)|Y (+0.23%)|Round-tripped to flat|
+|XLU|N (+3.21%)|Y (-0.05%)|Round-tripped to flat|
+|NKE|N (+5.72%)|Y (+2.87%)|Faded back into band|
+|SND|N (+3.10%)|Y (+1.45%)|Faded back into band|
+|AG|Y (+2.68%)|N (+6.28%)|Continued up, breached|
+|FTI|Y (-2.79%)|N (-5.46%)|Continued down, breached|
+|CORN|Y (-2.99%)|N (-5.50%)|Continued down, breached|
+|NTR|Y (-2.56%)|N (-4.57%)|Continued down, breached|
+|VTI|Y (+1.98%)|N (+3.33%)|Drifted past band|
+
+**Two distinct mechanisms, diagnostically different:**
+
+* **Trend continuations (5):** AG, FTI, CORN, NTR, VTI kept moving the
+same direction until they breached +/-3%. This is the lag hypothesis —
+a move "contained" at +5d simply had not finished. **Predictable from
+the +5d trajectory.**
+* **Mean-reversions (5):** MSFT, NVDA, XLU, NKE, SND moved then came
+back. Noise that resolved. **Not predictable.**
+
+18 of 24 positions held the same direction across both windows — the
+underlying drift is mostly persistent. The flips concentrate in names
+sitting near the +/-3% boundary.
+
+### WMT Lag Hypothesis — Extends Cleanly Into +10d
+
+This was an explicit open question for the week: does the WMT 3-5 day
+lag finding replicate in the +10d window?
+
+**Yes, decisively, and WMT is the textbook case.** WMT was HOLD 62%
+(high confidence) on 5/18 at $133.31. It went -11.06% at +5d and
+**-15.19% at +10d** — sustained, accelerating decline rated as a
+confident hold. FTI, CORN, NTR show the same milder signature. The
+"prior-5-day price input" Phase 3 hypothesis (H1) is now supported by
+BOTH the +5d and +10d data — no longer a single-ticker anecdote. The
+Decision Worksheet v4 Q4/H1 row has been updated with this corroboration.
+
+### Band Behavior Degrades at +10d
+
+|Band|+5d|+10d|
+|-|-|-|
+|40-49%|33%|50%|
+|50-59%|57%|43%|
+|60-69%|50%|25%|
+
+At +5d the 50-59% band leads (57%) — Q1 CALIBRATED holds. At +10d the
+ordering inverts. Note the low-vol confound: the 40-49% band's +10d
+"wins" are sleepy names sitting still. The real signal is the
+**60-69% band collapsing to 25%** — PM (62%, -9.36%) and WMT (62%,
+-15.19%) are high-confidence HOLDs that got progressively MORE wrong.
+In this cohort, confidence is anti-correlated with +10d accuracy for
+the names the bot felt strongest about.
+
+### Calibration Verdict Caveat (recorded in worksheet v4)
+
+> The bot is calibrated at +5d (50-59% band leads). At +10d, HOLD
+> accuracy decays (\~8pt) and the high-confidence band underperforms,
+> driven by sustained adverse moves in high-conviction HOLDs (WMT, PM).
+> The +5d window is where the signal lives; +10d is where HOLD theses
+> expire.
+
+This is ONE cohort (n=24) — a strong, mechanism-backed first reading,
+not a verdict. The 5/19 +10d (due 6/3) is the replication test.
+
+\---
+
+## 2026-06-02 — May 22 \& May 26 Cohorts: Two More Non-Confirming, Aggregate Holds
+
+**Phase:** 2 (read-only dry run), Day 11 of 19
+**Status:** Cohorts 5 and 6 +5d complete. Both Pattern Holds = NO; aggregate unaffected.
+
+### Cohort Results (closing prices)
+
+|Cohort|40-49%|50-59%|60-69%|Pattern Holds?|Hit Rate|
+|-|-|-|-|-|-|
+|2026-05-22|38% (3/8)|50% (6/12)|50% (2/4)|✗ NO (tie)|45.8%|
+|2026-05-26|83% (5/6)|64% (9/14)|50% (2/4)|✗ NO (low band led)|66.7%|
+
+> ANALYST NOTE (corrected 2026-06-08): the 5/22 +5d hit above was previously logged as 54.2% — that is the 5/29 cohort's figure. The tracker's Was-Claude-Right column and band cells (3+6+2 = 11/24) both give 45.8%. See the 2026-06-08 entry.
+
+**5/22 fails on a tie:** 50-59% and 60-69% both at 50% — the strict-greater
+test requires the middle band to exceed BOTH tails. A tie is a NO.
+
+**5/26 fails differently — the low-vol confound:** the 40-49% band led at
+83% (5/6), but those "wins" are SND (-0.41%), CORN (-2.75%), NKE (-2.30%)
+— low-volatility names that pass the HOLD +/-3% test by sitting still, not
+by skill. Meanwhile the cohort's real action was in names the bot rated
+mid-band and missed: AIQ +7.82%, MSFT +5.73%, AG +5.79% (all HOLD, all NO).
+
+### Aggregate Still Holds (n=144 band sample / 150 filled +5d)
+
+|Band|Was (n=102)|Now (n=144)|
+|-|-|-|
+|40-49%|34%|42%|
+|50-59%|50%|**52%**|
+|60-69%|33%|40%|
+
+The 50-59% band still leads cleanly. **Q1 CALIBRATED is now 4 of 6
+confirming cohorts, outweighing 2 noisy per-cohort NOs.** The per-cohort
+flags are decided by n=3-4 samples in the 60-69% band and are noisy by
+construction; the aggregate is the real evidence.
+
+### Signal-Type Calibration — BUY Outperforms HOLD
+
+|Signal|Hit Rate|
+|-|-|
+|BUY|3/4 = 75%|
+|HOLD|66/146 = 45%|
+
+The directional BUY calls (the near-misses) are beating the HOLD base
+rate. Small n, but it is what you want from a conviction signal.
+
+\---
+
+## 2026-06-02 — Q2 Near-Miss: VTI Clean Test Wins; DQ Split Weakens
+
+**Phase:** 2 (read-only dry run), Day 11 of 19
+**Status:** Near-miss cohort 4 of 6 complete. Verdict trending KEEP 70%.
+
+### Outcomes (4 of 6 complete)
+
+|Date|Ticker|Conf|DQ|Return +5d|Right|
+|-|-|-|-|-|-|
+|5/19|NVDA|62%|MED|-3.62%|NO|
+|5/21|SCHD|68%|HIGH|+1.22%|YES|
+|5/22|NVDA|62%|MED|+3.50%|YES|
+|5/26|VTI|68%|HIGH|+1.14%|YES|
+|5/27|NVDA|63%|MED|due 6/3|—|
+|5/29|NVDA|68%|MED|due 6/5|—|
+
+**Tally: 3/4 = 75% positive | avg +5d return +0.56%.**
+
+### VTI Is the Most Informative Near-Miss Yet
+
+VTI was flagged in advance as a cleaner threshold test than any NVDA
+entry: it is the broad market, not a single-name catalyst chase. It hit
+(+1.14%). The near-miss band now has a positive outcome on a
+non-speculative, HIGH-DQ, low-idiosyncratic thesis — evidence the 68%
+reads carry signal beyond NVDA momentum.
+
+### The DQ Split Weakened (H4 downgrade)
+
+Heading in: HIGH-DQ near-misses 1/1, MEDIUM 0/1 — pointed toward a
+DQ-conditional threshold (H4). NVDA 5/22 (+3.50%, MEDIUM) broke the clean
+split: MEDIUM is now 1/2, same-ticker NVDA is 1 loss / 1 win. **H4 is a
+weaker recommendation than it looked on 5/29.** Do not lock before 6/5.
+
+### Verdict Math — KEEP 70% (the return criterion is binding)
+
+Per the Near-Miss sheet's pre-committed rule, lowering to 65% requires
+hit rate >=75% AND avg return >=3%. Hit rate is at 75%, but avg return is
++0.56% — nowhere near 3%. Even if all three pending landed positive, the
+average would need \~+5.6% each to clear the bar. **Realistic Phase 2
+conclusion: the 70% threshold is correctly tight. That is the experiment
+working — a read-only dry run talking us out of a premature change.**
+
+\---
+
+## 2026-06-02 — Rate-Limit Skips Confirmed as Recurring (Phase 3 Fix)
+
+**Phase:** 2 (read-only dry run), Day 11 of 19
+**Severity:** Medium — data-completeness risk, not a calibration risk
+**Status:** Promoted from "watch" to named Phase 3 fix
+
+### The Pattern
+
+|Date|429 Skips|
+|-|-|
+|5/26|none (clean)|
+|6/1|AG, FTI|
+|6/2|CORN, XLU, SPY|
+
+The skipped tickers DIFFER each day — they are tied to position in the
+burst sequence hitting Schwab's rate ceiling, not to specific symbols.
+This rules out "bad ticker" and confirms missing rate-limit handling in
+`schwab\_client`. Two consecutive skip-days after a clean week is enough
+to name the fix: **add exponential backoff / retry on HTTP 429 to the
+quote client.**
+
+**SPY skip (6/2) has outsized cost:** SPY is the benchmark scout. Missing
+its mark leaves a one-day gap in the benchmark series. Backfill SPY's 6/2
+close specifically even if CORN/XLU are left.
+
+### Phase 2 Integrity
+
+Skips are acceptable in read-only Phase 2 (no trades missed). Affected
+cohorts log 21-22 of 24 rows; backfill manually if full cohort rows are
+wanted. In Phase 3 with execution enabled, a silent skip on a held
+position would be a real gap — hence the priority bump.
+
+\---
+
+## 2026-06-03 — +10d Decay Finding Splits on Replication; H1 Hardens; Strongest Cohort Yet
+
+**Phase:** 2 (read-only dry run), Day 12 of 19
+**Status:** 5/27 cohort +5d complete; 5/19 +10d complete (replication test); Cohort Analysis tab extended through 6/12.
+
+### Headline: The +10d "Decay" Finding Replicates Halfway
+
+Yesterday (5/18 cohort) produced the week's marquee finding: HOLD
+accuracy decayed \~8pt from +5d to +10d while absolute moves grew. The
+5/19 cohort was the replication test. Result — **PARTIAL replication.
+The mechanism replicates; the consequence does not.**
+
+|Cohort|Window|Hit Rate|Avg Return|Avg Abs Move|
+|-|-|-|-|-|
+|5/18|+5d|50.0%|-0.32%|4.51%|
+|5/18|+10d|41.7%|-0.58%|5.69%|
+|5/19|+5d|37.5%|+0.06%|5.25%|
+|5/19|+10d|37.5%|-0.66%|6.09%|
+
+* **CONFIRMED — absolute moves grow at +10d.** Both cohorts show the
+avg absolute move expanding (5/18: 4.51 -> 5.69; 5/19: 5.25 -> 6.09)
+and avg return drifting more negative. Prices keep moving past +/-3%
+as the window lengthens. This mechanism is now replicated.
+* **NOT CONFIRMED — HOLD accuracy decay.** 5/18 dropped 8.3pt at +10d;
+5/19 was FLAT (37.5% both windows). The accuracy consequence depends
+on whether the growing moves break toward or away from positions
+near the +/-3% line — cohort-specific noise at n=24.
+
+**Why the divergence:** 5/19 had only 4 flips (vs 5/18's 10), and they
+offset (2 gained, 2 lost), leaving the hit rate unchanged. 5/19's band
+table is identical +5d vs +10d (43/50/14) — no band member flipped
+enough to move a rate. 5/18's flips were lopsided toward losses.
+
+> ANALYST NOTE: The defensible claim going into the 6/12 review is
+> "absolute moves grow at +10d" (replicated), NOT "HOLD accuracy
+> systematically decays at +10d" (one cohort, not replicated by the
+> second). The Decision Worksheet +10d caveat should be softened to
+> match. The 5/20 +10d (next) is the tiebreaker on the accuracy question.
+
+### H1 (Update Lag) — Now the Most Robust Phase 2 Finding
+
+WMT replicates emphatically across both +10d cohorts:
+
+|Cohort|WMT Signal|+5d|+10d|
+|-|-|-|-|
+|5/18|HOLD 62%|-11.06%|-15.19%|
+|5/19|HOLD 62%|-11.64%|-12.87%|
+
+Same name, same high confidence, same sustained accelerating decline
+over BOTH horizons. Where the broader decay claim split, the WMT lag
+signature held in every window measured. **H1 (add prior-5-day price
+input) is now the best-supported Phase 3 hypothesis** — it replicates
+where the more ambitious +10d-decay claim did not.
+
+### 5/27 Cohort — Strongest Calibration Confirmation to Date
+
+|Band|Hit Rate|
+|-|-|
+|40-49%|67% (4/6)|
+|50-59%|**85% (11/13)**|
+|60-69%|80% (4/5)|
+
+Overall 19/24 = 79.2% — highest hit rate of any cohort. Pattern Holds
+= ✓ YES, cleanly (50-59% leads). DQ behaved as theory predicts: HIGH
+7/8 (88%), MEDIUM 12/15 (80%), LOW 0/1. Worst: CBRS -16.8% (the chronic
+excluded name). After two non-confirming cohorts (5/22 tie, 5/26
+low-vol confound), 5/27 restores a confirming majority: **Q1 now 5 of 7
+cohorts confirm.**
+
+### NVDA 5/27 Near-Miss WON — Q2 Binding Constraint Now Crisp
+
+NVDA 5/27 was the series-low entry ($209.84), flagged as the cleanest
+test of whether near-conviction reads carry directional signal:
+
+**BUY 63% MEDIUM | $209.84 -> $214.75 | +2.34% | YES**
+
+Near-miss cohort is now 4/5 = 80% positive, which CLEARS the >=75%
+hit-rate gate for lowering the threshold. But avg +5d return remains
+far below the +3% bar.
+
+> ANALYST NOTE: With the hit-rate gate cleared, the +3% average-return
+> criterion is now the SOLE binding constraint on the threshold
+> decision. Lowering 70% -> 65% requires BOTH gates; the return gate
+> is the one that fails. Verdict stays KEEP 70% — and the reason is now
+> a single, clearly-identified number, not a vague "needs more data."
+> Final through 2026-06-05.
+
+### Cohort Analysis Tab — Extended Through Phase 2 Close (6/12)
+
+The Cohort Analysis tab now carries all Phase 2 cohorts (5/18 -> 6/12),
+fully formula-driven:
+
+* Added 12 cohort rows (5/28 -> 6/12) with the existing COUNTIFS pattern
+keyed per row. Completed cohorts compute live; not-yet-complete
+cohorts read "insufficient data" (gating fixed so empty cohorts no
+longer falsely display "NO").
+* Section-1 summary corrected to count only cohorts with +5d data in
+the "X of Y hold" denominator.
+* Sections 2 (Data Quality) and 3 (Signal Type) repaired after the
+row-insert — both live again: HIGH 56.5%, MEDIUM 48.7%, LOW 55.6%
+(n=168); HOLD 50.3%, BUY 80%.
+* Verified by full recalculation; Signals/Dashboard/Near-Miss tabs
+untouched.
+
+> ANALYST NOTE: Reading caution — the 6/2 (n=21) and 6/3 (n=22) rows
+> show samples below 24 due to 429 skips (not data-entry errors), and
+> cohorts from 6/5 onward cannot reach +5d before the 6/12 review
+> (their +5d dates fall on/after review day), so those rows stay
+> "insufficient data" at review by design.
+
+\---
+
+## 2026-06-04 — Day 13 Run + 5/28 Cohort + 5/20 +10d Tiebreaker
+
+**Phase:** 2 (read-only dry run), Day 13 of 19
+**Status:** Clean 24/24 run (2nd consecutive). 5/28 cohort +5d complete; 5/20 +10d resolved the decay tiebreaker.
+
+### Run Health
+
+First clean 24/24 run since 5/26 — zero rate-limit skips, after 6/2 (3 skips)
+and 6/3 (2 skips). No log evidence of retry/backoff firing, so the likeliest
+cause is lighter Thursday API contention rather than a confirmed fix. The
+Phase 3 429-backoff fix still stands; one clean day does not retire the pattern.
+
+### 5/28 Cohort +5d
+
+|Band|Hit Rate|
+|-|-|
+|40-49%|56% (5/9)|
+|50-59%|**77% (10/13)**|
+|60-69%|50% (1/2)|
+
+Overall 16/24 = 66.7%. Pattern Holds = ✓ YES (50-59% leads). DQ: HIGH 5/7,
+MEDIUM 11/17. Worst: CBRS −17.3% (chronic excluded name, again). Best: SND
++19.5%.
+
+> ANALYST NOTE: SND +19.5% is a HOLD that COUNTS AS A MISS (breached +3%) even
+> though the position gained \~20%. The HOLD ±3% test scores large favorable
+> moves as "wrong" because the bot didn't say BUY. Correct by the locked
+> definition, but when reading cohort accuracy, remember some "misses" are
+> gains left on the table, not losses the bot failed to avoid.
+
+### 5/20 +10d — The Decay Tiebreaker
+
+The decay question was 1-1 (5/18 decayed −8pt; 5/19 flat). 5/20 broke it:
+
+|Cohort|+5d Hit|+10d Hit|Δ|Decayed?|
+|-|-|-|-|-|
+|5/18|50.0%|41.7%|−8.3pt|Yes|
+|5/19|37.5%|37.5%|0.0pt|No|
+|5/20|37.5%|33.3%|−4.2pt|Yes|
+
+So decay sided with 5/18 (2 decayed, 1 flat). The magnitude-growth mechanism
+is now 3/3 (every cohort: absolute moves grow at +10d). NOTE: this was the
+"leans real" read at the time — superseded same week by the 5/21 +10d (see
+6/05 entry), which flipped it back to a coin flip.
+
+### WMT Lag — Replicates a THIRD Time
+
+WMT 5/20: HOLD 62%, −11.37% (+5d), −12.24% (+10d). Three consecutive cohorts
+(5/18, 5/19, 5/20) of the same high-confidence HOLD with double-digit
+sustained losses in both windows. H1 anchor evidence.
+
+### NVDA Near-Miss Confidence Decay Continues
+
+NVDA 8th near-miss; confidence stair-stepped down 68→68→68→66→65 as price
+unwound from the $228 peak back toward $213. Quick to de-rate on the drop,
+never re-rated on the climb — the H2 (loss>gain reactivity) asymmetry in a
+scout name. GLD reverted to HOLD after its one-day BUY (5/26-style single
+event, not a cluster).
+
+\---
+
+## 2026-06-05 — Day 14: Q2 VERDICT LOCKED; 5/29 Cohort; 5/21 +10d; Decay = Coin Flip
+
+**Phase:** 2 (read-only dry run), Day 14 of 19
+**Status:** All 9 cohorts +5d-complete. Q2 near-miss threshold verdict LOCKED.
+Clean 24/24 run (3rd consecutive). The week's terminal data event.
+
+### Q2 VERDICT — LOCKED: KEEP 70% Threshold
+
+The complete near-miss cohort (6 of 7 outcomes; NVDA 6/1 due 6/8 as addendum):
+
+|Date|Ticker|Conf|DQ|+5d Return|Right|
+|-|-|-|-|-|-|
+|5/19|NVDA|62%|MED|−3.62%|NO|
+|5/21|SCHD|68%|HIGH|+1.22%|YES|
+|5/22|NVDA|62%|MED|+3.50%|YES|
+|5/26|VTI|68%|HIGH|+1.14%|YES|
+|5/27|NVDA|63%|MED|+2.34%|YES|
+|5/29|NVDA|68%|MED|−5.02%|NO|
+
+**Hit rate: 4/6 = 66.7%   |   Avg +5d return: −0.07%.**
+
+Both loosening gates FAIL: hit rate 66.7% < 75% required, AND avg return
+−0.07% is far below the +3% required. NVDA 5/29 closed −5.02% (NVDA fell to
+$205), pulling the hit rate back below the gate after the 5/22/5/27 wins had
+briefly lifted it.
+
+> ANALYST NOTE: The 70% threshold is correctly calibrated. It screens out a
+> band (60-69% BUYs) whose realized performance is barely better than a coin
+> flip with NEGATIVE expected return (−0.07% avg). This is the experiment
+> doing exactly its job: a read-only dry run that prevented a premature
+> threshold loosening. Had we lowered to 65% on the early 3/4 reading, we'd
+> have admitted a negative-EV signal class. KEEP 70% is the verdict.
+
+> ANALYST NOTE (DATA-INTEGRITY): The tracker's Near-Miss summary "Average +5d
+> return" formula was averaging K5:K9 (5 rows), EXCLUDING the NVDA 5/29
+> −5.02% loss in row 10 — it displayed +0.92% instead of the correct −0.07%.
+> Off-by-one range bug. Fixed to K5:K13 and summary ranges extended to capture
+> pending near-misses. The verdict math above uses the corrected figure.
+
+### H4 (DQ-Conditional Threshold) — DEMOTED
+
+HIGH-DQ near-misses finished 2/2 (SCHD, VTI); MEDIUM-DQ finished 2/4 (wins
+5/22, 5/27; losses 5/19, 5/29). The HIGH-DQ 2/2 is real but n=2 — far too
+small to justify a DQ-conditional threshold. The same-ticker NVDA series
+finished 2 wins / 2 losses across 4 entries — a coin flip. H4 should be
+re-scoped in Phase 3 only if a larger near-miss sample reopens it.
+
+### 5/29 Cohort +5d
+
+|Band|Hit Rate|
+|-|-|
+|40-49%|14% (1/7)|
+|50-59%|**73% (8/11)**|
+|60-69%|67% (4/6)|
+
+Overall 13/24 = 54.2%. Pattern Holds = ✓ YES (50-59% leads decisively). This
+is the 9th and final cohort to reach +5d.
+
+### Q1 CALIBRATED — FINALIZED
+
+All 9 cohorts +5d-complete. Final aggregate (n=216 band-sample):
+
+|Band|Hit Rate|
+|-|-|
+|40-49%|43.1% (31/72)|
+|50-59%|**61.3% (65/106)**|
+|60-69%|50.0% (19/38)|
+
+**Q1 FINAL: ✓ CALIBRATED — 6 of 9 cohorts confirm; 50-59% leads at 61.3%
+in the combined data.** The 3 non-confirming cohorts (5/21, 5/22, 5/26) are
+explained by tiny 60-69% samples and low-volatility names inflating the
+40-49% band; none reverse the aggregate.
+
+### 5/21 +10d — Decay Reverts to a COIN FLIP
+
+|Cohort|+5d Hit|+10d Hit|Δ|
+|-|-|-|-|
+|5/18|50.0%|41.7%|−8.3pt|
+|5/19|37.5%|37.5%|0.0pt|
+|5/20|37.5%|33.3%|−4.2pt|
+|5/21|41.7%|45.8%|**+4.2pt**|
+
+5/21 IMPROVED at +10d, putting the final +10d decay tally at **2 decayed
+(5/18, 5/20), 2 not (5/19 flat, 5/21 improved)** — a coin flip. Meanwhile the
+magnitude-growth mechanism stayed 4/4 (absolute moves grew in every cohort).
+
+> ANALYST NOTE: This RETIRES the "HOLD accuracy decays at +10d" finding as
+> non-robust. The durable, replicated claim is "absolute moves grow at +10d"
+> (4/4). The accuracy consequence depends on whether the growing moves break
+> toward or away from the ±3% line — cohort-specific noise at n=24. The
+> Decision Worksheet +10d caveat has been re-firmed to this language in v5.
+
+### WMT Lag — The Full Trajectory, With Resolution
+
+WMT 5/21 broke the double-digit streak (−5.10% +5d, −2.54% +10d). Tracing all
+9 cohorts reveals the lag's full life cycle and its RESOLUTION:
+
+|Cohort|Conf|+5d|+10d|
+|-|-|-|-|
+|5/18|62%|−11.06%|−15.19%|
+|5/19|62%|−11.64%|−12.87%|
+|5/20|62%|−11.37%|−12.24%|
+|5/21|48%|−5.10%|−2.54%|
+|5/22|45%|−4.37%|—|
+|5/26|52%|−4.89%|—|
+|5/27|55%|−1.14%|—|
+|5/28|55%|−0.62%|—|
+|5/29|52%|+2.45%|—|
+
+> ANALYST NOTE: This is the single cleanest illustration of H1 in the dataset,
+> and it now has a RESOLUTION, not just a failure. At 62% confidence the bot
+> held WMT through three identical \~−11% losses (5/18-5/20). Then it CAUGHT UP:
+> confidence dropped to 48-55% as the losses simultaneously shrank (−5%, −4%,
+> −1%), and by 5/29 WMT was +2.45%. The lag self-corrected over \~3-5 days —
+> exactly H1's hypothesized window. H1 (add prior-5-day price input) is the
+> top Phase 3 hypothesis: it is the only finding that replicated across every
+> cohort AND has a clear mechanism AND a demonstrated resolution.
+
+\---
+
+## 2026-06-08 — Day 15: Q2 Addendum Recorded (KEEP 70% Confirmed); 5/22 +10d; Magnitude-Growth Takes Its First Hit
+
+**Phase:** 2 (read-only dry run), Day 15 of 19
+**Status:** NVDA 6/1 near-miss +5d completed (Q2 7th/final addendum). 5/22 cohort
++10d complete (5 of 9 +10d-complete). Clean 24/24 run. One data-integrity
+correction logged (5/22 +5d).
+
+### NVDA 6/1 Near-Miss +5d — Q2 Addendum (7th outcome)
+
+NVDA 6/1 (entry $221.59, the Computex-rally near-miss) completed +5d at the 6/8 close:
+
+|Field|Value|
+|-|-|
+|Signal|BUY 68% MEDIUM (scout)|
+|Price at signal (6/1)|$221.59|
+|Price +5d (6/8 close)|$208.64|
+|Return +5d|−5.84%|
+|Was Claude Right?|NO|
+
+Complete near-miss cohort — 7 of 7 outcomes:
+
+|Date|Ticker|Conf|DQ|+5d Return|Right|
+|-|-|-|-|-|-|
+|5/19|NVDA|62%|MED|−3.62%|NO|
+|5/21|SCHD|68%|HIGH|+1.22%|YES|
+|5/22|NVDA|62%|MED|+3.50%|YES|
+|5/26|VTI|68%|HIGH|+1.14%|YES|
+|5/27|NVDA|63%|MED|+2.34%|YES|
+|5/29|NVDA|68%|MED|−5.02%|NO|
+|6/1|NVDA|68%|MED|−5.84%|NO|
+
+**Hit rate: 4/7 = 57.1% | Avg +5d return: −0.90%.**
+
+> ANALYST NOTE: Q2 verdict KEEP 70% is now FINAL through the addendum. The 6/1
+> outcome did not merely fail to change the verdict — it moved both metrics
+> further from the loosening bar (hit 66.7% → 57.1%; avg −0.07% → −0.90%). A single
+> 7th outcome could only ever lower, never lift, the hit rate toward the ≥75% gate,
+> and a −5.84% print pulled the average further below the +3% gate. The 70% screen
+> held out four consecutive 68%-confidence scout BUYs ($221.59 and unwinding)
+> across exactly the window NVDA fell from \~$228 to \~$205.
+
+### 5/22 Cohort +10d — Magnitude-Growth's First Exception
+
+The 5/22 cohort reached +10d at the 6/8 close (10 trading days; Memorial Day excluded):
+
+|Window|Hit Rate|Avg Abs Move|
+|-|-|-|
+|+5d|11/24 = 45.8%|4.52%|
+|+10d|12/24 = 50.0%|4.09%|
+
+* **Accuracy did NOT decay** — it improved +4.2pt (45.8% → 50.0%).
+* **Absolute move SHRANK** (4.52% → 4.09%) — the FIRST cohort where the +10d
+magnitude-growth mechanism failed. Driver: two big +5d movers mean-reverted by
++10d (AIQ +10.29% → +2.35%, MSFT +10.38% → −1.32%), outweighing SND's blow-out
+(−4.51% → +16.51%).
+
+Band behavior (+5d → +10d): 40-49% 38% → 25%; 50-59% 50% → 75%; 60-69% 50% → 25%.
+
+**Running +10d tally (5 of 9 complete):**
+
+|Cohort|+5d|+10d|Δ|Decayed?|Abs move|Grew?|
+|-|-|-|-|-|-|-|
+|5/18|50.0%|41.7%|−8.3pt|Yes|4.51→5.69|Yes|
+|5/19|37.5%|37.5%|0.0pt|No|5.25→6.09|Yes|
+|5/20|37.5%|33.3%|−4.2pt|Yes|5.54→6.28|Yes|
+|5/21|41.7%|45.8%|+4.2pt|No|5.05→5.18|Yes|
+|**5/22**|**45.8%**|**50.0%**|**+4.2pt**|**No**|**4.52→4.09**|**No**|
+
+* **Magnitude grew: 4 of 5** (5/22 the exception)
+* **Accuracy decayed: 2 of 5** (5/18, 5/20) — still a coin flip, now leaning "no decay"
+
+> ANALYST NOTE: Magnitude-growth was the durable, replicated +10d claim (4/4),
+> slated as the headline +10d takeaway for the 6/12 review; 5/22 is its first
+> counterexample, dropping it to 4/5. This does NOT reopen Q1 (a +5d verdict) — but
+> the Decision Worksheet / §3 Finding #3 "+10d magnitude grows (4/4)" line should be
+> softened to 4/5, and 5/26–5/29 (+10d due 6/9–6/12) will decide whether 5/22 is
+> n=24 noise or the start of a breakdown. The accuracy-decay claim stays retired.
+
+### WMT Lag (H1) — +10d Trajectory Fully Self-Corrected
+
+WMT 5/22: HOLD 45%, +5d −4.37%, +10d **−0.00%** (flat → a HOLD hit at +10d). The
++10d trajectory across the five completed cohorts:
+
+|Cohort|Conf|+10d|
+|-|-|-|
+|5/18|62%|−15.19%|
+|5/19|62%|−12.87%|
+|5/20|62%|−12.24%|
+|5/21|48%|−2.54%|
+|5/22|45%|−0.00%|
+
+> ANALYST NOTE: The +10d window now shows H1's full arc and resolution: as the bot
+> de-rated WMT from 62% to 45–48%, the +10d loss collapsed from −15% to \~0%. H1
+> (add prior-5-day price input) remains the top Phase 3 hypothesis — the only
+> finding replicated across every cohort AND both horizons AND with a demonstrated
+> self-correction.
+
+### Q1 Re-Certified — Unchanged
+
+Re-ran the band aggregate after entering the 5/22 +10d prices and the NVDA 6/1
+addendum (neither touches the 9-cohort +5d hit column):
+
+|Band|Hit Rate (n=216)|
+|-|-|
+|40-49%|43.1% (31/72)|
+|50-59%|**61.3% (65/106)**|
+|60-69%|50.0% (19/38)|
+
+**Q1 CALIBRATED holds: 50-59% leads at 61.3%, 6 of 9 cohorts confirm.** Nothing in
+today's data reopens a locked verdict.
+
+### Data-Integrity Correction — 5/22 +5d Hit Rate (54.2% → 45.8%)
+
+The 6/2 entry's Cohort Results table and the 6/1 Touch Points line both logged the
+5/22 +5d hit rate as 54.2%. The tracker's own Was-Claude-Right column gives
+11/24 = 45.8%, and the Cohort-Analysis band cells (3/8 + 6/12 + 2/4 = 11)
+independently agree. The 54.2% was the 5/29 cohort's figure mis-copied. Both
+instances corrected. All 9 cohort +5d hit rates were re-verified against the
+tracker — the other 8 match to the decimal. No locked verdict is affected (Q1 rests
+on the band aggregate; 5/22 was a NO either way, a 50/50 band tie). The Decision
+Worksheet was checked and does NOT carry the error (it describes 5/22 as a tie).
+
+### 6/8 Run Health + Bonus
+
+Clean 24/24 AM run (avg confidence 52.9%, HIGH DQ 8/24, zero 429 skips — 4th clean
+run across 6/4–6/8). Today produced a new NVDA BUY 68% near-miss at $208.41 (10th
+near-miss overall; +5d due 6/15) — bookkeeping, outside the locked Q2 cohort. The
+full 6/1 cohort +5d was also opportunistically filled (22 of 24; AG/FTI were
+429-skipped on 6/1, so 22 is the max), but it sits outside the 9-cohort Phase 2
+review set.
+
+\---
+
+## 2026-06-09 — Day 16: 5/26 +10d — Sharpest Decay Yet, and It Validates the Low-Vol Confound Call
+
+**Phase:** 2 (read-only dry run), Day 16 of 19
+**Status:** 5/26 cohort +10d complete (6 of 9). Near-Miss tab extended with +10d
+tracking columns; 4 completed +10d near-miss outcomes verified. Clean 24/24 run.
+
+### 5/26 Cohort +10d — −37.5pt, With a Known Mechanism
+
+|Window|Hit Rate|Avg Abs Move|
+|-|-|-|
+|+5d|16/24 = 66.7%|2.92%|
+|+10d|7/24 = 29.2%|4.47%|
+
+The sharpest +10d decay of Phase 2 by a wide margin (prior worst: 5/18 at
+−8.3pt). But this is NOT a surprise result — it is the 6/2 entry's low-vol
+confound unwinding on schedule:
+
+* The 6/2 entry flagged 5/26's 66.7% as inflated: the 40-49% band led at 83%
+(5/6) on names that passed the HOLD ±3% test by sitting still (SND −0.41%,
+CORN −2.75%, NKE −2.30%), not by skill. Pattern Holds was scored NO for
+exactly this reason.
+* At +10d those names finally moved: AG −16.63%, SND +8.72%, CORN −6.43%,
+DOW −6.24% — all HOLD misses. The 40-49% band collapsed **83% → 17%**.
+* Band trajectory (+5d → +10d): 40-49% 83% → 17%; 50-59% 64% → 36%; 60-69%
+50% → 25%.
+
+> ANALYST NOTE: This is inflation unwinding, not skill decaying. The cohort
+> whose +5d hit rate we explicitly distrusted is the one that collapsed at
+> +10d — the +10d data validates the 6/2 skepticism and strengthens the case
+> that low-vol HOLD passes are fragile, hollow hits. Candidate Phase 3
+> observation (not a finding, n=1 mechanism-match): +5d hit rates built on
+> low-vol sitting-still passes should be expected to mean-revert at longer
+> horizons. Also note 5/26 had the LOWEST +5d avg abs move of any cohort
+> (2.92%) — a quiet week that caught up, consistent with magnitude-growth.
+
+### Running +10d Tally (6 of 9 complete)
+
+|Cohort|+5d|+10d|Δ|Decayed?|Abs move|Grew?|
+|-|-|-|-|-|-|-|
+|5/18|50.0%|41.7%|−8.3pt|Yes|4.51→5.69|Yes|
+|5/19|37.5%|37.5%|0.0pt|No|5.25→6.09|Yes|
+|5/20|37.5%|33.3%|−4.2pt|Yes|5.54→6.28|Yes|
+|5/21|41.7%|45.8%|+4.2pt|No|5.05→5.18|Yes|
+|5/22|45.8%|50.0%|+4.2pt|No|4.52→4.09|No|
+|**5/26**|**66.7%**|**29.2%**|**−37.5pt**|**Yes**|**2.92→4.47**|**Yes**|
+
+* **Magnitude grew: 5 of 6** — recovered after the 5/22 exception.
+* **Accuracy decayed: 3 of 6** — an exact coin flip. The decay claim stays
+RETIRED as a general finding; what 5/26 adds is a *conditional* story
+(decay severity tracks +5d inflation), not a directional rule.
+
+### WMT Lag (H1) — Sixth Cohort, Still Resolved
+
+WMT 5/26: HOLD 52%, +5d −4.89%, +10d **+0.01%**. The +10d trajectory:
+
+|Cohort|Conf|+10d|
+|-|-|-|
+|5/18|62%|−15.19%|
+|5/19|62%|−12.87%|
+|5/20|62%|−12.24%|
+|5/21|48%|−2.54%|
+|5/22|45%|−0.00%|
+|5/26|52%|+0.01%|
+
+> ANALYST NOTE: Six consecutive cohorts, one clean arc: de-rating from 62% to
+> the mid-40s/low-50s tracked the +10d loss collapsing from −15% to flat. H1
+> remains the top Phase 3 hypothesis with no contrary evidence anywhere in the
+> dataset.
+
+### Near-Miss Tab Extended to +10d — Corroborating, Not Re-Litigating
+
+The tab now carries +5d/+10d date and outcome columns. The four near-misses
+with completed +10d windows (all entries formula-verified, dates
+trading-day-correct):
+
+|Date|Ticker|+5d|+10d|10d Right|
+|-|-|-|-|-|
+|5/19|NVDA|−3.62%|−2.64%|NO|
+|5/21|SCHD|+1.22%|+0.59%|YES|
+|5/22|NVDA|+3.50%|−3.75%|NO (flipped from +5d YES)|
+|5/26|VTI|+1.14%|−1.75%|NO (flipped from +5d YES)|
+
+**+10d: 1/4 = 25% hit, −1.89% avg** — worse than the +5d picture (4/7 = 57.1%,
+−0.90%). Two +5d wins flipped to +10d losses.
+
+> ANALYST NOTE: Q2 is FINAL on the +5d basis and this does not reopen it — but
+> the +10d extension corroborates the verdict from the other side: the
+> near-miss band gets WORSE, not better, with more time. Every horizon we
+> check says the same thing about 60-69% BUYs.
+
+### Q1 Re-Certified — Unchanged
+
+50-59% leads at 61.3% (65/106) over 40-49% 43.1% (31/72) and 60-69% 50.0%
+(19/38), n=216. The +10d entries do not touch the +5d hit column. Nothing
+reopens.
+
+### 6/9 Run Health + Bookkeeping Flags
+
+Clean 24/24 AM run (avg confidence 51.3%), 5th consecutive clean run. NVDA
+BUY 68% MEDIUM @ $207.40 — the 11th near-miss (5th consecutive trading day
+with an NVDA near-miss BUY). HIGH DQ count dropped to 4/24 (recent days \~8/24)
+— watch, not alarm.
+
+Flags for the tab: (1) the 6/8 NVDA near-miss ($208.41, +5d due 6/15) and
+today's 6/9 NVDA near-miss ($207.40, +5d due 6/16) are not yet rows in the
+Near-Miss tab — summary still says Total = 9, should be 11; (2) the VERDICT
+box still says "to be decided 2026-06-10" — stale, Q2 is FINAL, review is
+6/12.
+
+\---
+
+## 2026-06-10 — Day 17: 5/27 +10d Lands on the Shock — −50pt, Regime-Contaminated; Near-Miss Registry Needs Repair
+
+**Phase:** 2 (read-only dry run), Day 17 of 19
+**Status:** 5/27 cohort +10d complete (7 of 9). 6/10 Middle East tension shock —
+the +10d measurement date IS the shock day. 6/3 cohort +5d opportunistically
+complete (22/22 max). Clean 24/24 run — second pure-HOLD day of Phase 2. Two
+Near-Miss tab integrity findings.
+
+### 5/27 Cohort +10d — −50.0pt, the Largest Decay, and Why It Can't Be Read at Face Value
+
+|Window|Hit Rate|Avg Abs Move|
+|-|-|-|
+|+5d|19/24 = 79.2%|2.67%|
+|+10d|7/24 = 29.2%|5.16%|
+
+Band trajectory (+5d → +10d): 40-49% 67% → 17%; 50-59% 85% → 31%; 60-69% 80% → 40%.
+Biggest +10d movers: AG −20.46%, PWR −11.06%, CBRS −8.15% (recovering from −16.82%
+at +5d), GLD −8.00%, SND +6.84%, AAPL −6.64%.
+
+Two compounding mechanisms, and neither is "the bot got worse":
+
+1. **Quiet-week inflation (the 5/26 story, again, stronger).** 5/27 had the
+LOWEST +5d avg abs move of Phase 2 (2.67%) and the HIGHEST hit rate (79.2%)
+— hollow sitting-still HOLD passes. 5/26 and 5/27 are now a matched pair:
+the two quietest cohorts at +5d are the two biggest decayers at +10d.
+2. **The +10d measurement date IS the shock day.** The 6/10 Middle East tension
+selloff is the close that prices this entire cohort's +10d. A market-wide
+gap mechanically blows HOLDs out of the ±3% band regardless of selection
+skill — all 24 of 5/27's signals were HOLDs, and 17 failed at +10d.
+
+> ANALYST NOTE — REGIME CONTAMINATION: The 5/28 (+10d due 6/11) and 5/29 (due
+> 6/12) windows also contain the shock. That means the remaining Phase 2 +10d
+> data CANNOT cleanly arbitrate the accuracy-decay question — the retired claim
+> stays retired, and late-cohort +10d hit rates should be reported with the
+> regime flag at the review. The §6 "single market regime" caveat materialized
+> inside Phase 2 itself. Do NOT update priors on bot skill from 5/26–5/29 +10d
+> accuracy; DO note that magnitude-growth keeps confirming (it is
+> regime-agnostic: 6 of 7).
+
+> ANALYST NOTE — METHODOLOGICAL (Phase 3 candidate): HOLD ±3% correctness is
+> regime-dependent by construction. Candidate design fix: market-relative HOLD
+> bands (e.g., ±3% vs SPY-adjusted return) or vol-scaled bands. Pairs naturally
+> with H2 (direction asymmetry) and H3 (stable-thesis language).
+
+### Running +10d Tally (7 of 9 complete)
+
+|Cohort|+5d|+10d|Δ|Decayed?|Abs move|Grew?|
+|-|-|-|-|-|-|-|
+|5/18|50.0%|41.7%|−8.3pt|Yes|4.51→5.69|Yes|
+|5/19|37.5%|37.5%|0.0pt|No|5.25→6.09|Yes|
+|5/20|37.5%|33.3%|−4.2pt|Yes|5.54→6.28|Yes|
+|5/21|41.7%|45.8%|+4.2pt|No|5.05→5.18|Yes|
+|5/22|45.8%|50.0%|+4.2pt|No|4.52→4.09|No|
+|5/26|66.7%|29.2%|−37.5pt|Yes|2.92→4.47|Yes|
+|**5/27**|**79.2%**|**29.2%**|**−50.0pt**|**Yes**|**2.67→5.16**|**Yes**|
+
+* **Magnitude grew: 6 of 7** — robust, and regime-agnostic (the shock grows
+magnitudes too).
+* **Accuracy decayed: 4 of 7** — but 2 of the 4 are regime-contaminated;
+ex-shock the tally is 2 of 5. Claim stays RETIRED; report with the flag.
+
+### WMT Lag (H1) — Seventh Cohort, Held Through the Shock
+
+WMT 5/27: HOLD 55%, +5d −1.14%, +10d **+1.99%** — a HOLD hit on the shock day.
+Trajectory: −15.19 → −12.87 → −12.24 → −2.54 → −0.00 → +0.01 → +1.99. Seven
+cohorts, fully resolved, and the de-rated thesis survived a market-wide gap.
+
+### Near-Miss Registry — Two Integrity Findings (Signals tab is authoritative)
+
+**Finding 1 — the two "6/2" rows are actually 6/3 signals.** The tab's GLD
+62% @ $408.50 and NVDA 66% @ $215.13 match the Signals tab's **6/3** rows
+exactly (6/3 was the two-BUY day; 6/2 had one). Their +5d dates (6/10) and
+entered outcomes (GLD −8.30% NO, NVDA −6.84% NO) are exactly correct FOR 6/3
+signals — only the Signal Date cells are wrong. Fix: re-date both rows
+6/2 → 6/3; no outcome recomputation needed.
+
+**Finding 2 — five band BUYs are missing from the registry.** Per the Signals
+tab, every 60-69% BUY on/after 6/1: 6/1 NVDA 68% ✓(in tab), 6/2 NVDA 68%
+@ $227.93 **MISSING** (+5d was due 6/9: close $208.19 → −8.66% NO), 6/3 GLD ✓
+and 6/3 NVDA ✓ (the mis-dated pair), 6/4 NVDA 65% @ $213.79 MISSING (+5d due
+6/11), 6/5 NVDA 65% @ $211.98 MISSING (due 6/12), 6/8 NVDA 68% @ $208.41
+MISSING (due 6/15), 6/9 NVDA 68% @ $207.40 MISSING (due 6/16). Registry should
+total 14 (locked 7 + extended 7), not 9. Note: the notes' own daily entries
+also missed the 6/4 and 6/5 near-misses (65% band) in real time.
+
+> ANALYST NOTE: None of this touches Q2 — the locked verdict is the 7-of-7
+> 5/19–6/1 cohort, which is intact and correctly recorded. But the EXTENDED
+> tracking set now reads 0-for-3 on completed post-lock +5d outcomes (6/2
+> −8.66%, 6/3 −8.30%, 6/3 −6.84%), all worse than anything in the locked
+> cohort. Including extensions: 4/10 = 40% hit. Every new data point lands on
+> the KEEP-70% side — the shock made rejected near-miss BUYs look even better
+> rejected. Also: the tab's summary block (Total = 9, 44.4%) is built on the
+> mis-dated registry and mixes locked + extended — suggest splitting the
+> summary into LOCKED 7-of-7 (final) and EXTENDED (running). VERDICT box date
+> still says 2026-06-10 — stale, review is 6/12.
+
+### Near-Miss +10d Extension (informational)
+
+NVDA 5/27 +10d completed today: $209.84 → $200.42 = −4.49% NO (correct +10d
+date ✓). Five +10d outcomes now in: 1/5 = 20%, avg −2.41%. The +5d→+10d flips
+remain one-directional (two YES→NO, zero NO→YES).
+
+### Q1 Re-Certified — Unchanged
+
+50-59% leads at 61.3% (65/106) vs 43.1% / 50.0%, n=216. All +5d data predates
+the shock. Nothing reopens.
+
+### 6/10 Run Health
+
+Clean 24/24 AM run, avg confidence 51.2%, HIGH DQ 7/24 (recovered from
+yesterday's 4/24). **Second pure-HOLD day of Phase 2** (first: 5/28) — zero
+BUYs and zero SELLs on the shock morning; the NVDA near-miss streak ended at
+six trading days (6/2–6/9). Worth carrying into H2/H3 thinking: confidence
+compressed toward the middle on the shock (no signal cleared either threshold),
+which is the conservative failure mode, not the dangerous one.
+
+\---
+
+## 2026-06-11 — Day 18: 5/28 +10d on the Bounce; WASDE Validates the CORN Blind Spot; Scope Correction on the Shock Set
+
+**Phase:** 2 (read-only dry run), Day 18 of 19
+**Status:** 5/28 cohort +10d complete (8 of 9 — only 5/29 remains, due at
+tomorrow's review). WASDE released \~11:00 CST; 6/11 was a bounce day (SPY
++1.70%). 6/4 cohort +5d complete. One correction to my own 6/10 framing,
+logged below. Clean 24/24 run.
+
+### CORRECTION — Shock-Contaminated Set Is 5/27–5/29, NOT 5/26–5/29
+
+The 6/10 entry and memo callout over-included 5/26 in the regime-contamination
+flag. Verified against the trading-day calendar: the 5/26 +10d window ran
+5/27 → **6/9** and closed the day BEFORE the 6/10 shock.
+
+|Cohort|Window ends|Contains 6/10 shock?|
+|-|-|-|
+|5/26|6/9|**NO**|
+|5/27|6/10 (shock day)|YES — measurement date|
+|5/28|6/11 (bounce day)|YES — day 9 of 10|
+|5/29|6/12|YES — day 8 of 10|
+
+> ANALYST NOTE: The correction SHARPENS the finding rather than weakening it.
+> 5/26's −37.5pt decay needed no shock — it is the clean, uncontaminated
+> exhibit of the quiet-week inflation unwind (the 6/9 mechanism analysis used
+> moves through the 6/9 close and stands as written). 5/27 is the same unwind
+> PLUS the shock as its measurement day. The conditional observation is now
+> two-for-two with and without a regime event: the two quietest +5d cohorts
+> (2.92%, 2.67% abs moves) are the two biggest decayers.
+
+### 5/28 Cohort +10d — −25.0pt, Measured on the Bounce
+
+|Window|Hit Rate|Avg Abs Move|
+|-|-|-|
+|+5d|16/24 = 66.7%|3.28%|
+|+10d|10/24 = 41.7%|4.69%|
+
+Bands (+5d → +10d): 40-49% 56% → 22%; 50-59% 77% → 46%; 60-69% 50% → 100%
+(2/2, tiny n — the band *improved*). Biggest movers: AG −15.19% (despite
++7.70% today), CBRS −13.01% (recovering from −17.29% at +5d), SND +19.47% →
++8.59% (reversion continuing), MSFT +1.01% → −7.89%, CORN −7.62%, GLD −5.62%.
+
+5/28 was Phase 2's first pure-HOLD day, so this is 24 HOLDs against ±3%
+through shock-then-bounce: 10 survived. The −25.0pt decay is milder than
+5/27's −50.0pt largely because the measurement date caught the recovery —
+SPY +1.70%, GLD +3.13%, AG +7.70% on 6/11.
+
+> ANALYST NOTE — PATH DEPENDENCE: HOLD ±3% at a fixed horizon is
+> path-dependent around a gap. 5/27 measured ON the shock (−50.0pt); 5/28
+> measured one day later on the bounce (−25.0pt). Same regime event, 25pt of
+> difference purely from where the window happened to close. Reinforces the
+> Phase 3 candidate: market-relative or vol-scaled HOLD bands.
+
+### Running +10d Tally (8 of 9 complete)
+
+|Cohort|+5d|+10d|Δ|Decayed?|Abs move|Grew?|Shock?|
+|-|-|-|-|-|-|-|-|
+|5/18|50.0%|41.7%|−8.3pt|Yes|4.51→5.69|Yes|—|
+|5/19|37.5%|37.5%|0.0pt|No|5.25→6.09|Yes|—|
+|5/20|37.5%|33.3%|−4.2pt|Yes|5.54→6.28|Yes|—|
+|5/21|41.7%|45.8%|+4.2pt|No|5.05→5.18|Yes|—|
+|5/22|45.8%|50.0%|+4.2pt|No|4.52→4.09|No|—|
+|5/26|66.7%|29.2%|−37.5pt|Yes|2.92→4.47|Yes|**no — pre-shock**|
+|5/27|79.2%|29.2%|−50.0pt|Yes|2.67→5.16|Yes|yes (close ON shock)|
+|**5/28**|**66.7%**|**41.7%**|**−25.0pt**|**Yes**|**3.28→4.69**|**Yes**|**yes (closed on bounce)**|
+
+* **Magnitude grew: 7 of 8** — robust across quiet weeks, the shock, and the
+bounce.
+* **Accuracy decayed: 5 of 8; ex-shock 3 of 6** — still a coin flip ex-shock.
+Claim stays RETIRED. The durable structure is conditional: inflation-unwind
+decay (severe, mechanism-driven: 5/26, 5/27) vs noise-band wobble
+(5/18, 5/20 vs 5/19, 5/21, 5/22).
+
+### WASDE / CORN — The Catalyst Test Lands on the Blind-Spot Side
+
+|Item|Value|
+|-|-|
+|CORN 6/10 → 6/11|$17.07 → $16.72 = **−2.05%**|
+|SPY same day|+1.70%|
+|Market-relative move|**≈ −3.69%**|
+|Bot's 6/11 AM signal (9:30 CST, pre-release)|HOLD **38%** MEDIUM @ $16.945|
+
+CORN fell 2% on WASDE day against a +1.7% tape — a ≈3.7% market-relative move
+on a scheduled, publicly-calendared release. The AM run, which precedes the
+\~11:00 CST release, printed CORN at 38% confidence (lowest band) with no
+event awareness: the bot did not know WASDE existed, let alone that it was
+today. CORN has also bled −7.62% over the 5/28 +10d window.
+
+> ANALYST NOTE: This is the natural-catalyst test the kickoff specified, and
+> it reads as VALIDATING Path B (`commodity\_context.py` /
+> `commodity\_backed\_equity\_context.py`): a knowable, scheduled event moved the
+> asset materially and the equity-news pipeline was structurally blind to it.
+> Honest sizing: one event, one move — supportive evidence for the Phase 3
+> module thesis, not proof of effect size. Carry to memo §5d tomorrow.
+
+### WMT Lag (H1) — Eighth Cohort
+
+WMT 5/28: HOLD 55%, +5d −0.62%, +10d **+1.71%**. Trajectory: −15.19 → −12.87
+→ −12.24 → −2.54 → −0.00 → +0.01 → +1.99 → +1.71. Eight cohorts, fully
+resolved, stable through shock and bounce alike. H1 enters the review
+untouched by anything in four weeks of data.
+
+### Near-Miss Extended Set — 0-for-4
+
+6/4 NVDA 65% near-miss completed +5d today: $213.785 → $204.87 = **−4.17%
+NO** (computed from the 5/28 +10d price column — function output). Extended
+post-lock set is now 0-for-4 (−8.66%, −8.30%, −6.84%, −4.17%), avg −7.0%.
+Today's run added another: NVDA BUY **65%** @ $199.94 — extended set is 8
+signals, registry should total 15. The 6/10 registry findings (re-date the
+"6/2" pair to 6/3; five-now-six missing rows; split LOCKED vs EXTENDED
+summary; stale verdict box) remain open — worth doing before tomorrow's
+review so the tab presents clean.
+
+### Q1 Re-Certified — Unchanged
+
+50-59% leads at 61.3% (65/106), n=216, 6 of 9 Pattern Holds. Nothing reopens.
+
+### 6/11 Run Health
+
+Clean 24/24 AM run, avg confidence 51.5%, HIGH DQ 5/24 — fourth consecutive
+depressed day (8 → 4 → 7 → 5); flag for the review's run-health summary but
+no operational impact. NVDA near-miss streak resumed after the 6/10
+pure-HOLD day; NVDA closed $204.87, +2.5% above the AM print, on the bounce.
+
+\---
+
+## 2026-06-12 — Day 19: Phase 2 CLOSED — Final Cohort, Final Scorecards, Review Decisions
+
+**Phase:** 2 (read-only dry run), Day 19 of 19 — **FINAL DAY
+Status:** 5/29 +10d complete. All 9 cohorts complete on both windows (n=216
+banded +5d, 216 +10d). Phase 2 → Phase 3 review held; memo finalized (§0, §3,
+§4, §5, §7). Phase 3-A approved, advisory-only. Clean 24/24 run.
+
+### 5/29 Cohort +10d — Final Cohort In
+
+|Window|Hit Rate|Avg Abs Move|
+|-|-|-|
+|+5d|13/24 = 54.2%|4.95%|
+|+10d|9/24 = 37.5%|5.14%|
+
+−16.7pt, shock at day 8 of the window, measured 6/12. Mildest of the three
+shock-window decays — 5/29 carried no quiet-week inflation (its +5d abs move
+was a normal 4.95%). Bands (+5d → +10d): 40-49% 14% → 29% (improved); 50-59%
+73% → 36%; 60-69% 67% → 50%. Biggest movers: SND +16.41%, AG −12.99%, MSFT
+−11.35%, CBRS −10.14%, JPM +8.39%.
+
+### FINAL +10d Scorecards (9 of 9, locked)
+
+|Cohort|+5d|+10d|Δ|Decayed?|Abs move|Grew?|Shock?|
+|-|-|-|-|-|-|-|-|
+|5/18|50.0%|41.7%|−8.3pt|Yes|4.51→5.69|Yes|—|
+|5/19|37.5%|37.5%|0.0pt|No|5.25→6.09|Yes|—|
+|5/20|37.5%|33.3%|−4.2pt|Yes|5.54→6.28|Yes|—|
+|5/21|41.7%|45.8%|+4.2pt|No|5.05→5.18|Yes|—|
+|5/22|45.8%|50.0%|+4.2pt|No|4.52→4.09|No|—|
+|5/26|66.7%|29.2%|−37.5pt|Yes|2.92→4.47|Yes|no (pre-shock)|
+|5/27|79.2%|29.2%|−50.0pt|Yes|2.67→5.16|Yes|yes (close ON shock)|
+|5/28|66.7%|41.7%|−25.0pt|Yes|3.28→4.69|Yes|yes (closed on bounce)|
+|5/29|54.2%|37.5%|−16.7pt|Yes|4.95→5.14|Yes|yes (shock day 8)|
+
+* **Magnitude grew: 8 of 9** (5/22 the lone exception) — the robust +10d claim,
+confirmed across quiet weeks, the shock, and the bounce. Finding #3 and the
+memo §4 callout reconciled; worksheet v6 caveat edit is the carry-forward.
+* **Accuracy decayed: 6 of 9; ex-shock 3 of 6** — coin flip; claim RETIRED with
+the regime flag (5/27–5/29) and the conditional inflation-unwind observation
+(5/26–5/27).
+
+### WMT (H1) — The Arc Completes, With a Twist
+
+WMT 5/29: HOLD 52%, +5d +2.45%, +10d **+4.31%** — the final point breaches the
+±3% band on the FAVORABLE side (a HOLD "miss" that made money). Full +10d arc:
+
+−15.19 → −12.87 → −12.24 → −2.54 → −0.00 → +0.01 → +1.99 → +1.71 → **+4.31**
+
+> ANALYST NOTE: A fitting close. The lag self-corrected from −15% to flat
+> (cohorts 1–6), held through the shock (7–8), and then the recovery ran past
+> the band while confidence sat at 52% (9) — the lag is visible in BOTH
+> directions: slow to de-rate into losses, slow to re-rate into recovery. This
+> sharpens H1's test design (prior-5-day input should fix both sides) and
+> mildly complicates H2's pure loss-asymmetry story — exactly what the A/B
+> harness is for. H1 enters Phase 3 with nine cohorts of replication and zero
+> contrary observations.
+
+### Near-Miss Day — Two More, and the Extended Set Hits 0-for-5
+
+* 5/29 NVDA near-miss +10d filled (by Rob, verified): $215.95 → $205.19 =
+**−4.98% NO**. Near-miss +10d: 1/6 = 16.7%, avg −2.84%.
+* 6/5 NVDA near-miss +5d due today (not yet a tab row): $211.975 → $205.19 =
+**−3.20% NO**. Extended post-lock set: **0-for-5** (−8.66, −8.30, −6.84,
+−4.17, −3.20), avg −6.23%.
+* Today's run: **two near-misses** — VTI BUY **68% HIGH** @ $365.62 (first
+non-NVDA since 5/26, and HIGH-DQ like both prior non-NVDA near-misses) and
+NVDA BUY 62% MEDIUM @ $205.60. Registry should now total **17** (locked 7 +
+extended 10).
+* Registry fixes from 6/10 remain open (mis-dated "6/2" pair → 6/3; missing
+rows; LOCKED vs EXTENDED summary split; stale verdict box). Promoted to a
+Phase 3 engineering item: **auto-generate the registry from the Signals
+tab** — the hand-maintained version drifted twice in one week.
+
+### Q1 — FINAL CERTIFICATION
+
+|Band|Hit Rate (n=216)|
+|-|-|
+|40-49%|43.1% (31/72)|
+|50-59%|**61.3% (65/106)**|
+|60-69%|50.0% (19/38)|
+
+Pattern Holds 6 of 9. Unchanged through every data event of Week 4 — the 5/22
+correction, the addendum, six +10d completions, the shock, and the bounce.
+**Q1 = CALIBRATED is the certified Phase 2 result.**
+
+### Review Decisions (memo §0/§5/§7 finalized)
+
+|Decision|Outcome|
+|-|-|
+|Phase 2 calibration validated?|**YES** — Q1 CALIBRATED, n=216|
+|Q2 threshold|**KEEP 70%** — 7-of-7 final + extended 0-for-5|
+|Phase 3 approved?|**YES — Phase 3-A, prompt-level, advisory-only**|
+|Triple blend|**Deferred to 3-B scoping**, gated on 3-A calibration data|
+|First workstream|**H1 prior-5-day price input** (parallel eng.: CBRS exclusion, commodity modules, 429 backoff, registry auto-gen, HOLD-band methodology)|
+|Hypothesis order|H1 → H3 → H2; H4 to backlog|
+|Q1–Q5 leans|\~25 book · cross-asset deferred · rebuild-daily + price input · **advisory** · Risk Engine unchanged for 3-A|
+
+### 6/12 Run Health + Phase 2 Operational Close
+
+Clean 24/24 AM run, avg confidence 53.0%, HIGH DQ 7/24 (recovered). Phase 2
+operational record: 19 trading days, 451 signal rows, 9 review cohorts ×
+24 × 2 windows complete, two pure-HOLD days (5/28, 6/10), three 429-skip days
+(6/1–6/3, fixed by spacing), zero missed runs. **Phase 2 is closed.**
+
+\---
+
+## 2026-06-15 — Phase 3-A Go-Live: First Advisory Run Captured; Analyzer Phase-Bug Fixed; Toolchain Hardened; Repo Reconciled
+
+**Phase:** 3-A (prompt-level, advisory-only — **LIVE**), Day 1
+**Status:** Phase 3-A is live. First 24/24 advisory run generated and captured to the Signals tab (rows 456–479). No orders — advisory-only, human-gated. One latent analyzer bug surfaced at the phase cutover and was fixed; the runner toolchain was hardened; the public repo was reconciled and a push bundle staged. First live cohort (6/15) is pending its +5d.
+
+### Go-Live — First Advisory Run
+
+Clean 24/24 AM run, **all HOLD**, risk engine APPROVED across the board, zero orders (advisory-only working as designed). The 24 control-arm signals parsed to the tracker at rows **456–479**, columns A–G matching the log exactly (AAPL 0.58/HIGH/295.46 … GLD 0.52/MEDIUM/400.17), H–J empty pending outcomes, K–N outcome formulas in place. The Dashboard swept the new rows in — **Total Signals 475** (451 Phase 2 + 24) — and the **50-59% guardrail still leads at 58.8%** (today's HOLDs add to the band totals but not to YES/NO, by design, since they have no +5d yet).
+
+> ANALYST NOTE: The 451-vs-475 signal-distribution gap traced to AG and FTI — two \*\*price-only backfills\*\* (429-skipped on 6/1, so no signal was ever generated; their prices were filled for return tracking). Signal blank → Was-Right falls through to "" → both rows sit inert in every band and cohort while still carrying prices. Not a defect; nothing to fix.
+
+### analyze\_log.py — Phase-Regex Fix (latent 19 days, broke on the cutover)
+
+The analyzer reported **0 signals** on the 6/15 log while the parser read 24 from the same file. Root cause, one line: the summary regex was `PHASE \\d DRY RUN]`. `\\d` matches a **single digit**, so it matched `\[PHASE 2 DRY RUN]` cleanly but `\[PHASE 3-A DRY RUN]` — digit `3`, then `-A` — broke the match. `summary\_history.txt` is the audit trail: it parsed every Phase-2 day through 6/12 and dropped to 0 the instant the phase label changed on 6/15.
+
+Fix: `PHASE \[\\w.-]+ DRY RUN(?: A)?]`. `\[\\w.-]+` matches any phase label (`2`, `3-A`, `3-B`, `4`…); `(?: A)?` accepts the no-suffix single-arm form **and** the control arm `… DRY RUN A]` while **excluding** variant `… DRY RUN B]`, so an A/B day summarizes the control arm only — consistent with the tracker paste. Reproduced in-sandbox: **0 → 24** on the single-arm log, **24 (not 48)** on the A/B log with no duplicate tickers; Phase 2 logs still parse.
+
+> ANALYST NOTE: A textbook boundary bug — a single-digit assumption silently correct for 19 trading days, wrong the first morning the assumption changed. The class to watch in the rebuild is anywhere the phase string is parsed rather than passed. The two "0 signals" stanzas already in `summary\_history.txt` stay as the record; a re-run appends a fresh correct entry with no new API spend.
+
+### Go-Live Toolchain Hardening
+
+* **Bats (all three):** `set PYTHONUTF8=1` (UTF-8 I/O regardless of Windows locale); an openpyxl self-check in `run\_weekly\_review.bat`; new `requirements.txt` (openpyxl) for the analysis layer.
+* **run\_daily.bat parser fix:** the `. was unexpected at this time.` error was unescaped parens — the literal `(non-fatal)` inside an `if errorlevel 1 (…)` block let cmd read the `)` as the block close. Rephrased the echo to drop the parens; the 9:30 run came through clean.
+* **Harnesses h1–h4:** added `--since` / `--until` date slicing (module globals, **byte-identical default**) so Phase 3-A can be analyzed apart from the certified Phase 2 window.
+* **Encoding:** UTF-8 file writes added to h1–h4 and the registry builder (cp1252 write trap).
+
+### news\_client.py — Freshness Sort (the only change to an otherwise-untouched file)
+
+Verdict: **correctly unchanged** for Phase 3-A — it returns lists (no file writes, so the cp1252 trap can't reach it), and news is fetched once per ticker and reused across both A/B arms, so it needs no phase or variant awareness. One robustness add: a newest-first `sorted(... key="datetime" ..., reverse=True)` after the empty-guard in **both** fetchers, guaranteeing freshness independent of Finnhub's (undocumented, comment-only) ordering — a degraded response can no longer quietly hand Claude the week's oldest headlines.
+
+### Tracker Structure + Cohort Wiring
+
+Filled the K:N outcome formulas down to row **2000**; added Cohort **Section 4: Phase 3-A Cohorts** (40 holiday-aware date rows, 6/15–8/11, mirroring Section 1); extended the Dashboard fixed ranges. Recalc: **0 errors / 8,584 formulas**. The text-date-vs-datetime risk (Section 4 dates are TEXT `"2026-06-15"`; Signals dates are real `datetime`) was **proven** harmless via a throwaway +5d injection across three bands — the 6/15 cohort immediately read Sample 3 with bands populated and correct hit rates; the scratch copy was discarded. Section 4 row 53 reads `0 / insufficient` today by design (the sample formula counts only resolved +5d) and lights up when col-H is entered (\~6/23).
+
+### README + Risk-Engine Reconciliation
+
+Rewrote the Phase-2-stale README to Phase 3-A reality: phase badge, Phased-Rollout table (Phase 2 closed, Phase 3-A current), a "Research \& validation tooling" section (h1–h4, registry, the three runners, `--since`), `requirements.txt` setup, and the calibration outcome (50-59% @ 61.3%, near-miss 70%). Corrected **MAX\_OPEN\_POSITIONS 30 → 8** — a pure **doc lag**: the live "Active Rules" block prints 8, so the engine has enforced 8 all along; only the committed README said 30. `risk\_engine.py` needs no edit (confirmed).
+
+### EDGAR — Scoped to Phase 3 (decision, no code)
+
+Decision: **do not build in 3-A; build at the Phase 3 boundary** as one `edgar\_client.py`, shaped like `news\_client.py` (lazy client, CIK cache, graceful `return \[]`, summarize-not-dump, `requests`/urllib only; risk\_engine needs nothing). Scope = **fast catalysts** (Form 4 insider, 8-K material events) + **slow context** (10-Q/10-K MD\&A + risk factors) + **optional** XBRL fundamentals (low value — duplicates Schwab P/E/EPS). **10-K folded in with 10-Q** — same submissions feed and the same MD\&A/risk-factor parser, near-zero incremental cost, richer annual Item 1A.
+
+> ANALYST NOTE: The methodological key, and the reason this waited. The 3-A guardrail and cohort were calibrated on \*\*news-only\*\* input. Turning EDGAR onto the live path mid-phase would change what the guardrail was measured against and confound the 3-A cohort. So it enters as a \*\*measured A/B arm\*\* (reuse H2: A = news, B = + EDGAR), not a baseline upgrade — evidence first, calibrated baseline preserved. The roadmap's two SEC rows (2.5 fundamentals + 3 10-Q) were folded into a single Phase 3 SEC/EDGAR line to match.
+
+### Repo Reconciliation + Push
+
+Reconciled the local working set against the public repo (17 commits): `analyze\_log.py`, `README.md`, and `news\_client.py` updated; the four harnesses, the three runners, `parse\_log\_to\_tracker.py`, and `requirements.txt` added (never committed before). `.gitignore` confirmed secure — `.env`, `token.json`, `logs/`, the tracker, and the paste TSVs all excluded (docs and tracker intentionally local). Staged a flat, byte-faithful **13-file bundle** (`.bat`s CRLF-preserved); push commands provided. The sandbox can't authenticate to the repo, so the push itself is Rob's to run.
+
+\---
+
+## 2026-06-16 — Phase 3-A Day 2: First Live Near-Misses (VTI, NVDA) Logged; Near-Miss Tab Repaired
+
+**Phase:** 3-A (advisory-only), Day 2
+**Status:** 6/16 run captured — the first Phase 3-A BUY signals, both near-misses. VTI (68%) and NVDA (65%) recorded to the Near-Miss BUYs tab (rows 14–15, pending outcomes). The tab was repaired in passing: relabeled to span both phases, verdict box resolved, and the drifted +10d cells on rows 11–15 restyled. 6/15 re-run confirmed 0 near-misses; the 6/15 cohort's +5d is still pending (\~6/23).
+
+### 6/16 Run — First Phase 3-A BUYs
+
+24 signals, **2 BUY / 22 HOLD** — the first BUYs of Phase 3-A (6/15 was 24/24 HOLD). Both are scouts that landed in the 60-69% near-miss band and were rejected by the 70% threshold (risk engine APPROVED 22 / REJECTED 2):
+
+|Ticker|Conf|Miss|DQ|Price|5-day context|
+|-|-|-|-|-|-|
+|VTI|68%|−2 pt|HIGH|$372.15|+3.94% run into its 52-wk-high zone|
+|NVDA|65%|−5 pt|MEDIUM|$209.12|+4.35% recovery|
+
+Average confidence 56.5% (up from 55.1% on 6/15); bands firmed toward the 60s — 11 in 40-59 / 11 in 60-69 (vs 6/15's 17 / 6). HIGH DQ 15/24. Pasted to Signals rows 480–503. (The 5/18 cohort's first **+20d** date also came due today — informational only; Phase 2's verdicts are closed on the +5d/+10d windows.)
+
+> ANALYST NOTE: Both near-misses are momentum-driven (5-day run-ups), echoing the Phase 2 pattern where 60-69% BUYs clustered on recent strength. VTI at HIGH DQ is the cleaner probe — the project's read is that HIGH-DQ, non-NVDA near-misses are the least-confounded threshold tests. Their outcomes (+5d 6/24, +10d 7/1) are the first live evidence on whether KEEP-70% holds in Phase 3-A.
+
+### Near-Miss Registry — Two New Entries
+
+Logged VTI and NVDA to the **Near-Miss BUYs** tab (rows 14–15) on the existing schema — return and was-right formulas in place, +5d/+10d price cells left as pending yellow inputs (+5d resolves 6/24, +10d 7/1). COHORT SUMMARY ranges extended to row 15: **tab total now 11** (was 9); the resolved-outcome stats are unchanged — 9 complete +5d, 44.4% hit, avg −2.38% — since the two new rows are pending. 6/15 contributed none (24/24 HOLD). (These are additive to the *logged* set, not the registry reconciliation: the Phase-2 band-BUY backfill flagged on 6/12 — tab at 9 vs the \~17 the logs imply, the missing 6/4–6/9 entries — remains the open `build\_near\_miss\_registry.py` auto-gen item for Phase 3.)
+
+### Near-Miss Tab Repairs
+
+The tab had drifted (the registry-maintenance thread from the Phase 2 close). Three fixes, recalc clean at 0 errors:
+
+* **Relabeled** — title now spans "Phase 2 + Phase 3-A"; subtitle marks rows 5–13 as Phase 2 (closed 6/12) and 14+ as Phase 3-A. Kept one continuous list (no section split) since the COHORT SUMMARY aggregates all rows.
+* **Verdict resolved** — the box still read "to be decided 2026-06-10"; now "KEEP 70% (resolved 2026-06-05)", pointing at the actual outcome (+5d hit 44% ≤ 50%, avg −2.4% ≤ 0%) against the criteria already listed below it.
+* **Rows 11–15 +10d cells** — the +10d price/return/was-right cells (J/L/N) had lost their fills (plain white vs the yellow-input / gray-formula convention); restyled to match the completed rows. Filled the +10d **dates** — H11 6/15, H12/H13 6/17 — each set to 5 trading days after that row's own +5d date.
+
+> ANALYST NOTE: r12/r13's +5d dates read 6/10, where five trading days from the 6/2 signal lands on 6/9 — likely a hand-entry drift. The +10d dates I filled follow each row's existing +5d, so they stay internally consistent; if a +5d is later corrected, its +10d shifts by the same amount. Source-of-truth flag, not a blocker.
+
+\---
+
+## 2026-06-17 — Phase 3-A Day 3: First +20d Cohorts Confirm Magnitude Growth to 20 Days; Near-Miss +10d at 1/9
+
+**Phase:** 3-A (advisory-only), Day 3
+**Status:** 6/17 run captured (24/24 HOLD, clean). The first +20d outcomes resolved — 5/18 and 5/19 — and both extend the magnitude-growth finding to the 20-day horizon (2-for-2). Three more near-miss +10d outcomes landed, all NO, dropping the +10d hit rate to 1/9. The 50-59% guardrail holds (live 59.3%). Phase 3-A's own +5d is still pending (\~6/23).
+
+### 6/17 Run + Integrity
+
+24 signals, **24/24 HOLD** — no BUYs, so no new near-misses (VTI 58% and NVDA 55% sat below the 60-69% band). Rows 504–527, every ticker/account/confidence/DQ matching the log. Recalc clean (**0 errors / 8,592 formulas**); totals reconcile — **523 signals** (451 Phase 2 + 72 across 6/15–17), BUY 19 (17 Phase 2 + the two 6/16 near-misses), the AG/FTI price-only backfills still inert. +5d coverage now reaches the 6/10 cohort (403/523, 77%). One data note: 6/17's prices are captured at sub-cent precision (NVDA $207.5015, AIQ $65.475, CBRS $223.795) where 6/15–16 were 2-decimal — harmless for the return math, flagged for source-of-truth, not corrected.
+
+### First +20d Cohorts — Magnitude Growth Extends to 20 Days
+
+The first two +20d outcomes resolved (5/18 due 6/16, 5/19 due 6/17; 24 each — the only cohorts matured to +20d). Absolute-move trajectory:
+
+|Cohort||move| +5d|+10d|+20d|avg ret +5d → +20d|
+|-|-|-|-|-|
+|5/18|4.51%|5.69%|**6.72%**|−0.32% → −1.96%|
+|5/19|5.25%|6.09%|**7.17%**|+0.06% → −2.43%|
+
+Both grow **monotonically** through +20d, so the Phase 2 magnitude finding (8/9 cohorts, +5d→+10d) **extends cleanly to the 20-day horizon — now 2-for-2.** Direction drifted net negative in both (−2.0%, −2.4% at +20d).
+
+> ANALYST NOTE: The cleanest statement yet of why magnitude — not the retired accuracy-decay — is the robust finding. HOLD is a short-horizon signal: by +20d the typical absolute move is \~7%, far outside the 3%-band "no significant move" thesis the HOLD encodes. The signal isn't so much \*wrong\* at +20d as \*out of scope\* — its predictive window is \~5 days and the move keeps compounding past it. Carry into the Phase 3 horizon design.
+
+### Near-Miss +10d — Extended Set Still 0-for-3, Hit Rate 1/9
+
+The three +10d prices prepped on 6/16 were filled — NVDA 6/1, GLD 6/2, NVDA 6/2 — **all NO** (−4.12%, −4.87%, −4.87%). The Near-Miss tab is now 9-of-11 complete on +10d: **hit rate 11.1% (1/9)**, down from 16.7%, avg −3.43%. Every post-lock extended near-miss has now also failed at +10d (the +5d extended set closed 0-for-5; +10d echoes it).
+
+> ANALYST NOTE: Corroborates \*\*KEEP 70%\*\* from the +10d angle — 60-69% BUYs convert at \~11% over ten days. The lone winner stays SCHD 5/21 (the one HIGH-conviction non-NVDA name). VTI/NVDA 6/16 are the first Phase 3-A near-misses, still pending (+5d 6/24, +10d 7/1).
+
+### Guardrail / Coverage
+
+Live +5d accuracy by band: **50-59% leads at 59.3%** (115/194), clear of 60-69% (50.7%, 37/73) and 40-49% (46.0%, 58/126). The lead has eased from the certified **61.3%** as more +5d resolved past the close — expected drift, ordering intact. DQ ordering also holds (HIGH 59.3% > MEDIUM 50.9% > LOW 44.4%). Section 1 (Phase 2) frozen — 10 of 17 cohorts hold the pattern. Section 4 (Phase 3-A) all pending; no live guardrail data until \~6/23.
+
+\---
+
+## 2026-06-18 — Phase 3-A Day 4: 5/20 +20d Makes Magnitude Growth 3-for-3; Near-Miss Registry Backfilled to 19; Guardrail Compression Traced; H1 Harness Live-Ready
+
+**Phase:** 3-A (advisory-only), Day 4
+**Status:** 6/18 run captured (24/24 HOLD, clean — no near-misses). In the day's data, the third +20d cohort (5/20) keeps the magnitude-growth streak at 3-for-3, and the 6/11 Phase 2 cohort's +5d resolved Pattern NO. Three workstreams were set up alongside the daily: the Phase-2 near-miss registry was **regenerated from the Signals tab (11 → 19 rows)**, closing the standing backfill item; a **guardrail-compression trace** was built and run; and the **H1 lag-trace harness was dry-run** against live data and is ready to fire on 6/23. Tomorrow is Juneteenth (closed) — no new data until Mon 6/22.
+
+### 6/18 Run + Integrity
+
+24 signals (rows 528–551), all HOLD / risk APPROVED, every ticker/account/confidence/DQ matched to `signals\_2026-06-18.log`. **No near-misses** — VTI and NVDA scouts both at 58%, below the band. Recalc clean: **0 errors / 8,592 formulas**. Totals reconcile — **547 signals** (451 Phase 2 + 96 across 6/15–18), **BUY 19** (unchanged). Three cohorts resolved today: 6/11 +5d, 6/4 +10d, 5/20 +20d.
+
+> ANALYST NOTE: Sub-cent prices now run two sessions (6/17 + 6/18) — e.g., JPM $332.5063, VTI $369.3401 — so the higher-precision capture is the new standard, not a one-off. Several DQ values shifted vs 6/17 (AIQ HIGH→MEDIUM, DOW MEDIUM→HIGH, WMT/XLU HIGH→MEDIUM); normal day-to-day news-availability variation, not drift.
+
+### Third +20d Cohort (5/20) — Magnitude Growth 3-for-3
+
+|Cohort|abs move +5d → +10d → +20d|+20d avg ret|
+|-|-|-|
+|5/18|4.51 → 5.69 → 6.72%|−1.96%|
+|5/19|5.25 → 6.09 → 7.17%|−2.43%|
+|5/20|5.54 → 6.28 → **7.09%**|**−3.09%**|
+
+5/20's absolute move grows monotonically like the first two — the magnitude finding now holds across **all three matured +20d cohorts (3-for-3)**, extending the 8/9 Phase 2 +10d result cleanly to the 20-day horizon.
+
+> ANALYST NOTE: The +20d direction is net negative in all three and deepening (−1.96 → −2.43 → −3.09%), but the three +20d windows overlap and all close in the mid-June trough (6/16–6/18) — this is largely the same drawdown read from three near-adjacent start points, not three independent directional signals. The robust, in-scope finding is magnitude; the directional drift is a market-state artifact and should not be over-read. Same implication as the +10d work: HOLD's predictive window is \~5 days and the move keeps compounding past it.
+
+### 6/11 Phase 2 Cohort +5d — Pattern NO; Section 1 Nearly Matured
+
+6/11's +5d resolved: Section 1 row 23 populated at **50-59% = 50.0% (n=12)** — did not clear both neighbours, Pattern **NO**. The across-cohort tally is now **10 of 18 hold**. **6/12 is the last Phase 2 cohort still pending +5d** (resolves \~6/22 after Juneteenth); once it lands, Section 1 is fully matured. This does not touch the certified aggregate — the GO/NO-GO guardrail is the band hit rate, not the per-cohort count.
+
+### Near-Miss Registry Backfilled — 11 → 19 (KEEP-70 Firmed)
+
+Closed the standing backfill item by **regenerating the registry from the Signals tab** via `build\_near\_miss\_registry.py` (the source-of-truth auto-gen tool), rather than hand-patching the drifted tab. All 17 Phase 2 BUYs are scout/SCHD signals in the 0.62–0.68 band (every Phase 2 BUY is a near-miss); the old tab held 9 of them plus the two 6/16 Phase 3-A entries. The regenerated tab is **19 rows, date-sorted, 7 LOCKED (≤6/1) + 12 EXTENDED (>6/1)**, with three corrections the auto-gen caught:
+
+* the genuine **6/2 NVDA @ $227.93** (−8.66% +5d, NO) is now included — it had been missing entirely;
+* the **6/3 GLD / 6/3 NVDA** pair is correctly dated 6/3 (was mis-labelled 6/2), and 6/3 NVDA's confidence corrected to **0.66** (the Signals value);
+* **6/16 NVDA** confidence corrected **0.68 → 0.65** — a hand-entry error the old tab carried.
+
+Stats (closing prices, sourced from Signals): **LOCKED +5d 4/7 = 57.1%** (the immutable Q2 verdict basis, avg −0.90% — matches the frozen baseline), **LOCKED +10d now 1/7 = 14.3%** (avg −3.02%); **EXTENDED +5d 3/8 = 37.5%** (avg −3.01%), +10d 0/4 (avg −5.11%); **combined +5d 7/15 = 46.7%**. KEEP 70% is firmer than ever — near-miss BUYs convert below a coin flip at +5d and worse at +10d.
+
+> ANALYST NOTE: The self-validation surfaced a real change — \*\*LOCKED +10d moved from the frozen 1/6 to 1/7\*\* because 6/1's +10d resolved NO \*after\* the Q2 baseline was frozen (its +5d, the actual verdict basis, is untouched). The frozen `LOCKED\_BASELINE\['comp10']` is now stale-by-one; the +10d portion is informational, not the invariant. Separately, `build\_near\_miss\_registry.py --emit-master-copy` had a cross-workbook style bug (`nc.\_style = c.\_style` copies a StyleArray \*index\*, which points into the source workbook's number-format table and scrambles in the destination — symptom: price cells rendered as 1900 dates). Fixed to copy style \*attributes\* (number\_format string + copied font/fill/border/alignment) plus merge ranges. The standalone `near\_miss\_registry.xlsx` was always correct; only the master-copy was affected.
+
+### Guardrail-Compression Trace
+
+Built `guardrail\_trace.py` (h1–h4 mould: reads Signals, computes per-cohort and running-cumulative +5d band hit rates, prints a trajectory table, renders a chart). The cumulative 50-59% lead over 60-69%:
+
+* built to a **peak +12.3pt at 6/1** (50-59% at 62.3%, 60-69% at 50.0%);
+* **compressed through the early-June shock cohorts** — 6/2 and 6/3 came in at 30% / 36% per-cohort on the 50-59% band, pulling the cumulative down;
+* has since **stabilised in the high-50s** (57.4 → 58.7% over the last seven cohorts) while 60-69% hovers 48–51%;
+* currently **+7.4pt** (50-59% 58.7%, 60-69% 51.3%, 40-49% 44.8%).
+
+> ANALYST NOTE: The certified \*\*61.3%\*\* is exactly the cumulative 50-59% rate \*\*at 5/29\*\* — i.e., the n=216 snapshot was the pre-shock window. The "61.3 → 58.7" drift is therefore the early-June shock cohorts dragging the cumulative down from its peak, not a steady erosion. The lead gap narrowed from its peak (+12.3 → +7.4pt) but is not trending toward crossover — the band ordering holds with comfortable margin and the 50-59% line has flattened. Watch metric, not an alarm: the 60-69% band's per-cohort n is small (3–6) and noisy, so a few strong small-n cohorts can move the gap.
+
+### H1 Live-Readiness (Dry-Run)
+
+Dry-ran the real `h1\_lag\_trace.py` against the current tracker (WMT). It runs clean and **ingests the Phase 3-A rows** — 6/12 and 6/15–18 appear in the trace with confidence + trailing-5d move, forward returns blank (pending +5d). It reproduces the Phase 2 baseline: **estimated update lag = 5 sessions** (corr(conf, trailing-move\[t−L]) peaks +0.638 at L=5; −0.177 at L=0 — the lag signature), the WMT +10d arc **−15.19 → −1.66** (self-corrected), and the calibration guardrail with 50-59% leading (**61.3%**, the certified n=216 reference — distinct from the live 58.7% above; different scope, both correct). Verdict: harness is wired and ready.
+
+> ANALYST NOTE — 6/23 runbook: once the 6/15 +5d resolves (\~Mon 6/23), re-run `python h1\_lag\_trace.py --tracker claude\_equity\_bot\_tracker.xlsx --ticker WMT --out-dir viz` on the full tracker — the 6/15–18 WMT rows begin populating forward returns. H1 success = the lag estimate shrinks from \~5 toward 0–1 sessions and corr(conf, trailing-move) rises from −0.177, \*\*without\*\* degrading the 50-59% +5d lead. Per-ticker n is small (\~19 cohorts), so the Phase 3-A lag estimate stabilises only after \~1–2 weeks of resolutions; the 6/23 run is the first end-to-end proof on live data, with the real comparison maturing through early July.
+
+\---
+
+## 2026-06-22 — Phase 3-A Day 5: Magnitude Growth 4-for-4 at +20d; Section 1 Closed Out (6/12 Holds); Guardrail Lead Widens to +8.2pt
+
+**Phase:** 3-A (advisory-only), Day 5
+**Status:** First session after Juneteenth. 6/22 run captured (24/24 HOLD, clean — no near-misses). The day's outcomes: 5/21's +20d makes magnitude growth **4-for-4**, and 6/12's +5d (the last Phase 2 cohort) **holds the 50-59% pattern**, fully maturing Section 1 at 11 of 19. The strong 6/12 cohort widened the guardrail lead back to **+8.2pt**, reversing last week's compression. The near-miss registry was refreshed (both 6/12 near-misses hit +5d) and the Guardrail Trace sheet extended to 6/12. Phase 3-A's own +5d is still pending — the first live cohort (6/15) resolves **tomorrow, 6/23**.
+
+### 6/22 Run + Integrity
+
+24 signals (rows 552–575), all HOLD / risk APPROVED, every ticker/account/confidence/DQ matched to `signals\_2026-06-22.log`. **No near-misses** — VTI 58%, NVDA 55%, both below the band; PWR 63% is in-band but a HOLD, not a BUY. Recalc clean: **0 errors / 8,634 formulas**. Totals reconcile — **571 signals** (451 Phase 2 + 120 across 6/15–22), **BUY 19** (unchanged). Three cohorts resolved: 6/12 +5d, 6/5 +10d, 5/21 +20d.
+
+> ANALYST NOTE: Confidence drift worth watching — DOW eased to 38% (from 42%) and GM to 58% (from 62%), while PM rose to 65% and PWR to 63% (its first appearance in the 60-69 band, as a HOLD). The DQ shift (NTR HIGH→MEDIUM) is the usual day-to-day news-availability variation.
+
+### +20d Magnitude Growth — 4-for-4 (5/21)
+
+|Cohort|abs move +5d → +10d → +20d|+20d avg ret|
+|-|-|-|
+|5/18|4.51 → 5.69 → 6.72%|−1.96%|
+|5/19|5.25 → 6.09 → 7.17%|−2.43%|
+|5/20|5.54 → 6.28 → 7.09%|−3.09%|
+|5/21|5.05 → 5.18 → **6.55%**|**−3.36%**|
+
+5/21 grows monotonically, taking the +20d magnitude tally to **4-for-4** — but its +5d→+10d step is the shallowest of the four (5.05 → 5.18, nearly flat), with most of the growth back-loaded into the +10d→+20d window. The +20d direction keeps deepening (−1.96 → −2.43 → −3.09 → −3.36%); same caveat as before — these four +20d windows overlap and all close in the mid-June trough (5/21's ends 6/22), so it is largely one drawdown read from four near-adjacent start points, not four independent directional signals.
+
+### Section 1 Closed Out — 6/12 Holds the Pattern
+
+6/12's +5d resolved (the last Phase 2 cohort): Section 1 row 24 populated at **50-59% = 60.0% (n=10)**, clearing both neighbours, Pattern **✓ YES**. Across-cohort final tally: **11 of 19 cohorts hold** (up from 10 of 18). **Section 1 is now fully matured** — every Phase 2 cohort (5/18 → 6/12) has +5d data. The per-cohort count (11/19 ≈ 58% individually hold) is supplementary; the certified guardrail is the aggregate band rate below, which governs GO/NO-GO.
+
+### Guardrail Lead Widens to +8.2pt — Compression Reversed
+
+Live +5d bands: 50-59% **58.8%** (127/216) > 60-69% 50.6% (41/81) > 40-49% 45.0% (63/140). The 50-59 lead over 60-69 is now **+8.2pt**, up from +7.4pt on 6/11 — the strong 6/12 cohort (50-59 at 60% per-cohort) nudged the cumulative 50-59 up and 60-69 down. This confirms last week's read: the 61.3 → 58.7 drift was stabilisation, not a crossover trend; the lead gap over the last three cohorts is roughly flat (+8.6 → +8.2pt). The `guardrail\_trace.py` trajectory and the embedded **Guardrail Trace** sheet were refreshed through 6/12.
+
+### Near-Miss Registry Refreshed — EXTENDED +5d to 5/10
+
+Regenerated from the updated Signals tab (the two 6/12 near-misses and 6/5's +10d had resolved since the 6/18 build): **EXTENDED +5d 3/8 → 5/10 = 50.0%** (both 6/12 near-misses hit — NVDA +1.48%, VTI +0.87%), avg −2.2%; **+10d completed 4 → 5** (6/5 NVDA). LOCKED is unchanged at **4/7 = 57.1%** (immutable Q2 basis). **Combined +5d now 9/17 = 52.9%** (up from 46.7%).
+
+> ANALYST NOTE: The combined near-miss hit rate ticked above a coin flip (52.9%), but \*\*KEEP 70% holds\*\* — and the reason is EV, not hit rate: average returns stay negative (LOCKED −0.90%, EXTENDED −2.2%), so lowering the threshold would still buy into net-negative-expectancy trades. The 6/12 pair won small (+1.48%, +0.87%); the cohort's losers lose more than its winners win. The verdict logic (anchored on the locked cohort + the negative average) auto-confirms KEEP 70%.
+
+### Phase 3-A — First Live +5d Tomorrow
+
+All five Phase 3-A blocks (6/15–22) are still 0/24 on +5d. The first live cohort, **6/15, resolves tomorrow (6/23)** — the first data point measured against the 50-59% guardrail in live advisory mode, and the trigger to re-run `h1\_lag\_trace.py` to begin the lag-compression comparison.
+
+\---
+
+## 2026-06-23 — Phase 3-A Day 6: First Live Cohort (6/15) Does NOT Hold the Guardrail; H1 Lag Unchanged; 5/22 the +20d Magnitude Exception
+
+**Phase:** 3-A (advisory-only), Day 6
+**Status:** The first live calibration day. 6/15's +5d resolved — and the 50-59% guardrail **did not hold out-of-sample**: the band came in at 40% (n=15), below 60-69% (50%), inverting the Phase 2 ordering on the cohort. n=24 (one cohort), so this is the expected single-cohort noise, not a verdict — the aggregate still leads (+7.0pt), and the next live cohorts (6/16–22) resolve over the coming sessions. H1's lag read is unchanged at 5 sessions (one quiet WMT cohort). 5/22's +20d confirms it as the magnitude exception (non-monotonic). Registry EXTENDED +10d ticked to 6; KEEP 70% holds.
+
+### 6/23 Run + Integrity
+
+The three resolutions are entered in full — **6/15 +5d, 6/8 +10d, 5/22 +20d**, each 24/24 with Was-Right computed. Recalc clean: **0 errors / 8,637 formulas**. Totals **595 signals** (451 Phase 2 + 144 across six Phase 3-A blocks), **BUY 19** (unchanged). The 6/23 morning block (rows 576–599) cross-checks **clean** against `signals\_2026-06-23.log` — all 24 signals reconcile on ticker, signal, confidence, data-quality, and price@signal; the five scouts carry the log's `\[—] \[SCOUT]` tag (= tracker "Scout"), and the block is **24/24 HOLD** (BUY total unchanged at 19). It has no +5d yet, so it does not bear on today's outcomes.
+
+### First Live Guardrail — the 6/15 Cohort Does NOT Hold
+
+Section 4 row 53 (6/15, the first Phase 3-A cohort): **50-59% = 40.0% (n=15), Pattern NO**. On the cohort the bands inverted — **40-49% 50% (1/2) = 60-69% 50% (3/6) > 50-59% 40% (6/15)** — so the 50-59 band was the *lowest* of the three labeled bands (DOW at 38% books in the separate 0-39% band). The 50-59 band did not lead out-of-sample on day one.
+
+Cumulatively (Phase 2 + this cohort), the band still leads but the margin narrowed: **50-59% 57.6% > 60-69% 50.6% > 40-49% 45.1%**, lead **+7.0pt** — down from +8.2pt at 6/12, as the weak 6/15 cohort pulled the cumulative 50-59 down (drift from the certified 61.3% is now −3.7pt). The Guardrail Trace sheet now carries 6/15 as its first Phase 3-A point.
+
+> ANALYST NOTE: \*\*This is n=24 — one cohort — so a single inversion is the expected noise, not a failure.\*\* Phase 2's guardrail was certified on n=216; a 24-name cohort at 40% is well within sampling variation. The signal to watch is not this point but the \*trend\* as 6/16–22 resolve over the next several sessions: if live cohorts keep landing below their Phase 2 band rates, that points to Phase 2 overfitting (the 50-59 lead was partly in-sample); if 6/15 is an outlier and the next few recover, the guardrail generalises. One cohort decides nothing. It remains advisory-only — nothing here is a trade signal, only a calibration read.
+
+### H1 First Live Read — Lag Unchanged at 5 Sessions
+
+WMT's 6/15 +5d came in at **−0.73%** (YES — within the ±3% HOLD band; a quiet, correct HOLD). The lag scan is essentially unchanged: **estimated lag still 5 sessions** (peak r +0.576 at L=5, vs +0.638 in the Phase 2 baseline), corr(conf, trailing-move) still −0.177. No improvement yet — expected, since one quiet cohort cannot move a per-ticker estimate built on \~19 cohorts. H1's read matures only as more live cohorts (and more adverse-move days) accrue; the harness ingests the live row cleanly.
+
+### 5/22 +20d — The Magnitude Exception Confirmed
+
+5/22's +20d completes its trajectory: |move| **4.52 → 4.09 → 5.93%** — the +20d level exceeds the +5d level (net growth, so the move-keeps-compounding finding holds 5-for-5 on net), but the path is **non-monotonic**: the move *shrank* +5d→+10d (4.52 → 4.09) before growing to +20d. This is the same cohort that was the lone +5d→+10d magnitude exception at Phase 2 close (8/9 grew; 5/22 did not), so monotonic +20d growth is **4-for-5**, with 5/22 the consistent exception. +20d direction −4.58%, the deepest yet (−1.96 → −2.43 → −3.09 → −3.36 → −4.58%) — same overlapping-mid-June-window caveat (5/22's +20d window ends on the 6/23 close).
+
+### Near-Miss / Registry — EXTENDED +10d to 6
+
+6/8 NVDA's +10d resolved at **−4.01% (NO)**, taking EXTENDED **+10d completed 5 → 6**. The +5d stats are unchanged (next near-miss +5d is 6/16's pair on 6/24); combined +5d holds at **9/17 = 52.9%**. LOCKED unchanged (4/7); **VERDICT KEEP 70%**.
+
+\---
+
+## 2026-06-24 — Phase 3-A Day 7: Second Live Cohort (6/16) Also Doesn't Hold — But It's a Down-Regime Cohort; Relative Ordering Holds While Absolute Calibration Slides
+
+**Phase:** 3-A (advisory-only), Day 7
+**Status:** The second live cohort resolved, and the picture is genuinely split. **Per-cohort**, 6/16 also failed to show 50-59% leading (30%, n=10) — but its guardrail bands are flat-low (50-59% 30% ≈ 60-69% 27%; 40-49% is a lone name) with every near-miss deeply negative, marking it a **down-regime cohort** where no band could separate. **Cumulatively**, the *relative* claim is holding and stable: 50-59% 56.4% > 60-69% 48.0%, lead +8.5pt (+7→+8.5 across both live cohorts). But the *absolute* level is drifting: −4.9pt below the certified 61.3%, with both live cohorts landing under Phase 2 — the single-regime caveat surfacing out-of-sample. H1's lag holds at 5; 5/26's +20d is cleanly monotonic (magnitude 5-for-6); registry EXTENDED +5d slips to 5/12 and KEEP 70% is reinforced.
+
+### 6/24 Run + Integrity
+
+This morning's 24 signals **cross-validate clean** against `signals\_2026-06-24.log` — ticker set, signal, confidence, data-quality, and price@signal all reconcile (the five scouts carry the log's `\[—] \[SCOUT]` tag = tracker "Scout"); the block (rows 600–623) is **24/24 HOLD**. The three resolutions — **6/16 +5d, 6/9 +10d, 5/26 +20d** — are entered in full (24/24 each, Was-Right computed). Recalc clean: **0 errors / 8,637 formulas**. Totals **619 signals**, **BUY 19** (unchanged — no new BUYs).
+
+### Second Live Cohort — 6/16 Also Doesn't Hold, But Read the Regime
+
+Section 4 row 54 (6/16): **50-59% = 30.0% (n=10), Pattern NO**. On the cohort the two guardrail bands are flat and low — **50-59% 30% (3/10), 60-69% 27% (3/11)** (40-49% is a single name, CORN, 1/1; the 0.38 CBRS/DOW book in the separate 0-39% band) — and all three near-misses resolved deeply negative (VTI −2.28%, NVDA −4.84%, 6/9 NVDA −4.05%). That signature — the guardrail bands \~30%, near-misses sharply down — says the 5 sessions after 6/16 fell broadly. In a directional down move, signals expecting stability are wrong regardless of confidence, so the bands can't separate. This is **less a calibration read than a regime read**.
+
+### Correction — 40-49% band binning (caught building the scoreboard)
+
+Building the Live Cohort Scoreboard surfaced a binning error in the per-cohort **40-49%** figures for 6/15 (in the 6/23 entry) and 6/16 (above), both now corrected. The daily hand-profiles had used `conf < 0.50`, which swept the **sub-40% names** (CBRS / CORN / DOW at 38%) into the 40-49% bucket. The tracker books those in its **separate 0-39% band** (Dashboard r32), and the literal `\[40%, 50%)` band the harness uses matches the tracker exactly — cumulative 40-49% = 65/143 = **45.5%**, identical to Dashboard r33. Corrected per-cohort 40-49%: **6/15 = 1/2 (50%)**, **6/16 = 1/1 (100%, CORN only)**.
+
+> ANALYST NOTE: this touches only the auxiliary 40-49% band. The \*\*50-59% and 60-69% bands — the actual guardrail — were computed correctly throughout\*\*, so every conclusion stands (6/15 inverted with 50-59 the lowest labeled band; 6/16 compressed; cumulative 50-59 > 60-69 at +8.5pt). The scoreboard is now the source of truth for per-cohort bands; any Phase 2 per-cohort 40-49 cells built with the loose binning warrant the same `\[40%,50%)` pass separately.
+
+### Relative vs Absolute — the Distinction That Matters Now
+
+Two cohorts in, the live guardrail splits into two questions:
+
+|Lens|Reading|Trend|
+|-|-|-|
+|**Relative** (does 50-59 lead 60-69?)|cumulative 50-59% **56.4%** > 60-69% 48.0%|lead **+8.5pt**, stable (+7.0 at 6/15 → +8.5 at 6/16) — **holding**|
+|**Absolute** (is 50-59 near its 61.3% certified rate?)|50-59% **56.4%** vs 61.3%|drift **−4.9pt**, both live cohorts below Phase 2 — **sliding**|
+
+Per-cohort 50-59%: 6/15 **40%** (n=15), 6/16 **30%** (n=10) — both below the Phase 2 band rate, both in weak tape.
+
+> ANALYST NOTE: \*\*The ranking is holding; the absolute level is not — and both live cohorts landed in a down move.\*\* That pattern points to \*regime sensitivity\* (exactly the single-regime caveat Phase 2 flagged) rather than a broken ranking: when forward returns are broadly negative, every band's hit rate compresses toward (and below) 50%, but 50-59 still edges 60-69 because the higher-confidence calls overshoot hardest into the decline. The clean test is still ahead — \*\*a cohort that resolves into stable or rising tape.\*\* If 50-59 keeps leading \*and\* the absolute level recovers when the market isn't falling, the guardrail generalises; if the absolute level stays depressed across regimes, Phase 2's 61.3% was regime-luck. Two cohorts decide neither. Advisory-only throughout — a calibration read, not a trade signal.
+
+### H1 — Lag Still 5 Sessions
+
+WMT's 6/16 +5d came in at **−2.50%** (YES — within the ±3% HOLD band, though a larger move than 6/15's −0.73%, consistent with the broad decline). Lag scan essentially unchanged: **estimated lag still 5 sessions** (peak r +0.595, vs +0.576 at 6/15 and +0.638 baseline), corr(conf, trailing) −0.173. Two live cohorts remain too few to move a per-ticker estimate; the harness ingests both live rows cleanly.
+
+### 5/26 +20d — Monotonic; Magnitude 5-for-6
+
+5/26's trajectory is clean: |move| **2.92 → 4.47 → 7.46%** — fully monotonic. That takes the +20d magnitude-growth tally to **5-for-6 monotonic**, with 5/22 still the lone exception (the +5d→+10d dip). +20d direction **−6.40%**, deeper than 5/22's −4.58% — the same overlapping-window caveat, as every late-May cohort's +20d window now closes inside the mid-to-late-June decline, so the deepening is regime, not signal.
+
+### Near-Miss / Registry — EXTENDED +5d 5/12; KEEP 70% Reinforced
+
+All three near-miss resolutions today were NO: 6/16 VTI (−2.28%) and NVDA (−4.84%) at +5d, and 6/9 NVDA (−4.05%) at +10d. EXTENDED **+5d slips to 5/12 = 41.7%** (from 5/10), **+10d completed 7**, avg +5d −2.4%. Combined +5d **9/19 = 47.4%** (from 52.9%). LOCKED unchanged (4/7). The 60-69% BUYs keep underperforming into the decline — **VERDICT KEEP 70%, reinforced**.
+
+\---
+
+## 2026-06-25 — Phase 3-A Day 8: Third Live Cohort (6/17) Goes Against the Guardrail — and It's NOT Compressed; the Lead Narrows to +5.5pt
+
+**Phase:** 3-A (advisory-only), Day 8
+**Status:** The clean test arrived and it cut the wrong way. 6/17 is the first live cohort that wasn't return-compressed (cohort-wide hit 50%, regime *mixed* not *compressed*) — so its bands had room to separate — and **60-69% separated decisively above 50-59%: 75% (6/8) vs 38.5% (5/13)**. Pairwise, the guardrail has now held on just **1 of 3** live cohorts, and that one (6/16) was compressed noise. The cumulative 50-59 lead **narrowed +8.5 → +5.5pt** in a single cohort. The framing has to move: yesterday's "ranking holds, the slide is regime sensitivity" no longer fits, because the cohort with the *least* regime distortion is the one that most clearly favored 60-69. H1's lag holds at 5 (WMT's first live miss); 5/27's +20d is monotonic (magnitude 6-for-7); registry unchanged.
+
+### 6/25 Run + Integrity
+
+This morning's 24 signals cross-validate **23/24 clean** against `signals\_2026-06-25.log` (all HOLD, rows 624–647). **One catch:** GLD's price@signal reads **368** in the tracker vs **368.775** in the log — a 0.21% gap on the entry base, almost certainly a paste truncation. It doesn't affect any resolution today (GLD is a 6/25 HOLD that resolves \~7/2), but it should be corrected to **368.775** before GLD's +5d computes, or its forward returns run off a wrong base. The three resolutions — **6/17 +5d, 6/10 +10d, 5/27 +20d** — are entered in full (24/24 each, Was-Right computed). Recalc clean: **0 errors / 8,637 formulas**. Totals **643 signals**, **BUY 19** (unchanged).
+
+### Third Live Cohort — 6/17 Goes Against the Guardrail, in a Regime That Could Separate
+
+Section 4 row 55 (6/17): **50-59% = 38.5% (n=13), Pattern NO**. The band order is the story:
+
+**60-69% 75% (6/8) > 50-59% 38% (5/13) > 40-49% 33% (1/3)** — cohort-wide hit **50%**, regime **mixed**.
+
+This is categorically different from 6/15 and 6/16. Those were weak-tape cohorts (42% and 29% cohort-wide) where every band compressed toward \~30-40% and the ordering carried little information. 6/17 hit 50% cohort-wide — the bands had room to spread — and they did, with **60-69 nearly double 50-59**. The 60-69 names here were all HOLDs that stayed tight (6 of 8 within ±3%), while the 50-59 HOLDs moved more (only 5 of 13 within band). When confidence actually separated outcomes this cohort, it separated them the *opposite* way to the Phase 2 claim.
+
+### The Guardrail Is Now Under Real Pressure — Updated Read
+
+|Live cohort|50-59% (n)|Held (50-59>60-69)|Cohort band order (by hit, n)|Cum lead|Regime|
+|-|-|-|-|-|-|
+|6/15|40% (15)|NO|40-49 50%(2) = 60-69 50%(6) > 50-59 40%(15)|+7.0pt|mixed|
+|6/16|30% (10)|YES|40-49 100%(1) > 50-59 30%(10) > 60-69 27%(11)|+8.5pt|compressed|
+|6/17|38% (13)|**NO**|**60-69 75%(8)** > 50-59 38%(13) > 40-49 33%(3)|**+5.5pt**|mixed|
+
+Cumulative through 6/17: 50-59% **55.5%** > 60-69% **50.0%**, lead **+5.5pt** (harness trend label: *narrowing*, +7.0 → +5.5pt). Absolute drift **−5.8pt** from certified 61.3%. **Pairwise held: 1 of 3.**
+
+> ANALYST NOTE: \*\*the regime flag is what makes this read sharp.\*\* Of the three live cohorts, the only one where 50-59 "held" pairwise (6/16) is flagged \*compressed\* — a 30% vs 27% edge inside a cohort where nothing separated, i.e. noise. The two cohorts with room to separate (6/15 mixed, 6/17 mixed) both went to 60-69, and 6/17 went there hard. So the live signal isn't "50-59 leads with regime noise around it" — it's closer to "\*\*when confidence separates outcomes at all, it has so far favored 60-69, not 50-59.\*\*" That is the opposite of the Phase 2 guardrail. It is \*\*not yet a refutation\*\*: three cohorts, and 6/17's 60-69 cell is n=8 (6/8 → wide error bars; a single different outcome moves it \~12pt). But the burden has flipped — the guardrail now has to \*re-earn\* confidence from the upcoming non-compressed cohorts, rather than being assumed to hold through the down-regime noise. The next two mixed/clean cohorts (6/18, 6/22) are decisive. Advisory-only throughout — this is a live calibration check doing exactly what Phase 3-A was built to do, not a trade signal.
+
+### H1 — Lag Still 5; First Live WMT Miss
+
+WMT's 6/17 +5d came in at **−3.51% (NO)** — its first miss in the live cohorts (6/15 −0.73% YES, 6/16 −2.50% YES, 6/17 −3.51% NO), the move finally clearing the ±3% HOLD band as the decline deepened. Lag scan unchanged: **estimated lag still 5 sessions** (peak r +0.600, edging up from +0.595/+0.576 over the prior two cohorts), corr(conf, trailing) −0.172. Three live cohorts, lag steady at 5 — consistent, though still a per-ticker read that wants more names before it firms.
+
+### 5/27 +20d — Monotonic; Magnitude 6-for-7
+
+5/27's trajectory is clean: |move| **2.67 → 5.16 → 7.67%** — monotonic. The +20d magnitude-growth tally is now **6-for-7 monotonic**, 5/22 still the lone exception. +20d direction **−5.99%** — the same overlapping-window caveat (every late-May cohort's +20d window now closes inside the mid-to-late-June decline), so the depth is regime, not signal.
+
+### Near-Miss / Registry — Unchanged
+
+No near-miss BUYs resolved on 6/25 (neither the 6/17 nor the 6/10 cohort carried a 60-69% BUY). Registry holds: EXTENDED **+5d 5/12 = 41.7%, +10d 7**, avg +5d −2.4%; LOCKED 4/7; combined +5d 9/19 = 47.4%. **VERDICT KEEP 70%**, unchanged.
+
+\---
+
+## 2026-06-26 — Phase 3-A Day 9: 6/18 Is the Second Straight Non-Compressed Cohort to Favor 60-69 — the Guardrail Is Now Fairly Clearly Not Holding Out-of-Sample
+
+**Phase:** 3-A (advisory-only), Day 9
+**Status:** The pattern has firmed from "under pressure" to a consistent signal. 6/18 — cohort-wide hit 54%, room to separate — had **60-69% at 83% (5/6) beat 50-59% at 64% (7/11)**, the second non-compressed cohort in a row to do so. Across all four live cohorts, **every cohort that could separate (6/15, 6/17, 6/18) favored 60-69**; the only pairwise "held" (6/16) is flagged compressed noise. The cumulative lead has compressed **+8.5 → +4.1pt**, now below the entire Phase 2 +7–13pt range, driven by 60-69 climbing 48 → 52%. The honest call: the Phase 2 Q1 inversion (50-59 leads 60-69) is not reproducing out-of-sample, and it's time to plan a formal re-examination. H1 lag holds at 5 (WMT back to a hit); 5/28 +20d monotonic; registry EXTENDED +10d to 8.
+
+### 6/26 Run + Integrity
+
+This morning's 24 signals cross-validate **24/24 clean** against `signals\_2026-06-26.log`. Two notable items: the block carries the **first SELL signal of the live run — CBRS, 68%** (advisory-only, resolves \~7/6; CBRS had previously only appeared at 38% in the 0-39% band, so both its confidence and its direction shifted). And the **GLD fix half-landed**: price@signal now reads **367.775** vs the log's **368.775** — the decimals are right but the dollars are off by one; it still needs **368.775**. The three resolutions (6/18 +5d, 6/11 +10d, 5/28 +20d) are entered in full (24/24 each); recalc clean: **0 errors / 8,637 formulas**. Totals **667 signals**, **BUY 19**.
+
+### Fourth Live Cohort — 6/18 Favors 60-69, in a Regime That Could Separate
+
+Section 4 row 56 (6/18): **50-59% = 63.6% (n=11), Pattern NO**. The band order:
+
+**60-69% 83% (5/6) > 50-59% 64% (7/11) > 40-49% 14% (1/7)** — cohort-wide **54%**, regime mixed.
+
+This is the important nuance: **50-59 did well here in absolute terms** — 63.6% is above its certified 61.3% snapshot. It's not that 50-59 is failing; it's that on this cohort 60-69 did even better (83%). Same shape as 6/17 (60-69 75% vs 50-59 38.5%), now at a higher overall hit level. Two clean cohorts, same direction.
+
+### The Guardrail Is Not Holding Out-of-Sample — the Pattern Is Now Consistent
+
+|Live cohort|50-59% (n)|Held (50-59>60-69)|Cohort band order (by hit, n)|Cum lead|Regime|
+|-|-|-|-|-|-|
+|6/15|40% (15)|NO|40-49 50%(2) = 60-69 50%(6) > 50-59 40%(15)|+7.0pt|mixed|
+|6/16|30% (10)|YES|40-49 100%(1) > 50-59 30%(10) > 60-69 27%(11)|+8.5pt|compressed|
+|6/17|38% (13)|NO|60-69 75%(8) > 50-59 38%(13) > 40-49 33%(3)|+5.5pt|mixed|
+|6/18|64% (11)|NO|**60-69 83%(6)** > 50-59 64%(11) > 40-49 14%(7)|**+4.1pt**|mixed|
+
+Cumulative through 6/18: 50-59% **55.8%** > 60-69% **51.8%**, lead **+4.1pt** (harness: *narrowing*, +8.5 → +4.1pt). Drift **−5.5pt** from 61.3%. **Pairwise held: 1 of 4** — and that one is compressed.
+
+> ANALYST NOTE: this is no longer "wait and see." \*\*Zero of the three non-compressed live cohorts support the guardrail\*\* — every cohort with room to separate put 60-69 above 50-59, two of them decisively. The cumulative lead has fallen below the entire Phase 2 range (+7 to +13pt over two months) to +4.1pt, and the narrowing is driven by \*\*60-69 rising\*\* (48 → 50 → 52%) as the clean cohorts resolve, not by 50-59 collapsing. The natural reading: the Phase 2 Q1 finding — that mid-confidence 50-59 is \*better\* calibrated than higher-confidence 60-69, a counterintuitive inversion — was likely \*\*regime-specific or overfit\*\*, and out-of-sample the conventional ordering (more confidence → more accuracy) is what holds. \*\*Recommendation: plan a formal re-examination of the Q1 certification.\*\* Caveats kept honest: four cohorts; per-cohort 60-69 n is small (6/18 n=6, 6/17 n=8); the cumulative lead is still positive (+4.1pt), not a completed crossover; and 6/22 is the next non-compressed read, worth having as confirmation. But the direction is now unambiguous. Worth stating plainly: \*\*this is exactly what Phase 3-A was built to catch\*\* — a certified finding that doesn't generalize, surfaced in advisory-only mode before a dollar was ever staked on it. The phase gate did its job. Advisory-only throughout.
+
+### H1 — Lag Still 5; WMT Back to a Hit
+
+WMT's 6/18 +5d came in at **−1.53% (YES)** — back inside the ±3% band after the 6/17 miss (live WMT now 3 of 4: 6/15 Y, 6/16 Y, 6/17 N, 6/18 Y). Lag scan unchanged: **estimated lag still 5 sessions** (peak r +0.599), corr(conf, trailing) −0.181. Four live cohorts, lag steady at 5 — a consistent per-ticker read.
+
+### 5/28 +20d — Monotonic; Magnitude 7-for-8
+
+5/28's trajectory: |move| **3.28 → 4.69 → 7.27%** — monotonic. The +20d magnitude-growth tally is now **7-for-8 monotonic**, 5/22 still the lone exception. +20d direction **−5.41%** — same overlapping-window caveat (late-May +20d windows all close inside the mid-to-late-June decline).
+
+### Near-Miss / Registry — EXTENDED +10d to 8
+
+One near-miss resolved: 6/11 NVDA (65%) at +10d, **−3.71% (NO)** — EXTENDED **+10d completed → 8**. +5d unchanged at 5/12 = 41.7%; LOCKED 4/7; combined +5d 9/19 = 47.4%. Another higher-confidence near-miss into the red — **VERDICT KEEP 70%**, reinforced.
+
+\---
+
+## 2026-06-29 — Phase 3-A Day 10: Confirmation Read Confirms — 6/22 Favors 60-69 Again; the Q1 Guardrail Is Firmly Not Holding Out-of-Sample
+
+**Phase:** 3-A (advisory-only), Day 10
+**Status:** The confirmation read confirms. 6/22 — cohort-wide 50%, room to separate — had **60-69% at 66.7% (4/6) beat 50-59% at 54.5% (6/11)**, the fourth non-compressed cohort in a row to favor 60-69. That makes **4 of 4 separable live cohorts** putting 60-69 above 50-59; pairwise held just **1 of 5**, and that one (6/16) is compressed noise. The cumulative lead is down to **+3.3pt** (from the +8.5 peak), below the entire Phase 2 +7–13pt range and still narrowing, driven by 60-69 climbing to 52.5%. The trigger I set Friday is met: **proceed with the regime-stratified Q1 re-examination.** GLD is fixed; H1 lag holds at 5 (WMT back to a hit); 5/29 +20d monotonic; registry EXTENDED +10d to 10.
+
+### 6/29 Run + Integrity
+
+This morning's 24 signals cross-validate **24/24 clean** against `signals\_2026-06-29.log` (all HOLD, rows 672–695). **GLD is now correct** — price@signal reads **368.775**, matching the log (resolves clean on 7/2). The three resolutions (6/22 +5d, 6/12 +10d, 5/29 +20d) are entered in full (24/24 each); recalc clean: **0 errors / 8,637 formulas**. Totals **691 signals**, **BUY 19**.
+
+### Confirmation Read — 6/22 Favors 60-69 Again
+
+Section 4 row 57 (6/22): **50-59% = 54.5% (n=11), Pattern NO**. The band order:
+
+**60-69% 66.7% (4/6) > 50-59% 54.5% (6/11) > 40-49% 33% (2/6) > 0-39% 0% (0/1)** — cohort-wide **50%**, regime mixed.
+
+Same direction as 6/17 and 6/18, at a more moderate margin. The 60-69 edge over 50-59 (66.7 vs 54.5) is narrower than 6/18's (83 vs 64) but unambiguous, and it's the fourth separable cohort running to put 60-69 on top.
+
+### The Q1 Guardrail Is Not Holding Out-of-Sample — Confirmed
+
+|Live cohort|50-59% (n)|Held (50-59>60-69)|Cohort band order (by hit, n)|Cum lead|Regime|
+|-|-|-|-|-|-|
+|6/15|40% (15)|NO|40-49 50%(2) = 60-69 50%(6) > 50-59 40%(15)|+7.0pt|mixed|
+|6/16|30% (10)|YES|40-49 100%(1) > 50-59 30%(10) > 60-69 27%(11)|+8.5pt|compressed|
+|6/17|38% (13)|NO|60-69 75%(8) > 50-59 38%(13) > 40-49 33%(3)|+5.5pt|mixed|
+|6/18|64% (11)|NO|60-69 83%(6) > 50-59 64%(11) > 40-49 14%(7)|+4.1pt|mixed|
+|6/22|55% (11)|NO|60-69 67%(6) > 50-59 55%(11) > 40-49 33%(6)|**+3.3pt**|mixed|
+
+Cumulative through 6/22: 50-59% **55.8%** > 60-69% **52.5%**, lead **+3.3pt** (harness: *narrowing*, +5.5 → +3.3pt). Drift **−5.5pt** from 61.3%. **Pairwise held: 1 of 5.**
+
+> ANALYST NOTE: the confirmation read confirms, and the conclusion is now firm enough to act on. \*\*Four of four separable live cohorts favor 60-69\*\*; the lone "held" is compressed noise; the cumulative lead has fallen from +8.5 to +3.3pt — below the entire Phase 2 two-month range — with 60-69 steadily climbing (48 → 50 → 52 → 52.5%) as clean cohorts resolve. The Phase 2 Q1 inversion (mid-confidence 50-59 \*better\* calibrated than higher-confidence 60-69) is not reproducing; out-of-sample the conventional ordering holds. \*\*Next step: run the regime-stratified Q1 re-examination\*\* — re-test 50-59 vs 60-69 across the full Phase 2 history split by the compressed/mixed/clean flag the scoreboard already computes. Working hypothesis: the Phase 2 inversion was concentrated in the compressed/down cohorts; if the 50-59 lead vanishes or flips in the \*clean\* Phase 2 cohorts, that explains the live failure mechanistically and tells us the guardrail was a regime artifact, not a calibration law. Honest caveats unchanged: per-cohort 60-69 n is small (6 on each recent cohort), and the cumulative lead is still positive (not a completed crossover) — but four independent cohorts plus a monotone-narrowing aggregate is robust enough to re-open the certification. \*\*This is the phase gate working exactly as intended\*\* — a GO/NO-GO finding shown not to generalize, in advisory-only mode, before any capital. Advisory-only throughout.
+
+### H1 — Lag Still 5; WMT 4 of 5
+
+WMT's 6/22 +5d came in at **−2.56% (YES)** — inside the ±3% band (live WMT now 4 of 5: 6/15 Y, 6/16 Y, 6/17 N, 6/18 Y, 6/22 Y). Lag scan unchanged: **estimated lag still 5 sessions** (peak r +0.594), corr(conf, trailing) −0.177. Five live cohorts, lag steady at 5 — a consistent per-ticker read across the whole live run.
+
+### 5/29 +20d — Monotonic; Magnitude 8-for-9
+
+5/29's trajectory: |move| **4.95 → 5.14 → 7.62%** — monotonic. The +20d magnitude-growth tally is now **8-for-9 monotonic**, 5/22 still the lone exception. +20d direction **−4.72%** — the late-May +20d windows continue to close inside the mid-to-late-June decline.
+
+### Near-Miss / Registry — EXTENDED +10d to 10
+
+Two near-misses resolved at +10d: 6/12 VTI (68%) **+0.41% (YES)** — a rare near-miss win, just positive — and 6/12 NVDA (62%) **−5.17% (NO)**. EXTENDED **+10d completed → 10**. +5d unchanged at 5/12 = 41.7%; LOCKED 4/7. The one win is marginal against another deep NVDA loss — **VERDICT KEEP 70%**, unchanged.
+
+## 2026-06-30 — Phase 3-A Day 11: +10d Horizon Confirms the Reversal; Q1 Re-Examination Says It's NOT a Regime Artifact — Something Changed Between Phase 2 and Now
+
+**Phase:** 3-A (advisory-only), Day 11
+**Status:** Three results, the third a genuine surprise. (1) The **+10d horizon read confirms** — the 6/15 cohort has 60-69 above 50-59 at both +5d and +10d, the gap *wider* at +10d (67 vs 47). (2) **6/23 is the first clean live cohort** (75% cohort-wide) and still favors 60-69 (86 vs 80) — five non-compressed cohorts now, all the same way; cumulative lead down to +2.2pt. (3) The **regime-stratified Q1 re-examination refutes the regime-artifact hypothesis**: the Phase 2 50-59 lead held in *clean* cohorts too (+9.1pt), so it wasn't compression noise — it was a real Phase 2 feature that has since **reversed within the same regimes** live. The honest reframing: not "the guardrail was regime-luck," but "the 50-59>60-69 relationship genuinely flipped between Phase 2 and now." H1 lag holds at 5; 6/1 +20d non-monotonic (2nd exception).
+
+### 6/30 Run + Integrity
+
+This morning's 24 signals cross-validate **24/24 clean** against `signals\_2026-06-30.log` (all HOLD, rows 696–719). GLD holds correct at **368.775**. The three resolutions (6/23 +5d, 6/15 +10d, 6/1 +20d) are entered in full (24/24 each — 6/1's +20d is complete; an earlier 22/24 reading was a range-helper miscount, not a data gap); recalc clean: **0 errors / 8,637 formulas**. Totals **715 signals**, **BUY 19**.
+
+### The +10d Horizon Read — Inversion Fails at Both Horizons
+
+The question held for today: does the band pattern survive at +10d? For the 6/15 cohort:
+
+|Band|+5d|+10d|
+|-|-|-|
+|50-59%|6/15 = 40%|7/15 = 47%|
+|60-69%|3/6 = 50%|4/6 = 67%|
+
+60-69 leads at **both** horizons, and the gap *widens* from +10pt (+5d) to +20pt (+10d). So the reversal isn't a +5d artifact — it persists, and strengthens, at the longer horizon. That materially supported running the re-examination.
+
+### Sixth Live Cohort — 6/23 (First Clean Cohort) Still Favors 60-69
+
+Section 4 row 58 (6/23): **50-59% = 80% (n=10), Pattern NO**. Band order: **60-69% 86% (6/7) > 50-59% 80% (10) > 40-49% 57% (4/7)** — cohort-wide **75%**, the first **clean** regime cohort of the live run. Even at high overall accuracy, 60-69 still edges 50-59. Five non-compressed live cohorts (6/15, 6/17, 6/18, 6/22, 6/23), all favoring 60-69; pairwise held **1 of 6**.
+
+### Guardrail — Cumulative Lead Down to +2.2pt
+
+|Live cohort|50-59% (n)|Held|Band order (by hit, n)|Cum lead|Regime|
+|-|-|-|-|-|-|
+|6/15|40% (15)|NO|40-49 50%(2) = 60-69 50%(6) > 50-59 40%(15)|+7.0pt|mixed|
+|6/16|30% (10)|YES|40-49 100%(1) > 50-59 30%(10) > 60-69 27%(11)|+8.5pt|compressed|
+|6/17|38% (13)|NO|60-69 75%(8) > 50-59 38%(13) > 40-49 33%(3)|+5.5pt|mixed|
+|6/18|64% (11)|NO|60-69 83%(6) > 50-59 64%(11) > 40-49 14%(7)|+4.1pt|mixed|
+|6/22|55% (11)|NO|60-69 67%(6) > 50-59 55%(11) > 40-49 33%(6)|+3.3pt|mixed|
+|6/23|80% (10)|NO|60-69 86%(7) > 50-59 80%(10) > 40-49 57%(7)|**+2.2pt**|clean|
+
+Cumulative: 50-59% **56.6%** > 60-69% **54.4%**, lead **+2.2pt** (narrowing, +4.1 → +2.2pt). Approaching crossover; 60-69 has climbed 48 → 54.4% over the live run.
+
+### Phase 2 Q1 Re-Examination — the Lead Is NOT a Regime Artifact
+
+Built `--stratify-regime` into the harness (regime\_stratification.md staged). Pooling 50-59 vs 60-69 +5d outcomes by regime, separately for the two phases:
+
+**Phase 2 (certification period, 19 cohorts):**
+
+|Regime|#coh|50-59% (h/n)|60-69% (h/n)|Lead|
+|-|-|-|-|-|
+|compressed|4|15/38 (39.5%)|5/18 (27.8%)|+11.7pt|
+|mixed|8|52/92 (56.5%)|19/35 (54.3%)|+2.2pt|
+|clean|7|60/86 (69.8%)|17/28 (60.7%)|**+9.1pt**|
+|**ALL**|19|127/216 (58.8%)|41/81 (50.6%)|+8.2pt|
+
+**Phase 3-A (live, 6 cohorts):**
+
+|Regime|#coh|50-59% (h/n)|60-69% (h/n)|Lead|
+|-|-|-|-|-|
+|compressed|1|3/10 (30%)|3/11 (27.3%)|+2.7pt|
+|mixed|4|24/50 (48%)|18/26 (69.2%)|**−21.2pt**|
+|clean|1|8/10 (80%)|6/7 (85.7%)|−5.7pt|
+|**ALL**|6|35/70 (50%)|27/44 (61.4%)|−11.4pt|
+
+> ANALYST NOTE: \*\*this refutes the working hypothesis I'd been carrying.\*\* I expected the Phase 2 50-59 lead to be concentrated in compressed/down cohorts — a regime artifact that would vanish in clean cohorts and explain the live failure mechanically. It does not. In \*clean\* Phase 2 cohorts the 50-59 lead is \*\*+9.1pt\*\* (70% vs 61%), and it's positive in every Phase 2 stratum (compressed +11.7, mixed +2.2, clean +9.1). So the Q1 finding was a \*\*real, regime-robust Phase 2 feature\*\* — not stratification noise. Yet within the \*same\* regimes, Phase 3-A reverses it: clean +9.1pt → −5.7pt, mixed +2.2pt → −21.2pt. Holding regime constant, the band ordering flipped between the two periods. \*\*That is the "something changed" story — the more interesting one.\*\* Candidates, in rough order of how I'd chase them: (a) a market-regime shift between late-May/early-June and mid/late-June that the cohort-hit flag doesn't capture (e.g., a volatility-clustering or trend change — worth a finer regime axis than the ±3% hit rate); (b) drift in the signal generator between phases (data source, prompt, model) — checkable against the run logs; (c) temporal overfitting of the original Q1 finding to its window; (d) live small-sample noise — the Phase 3-A 60-69 n is still only 44 (mixed n=26 drives the −21.2pt), so the reversal is consistent but not yet large-n. \*\*Recommendation:\*\* keep the Q1 guardrail flagged as not-reproducing (do not rely on it for any actionable phase), and open a focused "what changed" investigation rather than a simple artifact write-off. The phase gate still did its job — it caught a certified edge degrading live — but the diagnosis is richer than expected. Advisory-only throughout.
+
+### H1 — Lag Still 5; WMT 4 of 6
+
+WMT's 6/23 +5d came in at **−5.22% (NO)** — a sharp move clearing the ±3% band (live WMT now 4 of 6: 6/15 Y, 6/16 Y, 6/17 N, 6/18 Y, 6/22 Y, 6/23 N). Lag scan unchanged: **estimated lag still 5 sessions** (peak r +0.579), corr(conf, trailing) consistent. Six live cohorts, lag steady at 5.
+
+### 6/1 +20d — Non-Monotonic (2nd Exception)
+
+6/1's trajectory: |move| **4.72 → 3.85 → 6.79%** — dips at +10d, then grows, so non-monotonic. Magnitude-growth tally now **8-for-10 monotonic**, with 5/22 and 6/1 the two exceptions (both dip at the +10d step). +20d direction **−3.48%**.
+
+### Near-Miss / Registry — Unchanged
+
+No near-miss BUYs resolved on 6/30 (neither the 6/23 nor 6/15 cohort carried a 60-69% BUY). Registry holds: EXTENDED +5d 5/12 = 41.7%, +10d completed 10; LOCKED 4/7. **VERDICT KEEP 70%**, unchanged.
+
+## 2026-07-01 — Phase 3-A Day 12: Seventh Live Cohort (Clean) Again Favors 60-69; Cumulative Lead at Crossover (+0.4pt); Q1 Reversal Deepens
+
+The reversal is strengthening, not settling. **6/24 is the 7th live cohort — clean (62% cohort-wide) — and favors 60-69 by 26 points (88% vs 62%)**, making it 6 of 6 non-compressed live cohorts against the guardrail. The cumulative 50-59 lead has **collapsed to +0.4pt** (56.8% vs 56.4%) — effectively at crossover, from +2.2pt yesterday. Refreshed with the new cohort, the live non-compressed stratum deepens to **−21.2pt** (clean stratum −5.7 → −14.4pt). Both 6/16 near-misses missed at +10d; H1 lag holds at 5 (WMT held 55% through a −8.99% +5d drop). Closeout worksheet updated to v2. **Decision: still EXTEND** — no gate green; H1 now one cohort from its verdict; the deepening reversal reinforces staying advisory.
+
+### 7/1 Run + Integrity
+
+This morning's 24 signals cross-validate **24/24 clean** against `signals\_2026-07-01.log` (rows 720–743; **23 HOLD + 1 BUY** — GLD 65% HIGH, scout, a near-miss). The three resolutions — **6/24 +5d, 6/16 +10d, 6/2 +20d** — are complete (24/24, 24/24, 21/21); recalc clean (**0 errors / 8,641 formulas**). Totals **739 signals**, **BUY 20**.
+
+### Seventh Live Cohort — 6/24 (Clean) Again Favors 60-69; Lead at Crossover
+
+6/24 cohort +5d bands: **60-69% 88% (7/8) > 50-59% 62% (5/8) > 40-49% 50% (3/6)** (0-39% 0/2), cohort-wide **62% → clean**. 50-59 did fine (62%), but 60-69 was near-perfect (88%). **Held NO.** That is the sixth consecutive non-compressed cohort to favor 60-69; the only pairwise "hold" remains 6/16, the lone compressed cohort — **pairwise held 1 of 7**.
+
+|Live cohort|50-59% (n)|Held|Band order (by hit)|Cum lead|Regime|
+|-|-|-|-|-|-|
+|6/22|55% (11)|NO|60-69 67%(6) > 50-59 55%(11) > 40-49 33%(6)|+3.3pt|mixed|
+|6/23|80% (10)|NO|60-69 86%(7) > 50-59 80%(10) > 40-49 57%(7)|+2.2pt|clean|
+|6/24|62% (8)|NO|60-69 88%(8) > 50-59 62%(8) > 40-49 50%(6)|**+0.4pt**|clean|
+
+Cumulative 50-59% **56.8%** vs 60-69% **56.4%**, lead **+0.4pt** (+2.2 → +0.4). One more strong 60-69 cohort flips the sign. 60-69 has climbed 48 → 56.4% across the live run.
+
+### Q1 Re-Examination Refreshed — the Reversal Deepens (7 cohorts)
+
+Re-ran `--stratify-regime` with 6/24 included. Phase 2 is fixed; Phase 3-A deepens:
+
+|Stratum|Phase 2 lead|Phase 3-A lead (6/30)|Phase 3-A lead (7/1)|
+|-|-|-|-|
+|clean|+9.1pt|−5.7pt|**−14.4pt** (72.2% vs 86.7%, n 18/15)|
+|non-compressed|**+5.8pt**|−19.4pt|**−21.2pt** (54.4% vs 75.6%, n 68/41)|
+|ALL|+8.2pt|−11.4pt|−14.1pt (51.3% vs 65.4%)|
+
+> ANALYST NOTE: adding a second clean cohort (6/24) pushed the live clean stratum from −5.7pt to −14.4pt and the pooled non-compressed lead to −21.2pt. The Phase 2 → live contrast within the same non-compressed regimes is now \~27pt (+5.8 → −21.2). This continues to refute the regime-artifact hypothesis and to sharpen the "something changed" read — the flip is getting larger as n grows, not regressing toward zero, which is weak evidence \*against\* the pure small-n explanation (though live 60-69 n is still only 52). The candidate causes are unchanged (vol/trend-regime shift the hit-flag misses, signal-generator drift, temporal overfit); the next concrete step remains a Phase-2-vs-live signal-generator log diff and/or a finer volatility axis. Advisory-only throughout.
+
+### 6/16 +10d Horizon Read (compressed cohort)
+
+For the compressed 6/16 cohort, holding the signal set fixed: **50-59% +5d 30% → +10d 50%; 60-69% +5d 27% → +10d 36%**. At +10d, 50-59 leads (50% vs 36%) — consistent with the guardrail. But 6/16 is the compressed outlier (the one cohort where 50-59 led at +5d too); it does not offset the six non-compressed cohorts that go the other way at +5d. Two horizons now read the same *within* each regime: 60-69 leads in non-compressed (6/15), 50-59 leads in compressed (6/16).
+
+### Near-Miss / Registry — 6/16 Pair Miss +10d; GLD 65% Added; KEEP 70%
+
+Both 6/16 near-misses resolved at +10d and **both missed**: VTI 68% **−0.77% (NO)**, NVDA 65% **−5.52% (NO)**. EXTENDED **+10d completed → 12**, hits **1/12 = 8.3%** (the lone winner still 6/12 VTI). Today's GLD 65% BUY (scout, HIGH DQ, $375.10) adds to EXTENDED (now **13 total; 20 near-misses overall** = 7 LOCKED + 13 EXTENDED); its +5d resolves \~7/9. EXTENDED +5d unchanged 5/12 = 41.7%; LOCKED 4/7 (+5d) / 1/7 (+10d). **VERDICT KEEP 70%**, reinforced — near-misses remain net-negative at both horizons.
+
+### H1 — Lag Still 5; WMT 4 of 7 (−8.99% miss)
+
+WMT's 6/24 +5d printed **−8.99% (NO)** — the bot held HOLD at 55% straight through a −8.99% five-day drop, a clean lag exhibit (confidence didn't react to the coming move). Live WMT now **4 of 7** (6/15 Y, 6/16 Y, 6/17 N, 6/18 Y, 6/22 Y, 6/23 N, 6/24 N). Lag scan **still 5 sessions** across 7 cohorts; corr(conf, trailing) still ≤ 0 (peak positive r +0.372). H1 continues to trend toward verdict (b) — the lag persists, the remedy (if measured) is not moving it.
+
+### 6/2 +20d — Non-Monotonic (3rd Exception)
+
+6/2's trajectory: |move| **5.07 → 4.85 → 7.44%** — dips at +10d before growing, so non-monotonic (n=21). That is the third +20d exception (5/22, 6/1, 6/2 — the latter two consecutive), so the magnitude-growth tally is now **8-for-11 monotonic**; net +5d→+20d growth still holds 11-for-11 (every cohort grows on net), but the +10d dip is recurring in the recent cluster. +20d direction **−5.14%**.
+
+### Closeout Worksheet — v2 (7/1 readings)
+
+Updated the Phase 3-A Closeout Decision Worksheet to **v2**. Movement since v1: **H1** 6 → 7 cohorts (one short of the ≥8 gate; verdict writable \~7/2), lag steady at 5; **Sample depth** 6 → 7 cohorts, live 60-69 n 44 → 52; **Q1-R** reversal deepened (clean −14.4pt, non-compressed −21.2pt, cumulative at +0.4pt) but root cause still open; **cumulative lead** +2.2 → +0.4pt. H3 and H2 remain not-started. Roll-up unchanged: **5 of 5 gates open → NOT YET / EXTEND.** H1 is now the nearest to closable; H3/H2 are the long poles; the deepening Q1 reversal is a standing reason to stay advisory.
+
+## 2026-07-02 — Phase 3-A Day 13: CROSSOVER — Cumulative Lead Goes Negative (−0.7pt); H1 Gate Met at 8 Cohorts, Verdict (b) Drafted; Band-Composition Check Finds a Population Shift
+
+*(7/2 close data, processed at the Mon 7/6 weekly review — Fri 7/3 market closed, July 4 observed.)*
+
+Three finalizations today. (1) **The crossover happened**: the 6/25 cohort (8th live) makes the cumulative 50-59 lead **negative for the first time (−0.7pt)** — 60-69 (57.1%) is now ahead of 50-59 (56.4%) over the full live run. (2) **The H1 ≥8-cohort gate is met** — lag 5 sessions in all 8 cohorts, and the headline corr flip (+0.198) decomposes to the 7/1–7/2 catch-up itself (−0.153 without those two sessions) — **verdict (b) drafted for lock**: prompt-level remedy ineffective; the lag finding itself is confirmed and live-replicated. (3) The first Q1-R root-cause probe — a **band-composition check** — found the bands are **not stable populations across phases** (60-69 BUY share 21% → 3%; PM 29% → 75% within-band; NVDA exited 60-69; index ETFs entered 50-59), narrowing the "what changed" candidates toward generator-drift / population shift. Weekly MDs reviewed; worksheet finalized to v3.
+
+### 7/2 Run + Integrity
+
+The 7/2 signals cross-validate **24/24 clean** against `signals\_2026-07-02.log` (rows 744–767, all HOLD; `prompt\_variant` = **"A"** on all 24 — single live arm). Resolutions at the 7/2 close — **6/25 +5d (24/24), 6/17 +10d (24/24), 6/3 +20d (22/22)** — complete; recalc **0 errors / 8,641 formulas**. Totals **763 signals**, **BUY 20**. Guardrail Trace + Live Cohort Scoreboard sheets are Rob's weekly-review run (7/6 08:14–08:15) and were **left untouched** — read as authoritative, not regenerated.
+
+### Eighth Live Cohort — 6/25 (Mixed): 50-59 Falls to Third; CROSSOVER
+
+6/25 +5d bands: **60-69% 71% (5/7) > 40-49% 50% (3/6) > 50-59% 44% (4/9)** (0-39% 0/2), cohort-wide **50% → mixed**. 50-59 finished *bottom of the three main bands* (second time, after 6/15). Section 4 r60: 44.4%, Pattern NO. **Pairwise held 1 of 8**; 7 of 7 non-compressed cohorts favor 60-69. Scoreboard cumulative: **−0.7pt** — the certified guardrail's headline lead is now negative out-of-sample. Dashboard concurs (50-59 56.4%, 60-69 57.1%, 40-49 44.4%).
+
+### 6/17 +10d Read — First Horizon Divergence
+
+Fixed-set horizon read for 6/17 (mixed): **50-59% 38% → 62%; 60-69% 75% → 50%**. At +10d, 50-59 *leads* this cohort — the first divergence between horizons. Horizon tally so far: 6/15 (mixed) 60-69 leads both horizons and widens; 6/16 (compressed) 50-59 leads both; 6/17 (mixed) splits — 60-69 at +5d, 50-59 at +10d. The live reversal is sharpest and most consistent at **+5d**; the +10d picture is muddier (50-59 has led 2 of 3 cohorts at +10d). Recorded as-is; +10d reads continue accumulating one cohort behind.
+
+### H1 — GATE MET (8 Cohorts); VERDICT (b) DRAFTED FOR LOCK
+
+The pre-committed criterion — ≥8 live cohorts with a stable lag estimate and a written verdict — is met today.
+
+**Evidence.** Estimated update lag **5 sessions in all 8 live cohorts** (and every daily read since 6/15). The weekly MD headline shows corr(conf, trailing move) = **+0.198**, which nominally breaks verdict (b)'s "corr ≤ 0" condition — but the decomposition (recomputed from tracker prices) shows the flip is produced entirely by the **7/1–7/2 WMT catch-up** (conf 52% → 45% *after* a −10% trailing move): excluding those two sessions, corr = **−0.153**, right at the 6/30 baseline. A delayed follower *generates* positive contemporaneous corr during sustained declines once it catches up — the flip is the lag's own signature, not responsiveness. Predictive corr(conf, +5d) remains **−0.583**. The live WMT arc now shows a complete second hold-then-correct cycle (held 52–55% through −3.51/−5.22/−8.99/−4.61% misses, then stepped to 45% — exactly the Phase 2 pattern of \~5 sessions late, \~10–14pt step).
+
+> H1 VERDICT (drafted 2026-07-02 review, for Rob's lock): \*\*(b) INEFFECTIVE AT PROMPT LEVEL — RETIRE the prompt remedy; the lag finding itself is CONFIRMED.\*\* The \~5-session confidence-update lag is real, stable, and now fully live-replicated (8/8 cohorts, two complete hold→catch-up arcs, WMT tracer). The prompt-level remedy did not move the primary endpoint (lag 5, unchanged vs the Phase 2 \~3–5 baseline). The corr condition of branch (b) is treated as satisfied in substance: the +0.198 reading is episode-driven (−0.153 ex-catch-up) and mechanistically \*is\* the lag. \*\*Disposition:\*\* retire prompt-phrasing as a lag remedy; carry the finding to 3-B as a feature-level candidate (mechanical trailing-return input / confidence damping). \*\*Provenance condition (confirm at lock):\*\* all 3-A logs carry a single `prompt\_variant` = "A"; this verdict assumes A = the 3-A prompt \*including\* the H1 prior-5-day price input per the kickoff spec. If A does \*not\* include it, the verdict re-classes from "remedy ineffective" to "remedy untested — baseline lag confirmed live" (same disposition, different provenance) — submitting the live prompt file settles it.
+
+### Weekly MD Review — H3 / H2 / H4 Baselines
+
+**H3 (thesis stability)** — first portfolio-wide baseline: **26/737 day-over-day flips = 3.5%**, mean |dConf| 2.8pts, and **14 of 26 flips (54%) occurred on <1% moves** — churn-on-noise. Concentration is extreme: **NVDA 38.7%** flip rate, VTI 20.0%, GLD 12.9%, CBRS/SCHD 6.5%, and **19 of 24 tickers have zero flips**. Note for the A/B design: this baseline measures *day-over-day* churn; the original 5/29 baseline (9 of 24) was *AM/PM intraday* churn — two different axes. Recommend the day-over-day small-move flip rate as the primary A/B endpoint (continuously measurable from daily logs; no paired intraday runs needed), with AM/PM as a secondary check. Gate moves GRAY → YELLOW (baseline measured; A/B not run).
+
+**H2 (direction asymmetry)** — baseline is **hypothesis-adverse at the portfolio level**: ratio **0.85** (sens\_down 1.51 / sens\_up 1.78) — *more* reactive to gains on average, opposite the loss-bias premise. Per-ticker it's heterogeneous in both directions (RTX 2.89, DOW 1.82, WMT 1.68 ↔ CBRS 0.33, GLD 0.45, AIQ 0.48). The original WMT-vs-GM pair does replicate directionally (1.68 vs 1.10), but it doesn't generalize. Flag for H2 kickoff: consider re-scoping from "fix a uniform loss-bias" to "reduce dispersion" — or deprioritize.
+
+**H4 (DQ watchdog)** — **2 of 3 reopen conditions now met**: HIGH-DQ near-miss hit 75% (3/4) ✓ and HIGH ≥ MEDIUM overall (57.5% vs 48.9%) ✓; blocker is **n = 4 of ≥10 required**. GLD 7/1 (HIGH, 65%) resolves 7/9 and adds to HIGH-DQ n. Stays DEMOTED; watch.
+
+### Q1-R — Composition Check: the Bands Are Not Stable Populations
+
+Refreshed stratification (read-only, 8 cohorts): live **non-compressed −21.8pt** (53.2% vs 75.0%), ALL **−15.5pt** — still deepening (−19.4 → −21.2 → −21.8pt across three refreshes). First root-cause probe run today — per-ticker band composition, Phase 2 vs live:
+
+|Band|Phase 2 (top constituents)|Phase 3-A (top constituents)|
+|-|-|-|
+|60-69|SCHD 18/18, **PM 5/17 (29%)**, NVDA 6/13, PWR 5/11 — **21% BUYs**|JPM 7/8, **PM 6/8 (75%)**, PWR 5/7, SCHD 6/7 — **3% BUYs**|
+|50-59|MSFT 4/17, JPM 9/17, AAPL 10/16, RTX 13/16|MSFT 3/8, WMT 4/8, **SPY 8/8, QQQ 5/8, XLU 6/6**, NVDA 3/7|
+
+> ANALYST NOTE: the certified Q1 property was a \*band-level\* claim, but the bands' \*membership\* shifted materially between phases: the 60-69 band shed its BUY near-misses (21% → 3% of the band) and its within-band problem children changed behavior (PM 29% → 75%); NVDA's HOLDs left 60-69 (its confidence migrated down); index ETFs (SPY/QQQ/XLU) entered live 50-59 alongside lag-afflicted WMT/NVDA. So "the 50-59 > 60-69 ordering flipped" may decompose into "different tickers, different signal mix, different market" rather than a single calibration failure. This \*narrows\* the root-cause candidates toward \*\*(b) generator drift / population shift\*\* and away from pure regime or pure small-n — but it is not yet a diagnosis. The decisive next test is the \*\*Phase-2-vs-live prompt + distribution diff\*\* (confidence histograms per ticker, band-membership flows, DQ mix) — which needs the prompt file(s) and a Phase 2 log week alongside a live week. Q1-R stays OPEN (yellow) with upgraded evidence.
+
+### 6/3 +20d — Non-Monotonic (4th Exception, 3rd Consecutive)
+
+6/3 (n=22): |move| **5.73 → 4.76 → 7.06%** — the +10d dip again. Monotonic tally **8-for-12**; the four exceptions are 5/22 and the consecutive 6/1–6/3 family, whose +5d windows contain the 6/10 shock at peak |move|, mean-revert by +10d, then re-expand into the late-June selloff — an event-driven cluster, not a magnitude-law failure. **Net growth (|+20d| > |+5d|) remains 12-for-12.** +20d direction −3.99%.
+
+### Near-Miss / Registry — Unchanged
+
+No near-miss resolutions at the 7/2 close (7/2 itself all HOLD). Registry per the weekly MD: **20 near-misses** (LOCKED 7: +5d 4/7, +10d 1/7; EXTENDED 13: +5d 5/12, **+10d 1/12 = 8.3%**, avg −3.7%). GLD 7/1 (HIGH, 65%) +5d resolves **7/9**. **KEEP 70%** — near-misses are failing both horizons decisively.
+
+### Closeout Worksheet — v3 (Finalized at the 7/6 Weekly Review)
+
+**H1 → MET** (criterion satisfied; verdict (b) drafted above — lockable at sign-off). **H3 → YELLOW** (baseline measured; A/B is now the critical path). **H2** baseline recorded (hypothesis-adverse; re-scope option flagged). **Q1-R** evidence upgraded (crossover; composition shift found; root cause narrowing but open). **Gate S**: 8 of \~10–12 cohorts; live 60-69 n **59** (target \~88). Roll-up: **once H1 locks, 4 of 5 gates open → NOT YET / EXTEND.** Critical path is now **H3's A/B launch**; Q1-R's prompt/log diff runs in parallel.
+
+## 2026-07-06 — Phase 3-A Day 14 (FINAL): First SELL Misses Hard; Ninth Cohort Is the First Non-Compressed Hold; PHASE 3-A CLOSED BY SIGN-OFF — H1 Locked, H3/H2 Descoped, Q1-R Parked; 3-B Kickoff
+
+**Phase 3-A is closed.** Rob signed Worksheet v3 today (H1 verdict lock ✓, Close: YES ✓, "Rob · July 6, 2026") with a same-day directive: terminate A/B testing, move to **Phase 3-B triple-blend development**, implement the H1 lag finding, and cut dead-weight hypotheses. The closeout is recorded in `Phase3A\_Closeout\_Memo.md` with honest disposition labels — **one verdict** (H1 locked), **two descopes** (H3 retired untested; H2 retired untested-and-unsupported), **one park** (Q1-R, with re-open triggers T1/T2/T3), **one waiver** (Gate S at 9 cohorts). The final day's data added two notable results: the **first SELL missed hard** (CBRS 68% → **+14.61%**, NO), and the **9th cohort (6/26, mixed) is the first non-compressed cohort where the guardrail held** (50-59 70% > 60-69 62%). Final live state: pairwise **2 of 9**, cumulative **−0.6pt** (crossover holds), non-compressed stratum **−18.0pt**.
+
+### 7/6 Run + Integrity (final 3-A daily)
+
+The 7/6 signals cross-validate **24/24 clean** against `signals\_2026-07-06.log` (rows 768–791, all HOLD, variant "A" ×24). Resolutions — **6/26 +5d, 6/18 +10d, 6/4 +20d** — all complete (24/24 each); recalc **0 errors / 8,641 formulas**. Totals **787 signals**, BUY 20, SELL 1. Guardrail/scoreboard sheets are Rob's weekly-run copies (authoritative); final-state numbers below computed read-only.
+
+### First SELL — CBRS 68% Misses by +14.61%
+
+The project's first and only SELL (CBRS, 6/26, 68%, resolved at today's close) printed **+14.61% → NO** — the stock rallied double-digits against a 68% SELL. One datapoint, no generalization — but it lands squarely on the ticker already flagged structural: consistent with the standing **Q3 Path A decision** (CBRS excluded to Q4 2026), and a fitting last exhibit for why that exclusion exists.
+
+### Ninth (Final) Cohort — 6/26: the First Non-Compressed Hold
+
+6/26 +5d bands: **50-59% 70% (7/10) > 60-69% 62% (5/8) > 40-49% 20% (1/5)**, cohort-wide **54% → mixed**. **Held YES** — the first of the eight non-compressed live cohorts where 50-59 led pairwise (the only other hold was compressed 6/16). Recorded without overweighting: the final tally is **7 of 8 non-compressed cohorts favoring 60-69**, pairwise held **2 of 9**, and the cumulative lead stays negative at **−0.6pt** (50-59 56.9% vs 60-69 57.4%). One late hold does not un-ring the crossover; it does keep the honest error bars visible.
+
+### Final Live-Run State (certified into the memo)
+
+|Metric|Final (9 cohorts)|
+|-|-|
+|Pairwise held (50-59 > 60-69)|**2 of 9** (6/16 compressed, 6/26 mixed)|
+|Cumulative lead|**−0.6pt** (crossover reached 7/2, held)|
+|Stratified non-compressed|**−18.0pt** (55.2% n=87 vs 73.2% n=56) — vs Phase 2 **+5.8pt**|
+|Live band n|50-59: 97 @ 52.6% · 60-69: 67 @ 65.7%|
+|+10d horizon reads|split 2–2 (6/15, 6/18 → 60-69; 6/16, 6/17 → 50-59) — the reversal is +5d-sharp|
+
+### 6/18 +10d and 6/4 +20d
+
+**6/18 +10d** (4th horizon read): both bands decline at +10d; 60-69 still leads (67% vs 45%) — the 2–2 split above. **6/4 +20d: MONOTONIC** (4.14 → 4.61 → 6.22%, n=24) — the +10d-dip cluster ends at 6/3, confirming it as the 6/10-shock cohort family. Final magnitude record: **net-growth 13-for-13**, monotonic 9-for-13 (exceptions: 5/22, 6/1–6/3 — all event-cluster). +20d direction −3.64%.
+
+### Closeout Dispositions (see `Phase3A\_Closeout\_Memo.md` for the full record)
+
+**H1 — VERDICT (b) LOCKED**: lag real and stable at 5 sessions (8 cohorts at lock, 9th consistent; two full hold→catch-up arcs); prompt remedy retired; provenance box left open at signature, documented as an assumption — moot, since implementation moves to feature level. **H3 — DESCOPED** (retired untested; baseline 3.5% flips, NVDA-concentrated — churn is a 3-ticker trait). **H2 — DESCOPED** (retired untested-and-unsupported; baseline ratio 0.85, hypothesis-adverse). **Q1-R — PARKED** with triggers: T1 mandatory before any execution consideration; T2 at 60-69 n≥88 if non-compressed lead ≤ −15pt → run the prompt/distribution diff; T3 before any design reliance on band ordering. **Gate S — WAIVED** at 9/\~10–12 cohorts, n=67/\~88; the depth target lives on inside T2. **A/B program terminated** (archived). **The Q1 guardrail is SUSPENDED as a decision input.**
+
+> ANALYST NOTE: the disposition labels matter more than usual here. Phase 3-A produced exactly one evidence-complete verdict (H1). Everything else closed by \*decision\*: two hypotheses were cut before their tests ran (one of them, H2, with a baseline that argued against it anyway; the other, H3, with a baseline that shrank the premise), and the run's biggest open question — why a certified, regime-robust edge inverted out-of-sample — was parked, not answered. That is a legitimate scope call, and the advisory-only constraint plus triggers T1–T3 make it a \*safe\* one: no capital can touch this system while Q1-R is undiagnosed, and the monitors that would re-open it keep running for free inside the daily flow. The phase gate did its job — it caught the certified edge degrading before anything relied on it — and 3-A hands 3-B one implementable finding (the lag), one standing threshold (KEEP 70%), one robust invariant (magnitude net-growth 13-for-13), and one suspended guardrail with a tripwire on it. Advisory-only throughout; no orders; not financial advice.
+
+### Registry / H4 — carried into 3-B monitoring
+
+No near-miss resolutions today. Registry: 20 near-misses (LOCKED 4/7 \& 1/7; EXTENDED 5/12 \& 1/12). **KEEP 70%** standing. GLD 65% (HIGH) +5d resolves **7/9** — adds HIGH-DQ n toward H4's reopen gate (now 2 of 3 conditions, n=4/10). In-flight cohorts 6/29–7/6 resolve 7/7–7/13 under WS0 monitoring.
+
+**Phase 3-A: opened 2026-06-15, closed 2026-07-06. Fourteen sessions, nine certified cohorts, zero orders. → `Phase3B\_Kickoff\_Prompt.md`.**
+
+
+
+
+
+\---
+
+# Active Touch Points
+
+*Last updated: 2026-07-06 — **PHASE 3-A CLOSED BY SIGN-OFF** (Worksheet v3 signed; H1 verdict (b) LOCKED — lag 5 real/stable, prompt remedy retired, implement feature-level in 3-B; H3 DESCOPED untested (baseline 3.5%, NVDA-concentrated); H2 DESCOPED untested-and-unsupported (ratio 0.85 adverse); Q1-R PARKED w/ triggers T1 pre-execution / T2 n≥88 \& lead ≤ −15pt / T3 band-ordering reliance; Gate S waived at 9 cohorts; A/B terminated; Q1 guardrail SUSPENDED as decision input. Final live state: pairwise 2 of 9, cumulative −0.6pt (crossover holds), non-compressed −18.0pt, 60-69 n=67 @ 65.7% vs 50-59 n=97 @ 52.6%; first SELL CBRS 68% missed +14.61% (supports Path A); 6/26 = first non-compressed hold (70% > 62%); magnitude net-growth 13-for-13; KEEP 70%; GLD near-miss +5d due 7/9. <b>→ Phase 3-B open: WS1 triple-blend, WS2 H1 feature-level lag fix (accept: lag ≤2 over ≥4 cohorts), WS3 Q3 commodity/CBRS code, WS0 monitoring.</b> Docs: Phase3A\_Closeout\_Memo.md, Phase3B\_Kickoff\_Prompt.md)*
+
+**Completed:**
+
+* 5/26 (Day 6) — Captured 5/18 cohort outcomes (first calibration signal)
+* 5/27 (Day 7) — Captured 5/19 cohort outcomes + first near-miss BUY (NVDA -3.62%, NO)
+* 5/28 (Day 8) — Captured 5/20 cohort outcomes; **Q1 calibration verdict locked: CALIBRATED**
+* 5/29 (Day 9) — Captured 5/21 cohort + first near-miss BUY win (SCHD +1.22%, YES); run\_daily.bat fix verified
+* 6/1 (Day 10) — Captured 5/22 cohort (45.8%, Pattern NO on tie; corrected from 54.2% on 6/8); NVDA 5/22 near-miss WIN (+3.50%); AG/FTI 429-skipped
+* 6/2 (Day 11) — Captured 5/26 cohort (66.7%, Pattern NO on low-vol confound) + VTI 5/26 near-miss WIN (+1.14%); **first +10d outcome (5/18 cohort): HOLD-decay finding**; deduped 5/18 to 24 rows; Decision Worksheet updated to v4; CORN/XLU/SPY 429-skipped
+* 6/3 (Day 12) — Captured 5/27 cohort (**79.2%, strongest cohort**, Pattern YES) + NVDA 5/27 near-miss WIN (+2.34%); 5/19 +10d (decay did NOT replicate — partial); Cohort Analysis tab extended through 6/12; QQQ/VTI 429-skipped
+* 6/4 (Day 13) — Captured 5/28 cohort (66.7%, Pattern YES) + 5/20 +10d (decay sided with 5/18, 2-of-3 at the time); WMT lag replicated 3rd time; clean 24/24 run
+* 6/5 (Day 14) — Captured 5/29 cohort (54.2%, Pattern YES, final +5d cohort); 5/21 +10d (decay reverts to coin flip, 2/4); **Q2 VERDICT LOCKED: KEEP 70%** (4/6 hit, −0.07% avg); **Q1 FINALIZED: CALIBRATED 6 of 9, 50-59% at 61.3%**; Decision Worksheet updated to v5; fixed Near-Miss avg-return formula bug; clean 24/24 run
+* 6/8 (Day 15) — NVDA 6/1 near-miss +5d recorded (−5.84%, NO): **Q2 7-of-7 FINAL 4/7 = 57.1%, −0.90% avg — KEEP 70% confirmed**; 5/22 +10d (45.8% → 50.0%, +4.2pt, did NOT decay; **abs move SHRANK 4.52→4.09 — first magnitude-growth exception, tally now 4/5**); WMT +10d −0.00% (H1 lag fully self-corrected); Q1 re-certified unchanged (61.3%, 6/9); corrected 5/22 +5d 54.2% → 45.8% (other 8 cohorts re-verified clean); clean 24/24 run
+* 6/9 (Day 16) — Captured 5/26 +10d (66.7% → 29.2%, −37.5pt — **sharpest decay, low-vol confound unwound as the 6/2 entry predicted**; abs move grew 2.92→4.47, tally 5/6); WMT +10d +0.01% (H1 resolved, 6th cohort); Near-Miss tab extended to +10d (4 complete: 1/4 = 25%, −1.89% avg — corroborates KEEP 70%); Q1 re-certified unchanged; clean 24/24 run; 11th near-miss logged (NVDA 68% @ $207.40)
+* 6/10 (Day 17) — Captured 5/27 +10d (79.2% → 29.2%, **−50.0pt — largest decay, REGIME-CONTAMINATED: the 6/10 Middle East shock IS the +10d close**; abs move grew 2.67→5.16, tally 6/7; decay 4/7 but 2 of 4 shock-flagged, claim stays retired); WMT +10d +1.99% (H1, 7th cohort, held through shock); NVDA 5/27 near-miss +10d −4.49% NO (1/5 = 20%); 6/3 cohort +5d complete (22/22 max); Near-Miss registry findings: '6/2' GLD+NVDA rows are 6/3 signals (re-date, outcomes correct), five band BUYs missing (6/2 @227.93 −8.66% NO complete; 6/4, 6/5, 6/8, 6/9 pending) — registry should total 14, not 9; extended near-misses 0-for-3 post-lock, all on the KEEP-70% side; second pure-HOLD day (shock morning, zero signals cleared); Q1 re-certified unchanged; clean 24/24 run
+* 6/11 (Day 18) — Captured 5/28 +10d (66.7% → 41.7%, −25.0pt, **measured on the 6/11 bounce** — abs grew 3.28→4.69, tally 7/8; decay 5/8, ex-shock 3/6, claim stays retired); **CORRECTED shock-set scope to 5/27–5/29** (5/26 window ended 6/9 pre-shock — its −37.5pt is pure inflation-unwind, the clean exhibit); **WASDE: CORN −2.05% abs / ≈−3.7% mkt-rel on a pre-release HOLD 38% — validates Path B** (one-event caveat); WMT +10d +1.71% (H1, 8th cohort); 6/4 near-miss −4.17% NO (extended 0-for-4, avg −7.0%); 6/4 cohort +5d complete; new NVDA 65% near-miss @ $199.94 (registry should total 15; 6/10 registry fixes still open); Q1 re-certified unchanged; clean 24/24 run, HIGH DQ 5/24 (4th depressed day)
+* 6/12 (Day 19) — **PHASE 2 CLOSED.** Captured 5/29 +10d (54.2% → 37.5%, −16.7pt, mildest shock-window decay); FINAL scorecards: magnitude 8/9, decay 6/9 (ex-shock 3/6, retired); WMT arc completed −15.19 → +4.31 (favorable-side breach — lag visible both directions); Q1 FINAL CERTIFIED (61.3%, n=216, 6/9); 5/29 near-miss +10d −4.98% NO, 6/5 near-miss −3.20% NO (extended 0-for-5, avg −6.23%); two new near-misses (VTI 68% HIGH, NVDA 62%) — registry should total 17, fixes promoted to Phase 3 auto-gen item; review held: memo §0/§3/§4/§5/§7 finalized — Phase 3-A approved (H1 → H3 → H2, advisory-only, triple-blend deferred to 3-B); clean 24/24 run
+* 6/15 (Phase 3-A Day 1) — **PHASE 3-A LIVE** (advisory-only, no orders). First run 24/24 all HOLD, risk APPROVED → tracker rows 456–479 (Section 4 cohort wired, pending +5d; Dashboard 475 total, **50-59% guardrail holds 58.8%**; AG/FTI confirmed price-only backfills, inert). **analyze\_log.py phase-regex fix** (`\\d` matched one digit → `\[PHASE 3-A DRY RUN]` parsed 0; broke exactly on the cutover; fixed to phase-agnostic `\[\\w.-]+`, control-arm-only; reproduced 0 → 24, A/B 24 not 48). Go-live hardening: PYTHONUTF8 + openpyxl self-check + requirements.txt in the bats; run\_daily.bat paren-parse fix; harness `--since`/`--until`; UTF-8 writes; news\_client.py newest-first sort. Tracker K:N filled to row 2000 + Section 4 added (recalc 0 errors); date-coercion proven via throwaway injection. README rewritten to Phase 3-A (MAX\_OPEN\_POSITIONS doc-lag 30 → 8; engine was always 8). EDGAR scoped to Phase 3 as one edgar\_client.py (Form 4/8-K + 10-Q/10-K MD\&A; A/B arm, not baseline; roadmap folded to one line). Repo reconciled; 13-file bundle staged for push.
+* 6/16 (Phase 3-A Day 2) — 6/16 run **24 signals, 2 BUY / 22 HOLD** — first Phase 3-A BUYs, both near-misses (**VTI 68% HIGH @ $372.15**, **NVDA 65% MEDIUM @ $209.12**, scouts, rejected by the 70% threshold). Logged to Near-Miss tab rows 14–15 (+5d 6/24, +10d 7/1; **tab 9 → 11**, resolved stats unchanged at 44.4% / −2.38%). Near-Miss tab repaired: relabeled (Phase 2 + Phase 3-A); **verdict resolved → KEEP 70%** (was stale "to be decided 6/10"); rows 11–15 +10d cells restyled (drifted fills) + +10d dates filled (H11 6/15, H12/H13 6/17 = +5d + 5 trading days). 6/15 re-run confirmed 0 near-misses (24/24 HOLD); 6/15 cohort +5d pending (\~6/23).
+* 6/17 (Phase 3-A Day 3) — 6/17 run **24/24 HOLD** (no near-misses; VTI 58% / NVDA 55% below band). **First +20d cohorts resolved (5/18, 5/19): magnitude grows to 20 days** — |move| 4.51 → 5.69 → **6.72%** (5/18), 5.25 → 6.09 → **7.17%** (5/19), both monotonic, **2-for-2** extending the 8/9 Phase 2 finding; +20d direction net negative (−2.0%, −2.4%). **Near-miss +10d: 3 new (NVDA 6/1, GLD 6/2, NVDA 6/2), all NO → hit rate 1/9 = 11.1%** (from 16.7%), corroborates KEEP 70%. Guardrail holds: live 50-59% **59.3%** (eased from certified 61.3%) > 60-69% 50.7% > 40-49% 46.0%. Totals reconcile (523 = 451 + 72, BUY 19); +5d coverage through 6/10 (77%); recalc 0 errors. 6/17 prices at sub-cent precision (flagged). Phase 3-A +5d pending (\~6/23).
+* 6/18 (Phase 3-A Day 4) — 6/18 run **24/24 HOLD** (no near-misses; VTI/NVDA 58% below band). **5/20 +20d: magnitude growth 3-for-3** — |move| 5.54 → 6.28 → **7.09%**, monotonic; +20d −3.09% (deepening, but overlapping mid-June windows). **6/11 cohort +5d Pattern NO** (50-59% 50%, n=12; across-cohort 10 of 18); 6/12 last Phase 2 +5d pending (\~6/22). **Near-miss registry backfilled 11 → 19** via build\_near\_miss\_registry.py (7 LOCKED + 12 EXTENDED): genuine 6/2 NVDA added, 6/3 pair re-dated, 6/16 NVDA conf 0.68→0.65; **combined +5d 7/15 = 46.7%**, LOCKED +5d 4/7 (immutable) / +10d 1/7 (6/1 resolved NO post-freeze); fixed the script cross-workbook style bug. **guardrail\_trace.py built + run** — 50-59 lead peaked +12.3pt (6/1), compressed post-shock to +7.4pt (6/11), stabilising, no crossover (certified 61.3% = cum at 5/29). **h1\_lag\_trace.py dry-run** — runs clean, ingests Phase 3-A rows, reproduces baseline (lag 5 sessions, arc −15.19→−1.66); ready for 6/23. Totals reconcile (547 = 451 + 96, BUY 19); recalc 0 errors; sub-cent prices 2nd session (new standard).
+* 6/22 (Phase 3-A Day 5) — 6/22 run **24/24 HOLD** (no near-misses; VTI 58% / NVDA 55% below band, PWR 63% in-band HOLD). **5/21 +20d: magnitude growth 4-for-4** — |move| 5.05 → 5.18 → **6.55%**, monotonic (shallow +10d step, back-loaded); +20d −3.36% (deepening, overlapping mid-June windows). **Section 1 closed out — 6/12 holds** (50-59% 60%, n=10, Pattern YES; final **11 of 19** cohorts hold; Section 1 fully matured). **Guardrail lead widened to +8.2pt** (50-59% 58.8% > 60-69% 50.6% > 40-49% 45.0%) — the 6/12 cohort reversed the compression (was +7.4pt at 6/11). **Near-miss registry refreshed**: EXTENDED +5d 3/8 → **5/10** (both 6/12 near-misses hit, +1.48% / +0.87%), +10d completed 4 → 5 (6/5 NVDA); combined **9/17 = 52.9%**; LOCKED 4/7 immutable; **KEEP 70% holds** (negative avg returns despite hit-rate uptick — net-negative EV). Guardrail Trace sheet refreshed through 6/12. Totals reconcile (571 = 451 + 120, BUY 19); recalc 0 errors. Phase 3-A +5d still pending — 6/15 resolves 6/23.
+* 6/23 (Phase 3-A Day 6) — **First live calibration day.** 6/15 +5d, 6/8 +10d, 5/22 +20d entered (24/24 each); recalc 0 errors; totals 595, BUY 19. **First live guardrail: 6/15 cohort does NOT hold** — Section 4 r53 50-59% 40% (n=15), Pattern NO; bands inverted (60-69 50% > 50-59 40% > 40-49 33%). Cumulative still leads but narrowed: 50-59% **57.6%** > 60-69% 50.6% (+7.0pt, down from +8.2 at 6/12; drift −3.7pt from certified). **n=24, one cohort — expected noise, not a verdict; watch 6/16–22.** **H1 first live read: lag unchanged at 5** (WMT 6/15 −0.73% YES; corr −0.177; one quiet cohort). **5/22 +20d the magnitude exception**: 4.52 → 4.09 → 5.93 (non-monotonic — shrank +5d→+10d, the known exception; net +20d growth 5-for-5, monotonic 4-for-5); +20d −4.58% (deepest). **Registry EXTENDED +10d 5 → 6** (6/8 NVDA −4.01% NO); combined +5d 9/17 = 52.9%; KEEP 70% holds. 6/23 morning block verified clean against the log (24/24 reconcile on signal/conf/DQ/price; all HOLD).
+* 6/24 (Phase 3-A Day 7) — **2nd live cohort + morning signals cross-validate clean** (24/24 reconcile, all HOLD; rows 600–623). Resolutions 6/16 +5d, 6/9 +10d, 5/26 +20d entered (24/24 each); recalc 0 errors; totals 619, BUY 19. **6/16 cohort also does NOT hold** — Section 4 r54 50-59% **30% (n=10), NO**; but guardrail bands flat-low (50-59% 30%, 60-69% 27%; 40-49% a lone name), all near-misses deeply negative (VTI −2.28%, NVDA −4.84%, 6/9 NVDA −4.05%) = a **down-regime cohort**, not a clean calibration read. **Relative vs absolute:** cumulative 50-59% **56.4%** > 60-69% 48.0% (lead **+8.5pt**, stable +7→+8.5 across both live cohorts — ranking holds), but absolute **drift −4.9pt** from 61.3% (both below Phase 2 → regime effect, the single-regime caveat surfacing). **H1 lag still 5** (WMT 6/16 −2.50% YES; corr −0.173). **5/26 +20d monotonic** (2.92→4.47→7.46), magnitude **5-for-6** (5/22 still lone exception); +20d −6.40% (deepest). **Registry EXTENDED +5d 5/12 = 41.7%, +10d 7** (all three 6/24 near-miss resolutions NO); combined +5d 9/19 = 47.4%; **KEEP 70% reinforced**.
+* 6/25 (Phase 3-A Day 8) — **3rd live cohort + morning signals cross-validate** (23/24 reconcile, all HOLD, rows 624–647; **one catch — GLD Px@signal tracker 368 vs log 368.775**, paste truncation, fix to 368.775 before GLD's +5d \~7/2). Resolutions 6/17 +5d, 6/10 +10d, 5/27 +20d entered (24/24 each); recalc 0 errors; totals 643, BUY 19. **6/17 cohort goes AGAINST the guardrail — and it's not compressed:** Section 4 r55 50-59% **38.5% (n=13), NO**; band order **60-69% 75% (6/8) > 50-59% 38% (5/13) > 40-49% 33% (1/3)**, cohort-wide **50%** (mixed — bands had room to separate, and 60-69 separated *above*). **The clean test arrived and favored 60-69.** Cumulative lead **narrows +8.5 → +5.5pt**; **pairwise held just 1 of 3** (the 1, 6/16, was compressed noise); absolute **drift −5.8pt**. Read shifted from 'ranking holds, regime sensitivity' to **'guardrail under real pressure'** — not yet definitive (n=3, 60-69 n=8 on 6/17), but the next non-compressed cohorts are decisive. **H1 lag still 5** (WMT 6/17 −3.51% **NO** — first live WMT miss; peak r +0.600). **5/27 +20d monotonic** (2.67→5.16→7.67), magnitude **6-for-7** (5/22 lone exception); +20d −5.99%. **Registry unchanged**; EXTENDED +5d 5/12, +10d 7; **KEEP 70%**.
+* 6/26 (Phase 3-A Day 9) — **4th live cohort + morning signals cross-validate** (24/24 reconcile; rows 648–671; **first SELL signal — CBRS 68%**, advisory-only, resolves \~7/6). **GLD fix half-landed** — now 367.775 vs log 368.775 (decimals right, dollars off by $1; needs 368.775). Resolutions 6/18 +5d, 6/11 +10d, 5/28 +20d entered (24/24 each); recalc 0 errors; totals 667, BUY 19. **6/18 = 2nd straight non-compressed cohort to favor 60-69:** Section 4 r56 50-59% **63.6% (n=11), NO**; band order **60-69% 83% (5/6) > 50-59% 64% (7/11) > 40-49% 14% (1/7)**, cohort-wide **54%** (50-59 did *well* — above certified — but 60-69 did better). **All 3 non-compressed live cohorts (6/15, 6/17, 6/18) favor 60-69; pairwise held 1 of 4** (the 1, 6/16, compressed noise). Cumulative lead **compressed +8.5 → +4.1pt** — below the Phase 2 +7–13pt range, driven by 60-69 climbing 48→52%. Read moved from 'under pressure' to **'fairly clearly not holding out-of-sample'** — recommend a formal **Phase 2 Q1 re-examination** (6/22 = confirmation; lead still positive, per-cohort 60-69 n small). Phase 3-A working as designed — a non-generalizing finding caught advisory-only. **H1 lag still 5** (WMT 6/18 −1.53% YES, 3 of 4 live). **5/28 +20d monotonic** (3.28→4.69→7.27), magnitude **7-for-8**; +20d −5.41%. **Registry EXTENDED +10d → 8** (6/11 NVDA −3.71% NO); +5d 5/12; **KEEP 70%**.
+* 6/29 (Phase 3-A Day 10) — **CONFIRMATION READ + morning signals cross-validate** (24/24 reconcile, all HOLD, rows 672–695). **GLD fixed** (Px@signal now 368.775). Resolutions 6/22 +5d, 6/12 +10d, 5/29 +20d entered (24/24 each); recalc 0 errors; totals 691, BUY 19. **6/22 = 4th non-compressed cohort, favors 60-69 again:** Section 4 r57 50-59% **54.5% (n=11), NO**; band order **60-69% 66.7% (4/6) > 50-59% 54.5% (6/11) > 40-49% 33% (2/6)**, cohort-wide **50%** (mixed). **All 4 non-compressed live cohorts (6/15, 6/17, 6/18, 6/22) favor 60-69; pairwise held 1 of 5** (the 1, 6/16, compressed noise). Cumulative lead **+8.5 → +3.3pt** — below the Phase 2 +7–13pt range, 60-69 climbing to 52.5%. **The Q1 50-59>60-69 guardrail is firmly NOT holding out-of-sample — trigger met; proceed with the regime-stratified Q1 re-examination.** Phase 3-A worked as designed. **H1 lag still 5** (WMT 6/22 −2.56% YES — 4 of 5 live; peak r +0.594). **5/29 +20d monotonic** (4.95→5.14→7.62), magnitude **8-for-9**; +20d −4.72%. **Registry EXTENDED +10d → 10** (6/12 VTI +0.41% YES — rare win, NVDA −5.17% NO); +5d 5/12; **KEEP 70%**.
+* 6/30 (Phase 3-A Day 11) — **+10d horizon read + Q1 re-examination built.** Morning signals cross-validate 24/24 (all HOLD, rows 696–719); resolutions 6/23 +5d, 6/15 +10d, 6/1 +20d complete (24/24 each); recalc 0 errors; totals 715, BUY 19. **+10d confirms the 6/15 inversion** — 60-69 leads at both horizons (67% vs 50-59 47% at +10d), gap *widens* (not a +5d artifact). **6/23 = 6th live cohort, first CLEAN (75%), still favors 60-69** (86% > 80%, Section 4 r58, Pattern NO); 5 non-compressed cohorts all favor 60-69, pairwise held 1 of 6; cumulative lead **+3.3 → +2.2pt** (near crossover). **`--stratify-regime` built into guardrail\_trace.py** (regime\_of() single-sourced, scoreboard byte-identical; writes regime\_stratification.md). **Verdict — NOT a regime artifact:** Phase 2 50-59 led in non-compressed cohorts **+5.8pt** (clean **+9.1pt**, mixed +2.2pt) — real across regimes — yet the SAME non-compressed regimes go **−19.4pt** live (mixed −21.2, clean −5.7, both flip sign). The 50-59>60-69 ordering **FLIPPED between Phase 2 and now** → "something changed," regime composition does not explain it (candidates: vol-regime shift, signal-generator drift, Q1 overfit, live small-n; 60-69 live n=44). **H1 lag still 5** (WMT 6/23 −5.22% NO, 4 of 6; peak |r| 0.584). **6/1 +20d non-monotonic** (4.72→3.85→6.79), 2nd exception, magnitude **8-for-10**; +20d −3.48%. **Registry unchanged**, KEEP 70%.
+* 7/1 (Phase 3-A Day 12) — **7th live cohort + weekly review + worksheet v2.** Morning signals cross-validate 24/24 (23 HOLD + 1 BUY = GLD 65% scout; rows 720–743); resolutions 6/24 +5d, 6/16 +10d, 6/2 +20d complete; recalc 0 errors; totals 739, BUY 20. **6/24 = 7th live cohort, clean (62%), favors 60-69 88% (7/8) vs 50-59 62% (5/8), Held NO** — 6 of 6 non-compressed cohorts favor 60-69, pairwise held 1 of 7. **Cumulative lead +2.2 → +0.4pt — at crossover** (50-59 56.8% vs 60-69 56.4%). **Q1 re-examination refreshed (7 cohorts): live non-compressed −19.4 → −21.2pt, clean −5.7 → −14.4pt** — the flip deepens as n grows (weak evidence against pure small-n; live 60-69 n=52). **6/16 both near-misses miss +10d** (VTI −0.77%, NVDA −5.52%; extended +10d 1/12 = 8.3%); GLD 65% added (20 near-misses, 7 LOCKED + 13 EXTENDED); **KEEP 70%** reinforced. **H1 lag still 5** (WMT 6/24 −8.99% NO — held 55% through the drop; 4 of 7; peak +r 0.372). **6/2 +20d non-monotonic** (5.07→4.85→7.44), 3rd exception, magnitude **8-for-11**; +20d −5.14%. **Closeout Worksheet → v2**: H1 now 7 of ≥8 (verdict \~7/2), sample depth 60-69 n 44→52, Q1-R deepening but open — roll-up unchanged, **5 of 5 open → NOT YET / EXTEND**.
+* 7/2, processed 7/6 (Phase 3-A Day 13) — **Crossover + H1 verdict drafted + worksheet v3.** 7/2 signals 24/24 clean (all HOLD, rows 744–767, variant "A" ×24); resolutions 6/25 +5d, 6/17 +10d, 6/3 +20d complete; recalc 0 errors; totals 763, BUY 20; Rob's weekly-review sheets read as authoritative (not regenerated). **6/25 = 8th live cohort (mixed): 60-69 71% > 40-49 50% > 50-59 44% — cumulative lead crosses NEGATIVE (−0.7pt)**, pairwise 1 of 8. **H1 ≥8-cohort gate MET; verdict (b) drafted for lock** — lag 5 in 8/8, corr +0.198 decomposes to the 7/1–7/2 WMT catch-up (−0.153 without it; catch-up IS the lag signature); retire prompt remedy, carry finding to 3-B feature-level; provenance condition: confirm variant "A" includes the H1 input. **6/17 +10d diverges** (50-59 62% > 60-69 50% — first +10d flip back). **Composition check (Q1-R probe #1): band populations shifted** — 60-69 BUY share 21%→3%, PM 29%→75% within-band, NVDA exits 60-69, SPY/QQQ/XLU enter 50-59 → narrows root cause toward generator drift/population shift; stratify @8 cohorts −21.8pt non-compressed. **Weekly MDs**: H3 baseline 26/737 = 3.5% flips (NVDA 38.7%/VTI 20%/GLD 12.9%; 54% of flips on <1% moves; endpoint recommendation: day-over-day small-move flip rate) → gate YELLOW; H2 baseline ratio 0.85 hypothesis-adverse (WMT/GM pair replicates 1.68/1.10 but doesn't generalize; re-scope flagged); H4 2 of 3 reopen conditions met (n=4 of ≥10; GLD 7/9 adds). **6/3 +20d non-mono** (5.73→4.76→7.06, 3rd consecutive shock-cluster exception), monotonic 8-for-12, net-growth 12-for-12. Registry unchanged (20 near-misses; extended +10d 1/12 = 8.3%); **KEEP 70%**. **Worksheet v3: H1 MET (lockable), H3 critical path — 4 of 5 open post-lock → NOT YET / EXTEND.**
+* 7/6 (Phase 3-A Day 14 — FINAL) — **Phase closed by sign-off; closeout memo + 3-B kickoff produced.** 7/6 signals 24/24 clean (all HOLD, rows 768–791); resolutions 6/26 +5d, 6/18 +10d, 6/4 +20d complete; recalc 0 errors; totals 787. **First SELL missed hard**: CBRS 68% → +14.61% NO (n=1; supports Q3 Path A exclusion). **6/26 = 9th/final cohort, first non-compressed hold** (50-59 70% > 60-69 62%, mixed 54%) — final tally pairwise **2 of 9**, cumulative **−0.6pt**, non-compressed stratum **−18.0pt** (vs P2 +5.8pt), 7 of 8 non-compressed favored 60-69; +10d reads split 2–2 (reversal is +5d-sharp). 6/4 +20d monotonic — net-growth **13-for-13** final, monotonic 9-for-13 (shock cluster annotated). **Dispositions**: H1 VERDICT (b) LOCKED (provenance box open, documented; implementation → feature level); H3/H2 DESCOPED (untested; H2 baseline-adverse); Q1-R PARKED (T1/T2/T3); Gate S waived; A/B terminated; **guardrail SUSPENDED as decision input**. Registry KEEP 70%; H4 2-of-3 (GLD 7/9 adds HIGH-DQ n). Deliverables: **Phase3A\_Closeout\_Memo.md**, **Phase3B\_Kickoff\_Prompt.md**, final regime\_stratification.md.
+* **7/7 (Phase 3-B Session 1 + Day 1) — phase transition: WS2 (S1+D1) built, deployed, first canonical cohort live.** **Provenance box CLOSED (CONFIRMED):** variant "A" carried the H1 prior-5-day input throughout 3-A — git frozen at go-live (`246494e`, 6/15 19:00 CDT) through 7/6, the 7/6 runtime log shows the `pricehistory` fetch on all 24 tickers, and the pre-go-live snapshot lacks the block; **verdict (b) stands as signed** (caveat: the 6/15 AM run predates the commit stamp → 13 of 14 sessions git-provable, immaterial to the verdict). **WS2 built at feature level — generator era "A-S1D1":** the kickoff's named trailing-5-day input (Lever 1) was found **already deployed** = the very remedy the lock scored ineffective, so WS2 pivoted to **S1** (prior-signal state input — the model's own last-5 *raw* confidences per ticker, the untried model-side channel) + **D1** (mechanical post-model confidence damping, θ5 / K1.5 / cap15 / floor35, sized on the WMT arc). **Ruling R1 — both levers together** → two-channel readout (`confidence\_raw` = model channel, operative = system truth, both logged every line; S1 feeds raw only, so D1 never contaminates the model-side test). **Ruling R2 — pool eras for the T2 counter** (the A-S1D1 stamp preserves post-hoc stratifiability). **Pre-deploy parser bug caught:** `parse\_log\_to\_tracker` `ACCOUNT\_RE` hardcoded `2 DRY RUN|3-A` → would have imported every 3-B row as Account="Unknown" (same class as the 6/15 `analyze\_log` break); fixed phase-agnostic before go-live. **Deploy hygiene — run-1 superseded:** first 7/7 run (09:45) skipped the seed → cold start (S1 empty, D1-only), archived `signals\_2026-07-07\_run1\_coldstart.log`, nothing pasted; re-seeded from the tracker (24 tickers; WMT chain …45, GM …52), re-ran (10:18) = **canonical 7/7 cohort, the first full S1+D1 cohort** (acceptance clock starts here; `WS2\_DEPLOY=2026-07-07`). **Cross-check 24/24** — log↔tracker operative reconcile verified incl. the damped names; DQ **18 HIGH / 6 MED / 0 LOW**; all HOLD; **0 near-misses (VTI 60% HOLD, not a BUY) → registry stays 20** (corrects an intra-session mis-count of 21 — the run-1 VTI BUY lived only in the archived cold-start log); totals **811, BUY 20, SELL 1**. **D1 first live activations (raw→op):** PWR 55→47 (trail −10.19%, damp 8), SND 42→40 (−6.19%, 2), AIQ 48→47 (−5.84%, 1), CBRS floored 35→35 (−20.48%, pre-floor 15) — arithmetic verified. **S1 first live read:** tracers WMT/GM both quiet (−1.16% / −1.02%, sub-material) → **null cohort for the acceptance instrument**; corroborating (non-tracer) **PWR raw stepped 62→55 same-session, reasoning cited "the stale 62% HOLD"** — the staleness-break S1 was built to surface (NTR "62 from 58", NKE "42 to 52" also verbally engaged their chains); **counterweight — anchoring also visible** (WMT 55→45, XLU 62→55, FTI 65→60, VTI BUY 65→HOLD 60 snapped toward chain endpoints vs the S1-free run). Both faces on Day 1; **no verdict** (n=1, diagnostic only — the cold/canonical pair differ by intraday drift + ordinary generator variance). **Weekly monitors (generated 7/07 15:27–28):** h1 traces **WMT lag 2 / GM lag 1 — full-series corr-scan BASELINE only** (§4b: a short-slice ≤2 is not success; the failed generator already reads lag 1), and **WMT's lag-5 episode (52→45 on 7/01) is entirely PRE-deploy** — post-deploy WMT is flat, so the acceptance read awaits a fresh material move on a tracer. **T2 depth: live 60-69 +5d-resolved n = 74** (6/29 cohort +7; band accuracy validated vs the memo — 50-59 n=107 @ 54.2%, 60-69 n=74 @ 63.5%), target 88 → **short 14 (\~2 cohorts, \~7/9–10)**. **T2 LEAD gate DISARMED — the two gates diverge:** `regime\_stratification.md` (through 6/29) puts the **non-compressed stratum lead at −13.1pt** (from −18.0 at close — the 6/29 non-compressed 50-59 hold, 70% > 60-69 43%, narrowed it), now **above the −15pt trigger**; cumulative all-cohort lead flipped +0.5pt, pairwise held 3 of 10. So **depth is arming toward 88 (74 now) while the lead has risen off the trigger — T2 is currently armed on NEITHER gate**, and will not fire even at n ≥ 88 unless the non-compressed lead drops back ≤ −15pt (margin thin at 1.9pt; live 60-69 n small → volatile). **The Q1-R finding is undisturbed:** Phase 2 non-compressed +5.8pt (clean +9.1pt — never a mere compressed artifact) vs Phase 3-A −13.1pt = a **\~19pt within-regime swing, sign firmly flipped** — only the specific tripwire is currently unmet. **Registry 20** (GLD 65% 7/1 → 7/9 pending, the only open +5d; also H4 HIGH-DQ n → 5); **H4 stays demoted** — HIGH 57.3% ≥ MEDIUM 48.7% ✓, near-miss HIGH 3/4 = 75% ✓, n-blocker 4. **git push `d4514fe`** (WS2 bundle on `origin/main`; a stray `Phase 3B Manifest/` duplicate folder + a non-canonical commit message went up with it — amend recommended, cosmetic). Session deliverables: `WS2\_H1\_Feature\_Spec.md`, `WS2\_Deploy\_Notes.md`, `Daily\_Workflow\_v4\_0\_Phase3B.docx`, `Phase3B\_Exit\_3C\_EDGAR\_Entry\_Criteria\_v1.docx` (G1–G6 exit / E1–E6 EDGAR entry / DP-1..5).
+* **7/8–7/9 (Phase 3-B Days 2–3, monitoring) — GLD near-miss resolves (HIT); T2 depth reaches the doorstep (n=87/88).** **7/8 (reconstructed from tracker):** 24 signals pasted, no near-miss BUYs, no data-integrity items; folded here for continuity. **7/9 cross-check 24/24** — log↔tracker operative reconcile clean; **D1 quiet — zero effective damping today** (vs 4 activations 7/7: the −10% PWR / −20% CBRS trails rolled out of the 5-day window as prices steadied — calmer tape); DQ **17 HIGH / 7 MED / 0 LOW**; all HOLD; **0 near-misses (no BUY at all) → registry stays 20**; totals **859 rows**, BUY 20, SELL 1. **Resolution — GLD 65% near-miss (7/1) → +5d +0.82% → HIT** ($375.10 → $378.18); the 7/1 cohort resolved 24/24 and the registry's last pending +5d is filled (registry unchanged at 20). **Monitor deltas:** **T2 DEPTH now n=87** (live 60-69 +5d-resolved; from 74 at 7/7 — the 6/30 +6 and 7/1 +7 cohorts), **one short of the 88 trigger → crosses on the next cohort (7/2 resolves 7/10)**; band accuracy 50-59 n=131 @ 54.2%, 60-69 n=87 @ 64.4%. **T2 LEAD (non-compressed) −13.6pt** (from −13.1 at 7/7; the 7/1 cohort favored 60-69 86% > 50-59 67%, 6/30 was compressed and excluded), **still above the −15pt trigger by 1.4pt**. **→ The T2 picture has sharpened: depth is effectively satisfied (crosses 88 tomorrow), so the non-compressed lead is now the SOLE remaining gate** — T2 fires iff that lead dips ≤ −15pt as depth crosses 88; it is hovering −13 to −14pt on small, volatile 60-69 n → **read the non-compressed lead every session now.** Scoreboard (cached, as of 7/1): cumulative all-cohort lead **−0.7pt** (from +0.5 at 6/29 — 6/30 \& 7/1 both favored 60-69), pairwise held **3 of 12**. **H4 watchdog:** GLD's hit takes HIGH-DQ near-miss to **n=5, 4/5 = 80%** (≥60% ✓), HIGH 57.6% ≥ MEDIUM 48.2% ✓ → **2 of 3 reopen conditions met, n-blocker now 5** (needs ≥10); stays demoted. **S1 / acceptance clock:** tracers still quiet (WMT 45→47→46, GM 52→54 — no material post-deploy episode) → **3 cohorts logged (7/7–7/9), all null for the acceptance instrument**; the ≤2-session lag read awaits a genuine move on WMT/GM. **Workflow note:** the tracker upload had an empty Return/Right **formula cache** (computed from Price columns instead) — open + save in Excel before the next weekly so `h1\_lag\_trace.py`'s +5d column is live.
+
+
+
+**Upcoming (Phase 3-B era; every date is a trading day unless noted):**
+
+* **7/10 (Phase 3-B Day 4, weekly review) — T2 DEPTH GATE CROSSED (n=93/88), on forecast; lead is now the sole gate and drifting away from it.** **Cross-check 24/24** — log↔tracker operative reconcile clean; **no effective damping** (calm tape continues); DQ **18 HIGH / 6 MED / 0 LOW**; **23 HOLD + 1 BUY (NVDA 63%, rejected <70)**; totals **883 rows**. **New near-miss — NVDA 63% (MEDIUM), the first since 7/7 → registry 20 → 21** (+5d resolves 7/17). **Resolution:** 7/2 cohort +5d resolved 24/24 — the cohort that carried depth over the line. **T2 (run via `t2\\\_check.py`, exact match to the 7/10 `regime\\\_stratification.md`):** **DEPTH n=93 ≥ 88 → MET (crossed today)**; **LEAD (non-compressed) −12.7pt** (from −13.6 at 7/9 — the 7/2 cohort narrowed it another \~0.9pt), **still 2.3pt above the −15pt trigger and drifting the wrong way for a fire**. Lead trail: −18.0 (6/26) → −13.1 (6/29) → −13.6 (7/9) → −12.7 (7/10). **→ T2 is now depth-satisfied; the non-compressed lead is the sole remaining gate, and it is moving OUT of trigger range, not into it** — T2 fires only if it dips ≤ −15pt. Daily read is now one command (`t2.bat`). **Weekly monitors (generated 7/10 15:09–10):** regime non-compressed −12.7pt (Phase 2 +5.8 vs Phase 3-A −12.7 = \~18.5pt within-regime swing — **Q1-R finding stands, only the tripwire eased**); **h1 WMT lag estimate now 4** (was 2, was 1 — the bounce confirms it is the noisy full-series corr-scan, **not** the acceptance instrument, §4b; WMT's trail went *positive* post-deploy, 7/9 +4.3% / 7/10 +2.6%, so still no adverse episode to test); **H4** HIGH-DQ near-miss 4/5 = 80%, HIGH 58.3% ≥ MED 48.7% ✓, n-blocker 5 (needs 10) — unchanged; **registry 21** (NVDA added; GLD 7/1 confirmed +0.8% HIT). **S1 / acceptance clock:** WMT 45→47→46→47, GM 52→52→54→55 — both drifting (GM ticking up on recovery), neither with a material adverse move → **4 cohorts logged (7/7–7/10), all null for the tracers**; still awaiting a genuine episode. **Tooling:** `t2\\\_check.py` + `t2.bat` pushed (`cb79987`) — the standing five-second T2 read; validated in-field against the regime MD today. **Notes hygiene:** file has runaway `\\\\\\\_` escaping on underscores (compounding on paste) — cleaner one-liner recorded; paste splices as plain text henceforth.
+* **T2 watch — now down to ONE number** — depth n=87 → 88 (crosses 7/10, effectively satisfied); **non-compressed lead −13.6pt is the sole remaining gate**, 1.4pt above the −15pt trigger, volatile on thin 60-69 n. **Read the non-compressed lead each session**; T2 fires only if it dips ≤ −15pt (both gates simultaneous) → then run the Phase-2-vs-live prompt + distribution diff (Tier-2E kit; era-stratifiable via A-S1D1). The **Q1-R finding (\~19pt Phase-2-vs-live swing) stands regardless** of the tripwire.
+* **WS2 acceptance clock** — 3 cohorts logged (7/7–7/9), **all null for the tracers** (no material move). Needs **≥ 4 informative post-deploy cohorts**: WMT (primary) / GM (secondary) each with a material trailing move + confidence response ≤ 2 sessions, read on the RAW channel (`h1\_lag\_trace … --raw-from-logs "logs\\signals\_\*.log" --suffix \_raw\_3B`).
+* **H4** — HIGH-DQ near-miss n=5 (GLD hit, 80%); reopen blocker is n ≥ 10. **Registry 20**, no pending +5d.
+* **Tracker hygiene** — open + save in Excel before the next weekly review (refresh the Return/Right formula cache for `h1\_lag\_trace`).
+* **WS1** — triple-blend design note (T3: no band-ordering reliance) — still open. **WS3** — commodity-context modules + CBRS Path-A switch — still open.
+* **3-B exit criteria** — `Phase3B\_Exit\_3C\_EDGAR\_Entry\_Criteria\_v1` (G1–G6 / E1–E6 / DP-1..5). Operating doc: `Daily\_Workflow\_v4\_0\_Phase3B`. Exit review earliest late-Jul / early-Aug.
+* **Q1-R stays parked** — **T1** (mandatory pre-execution) · **T2** (above) · **T3** (no band-ordering reliance). **Guardrail SUSPENDED** as a decision input (monitor-only). **KEEP 70%.**
+7/13 (Phase 3-B Day 5) — WS1 GO-LIVE (first blend cohort) AND T2 TRIPWIRE FIRED (Q1-R re-open triggered). Two milestones same day. WS1 deployed — era `A-S1D1-B1`: `confidence_blend` on all 24, cross-check 24/24 operative (base path byte-identical — shadow-parallel intact); blend adjusted exactly ONE signal (everything else HOLD, unchanged by design — confirms the small-footprint finding). NVDA BUY base 65 → blend_op 70: sector −0.079 (XLK slightly down, opposes) + regime +0.609 (risk-on, confirms) → adj +0.079 → 65×1.079 = 70. First live GATE-FLIP — base 65 rejected (<70), blend 70 would APPROVE; the risk-on regime lifted the near-miss BUY to the threshold. Whether right resolves +5d 7/20. G2 clock: 1 cohort logged, no resolved post-deploy rows yet → `blend_eval` produces reads ~7/20+. T2 TRIPWIRE FIRED (confirmed `t2_check.py`, exit 10): DEPTH n=100 ≥ 88 MET; LEAD (non-compressed) swung to −15.4pt (from −12.7 @ 7/10 → the 7/6 cohort resolved today favoring 60-69, crossing the −15 trigger), 0.4pt past. Lead trail: −18.0 (6/26) → −13.1 (6/29) → −13.6 (7/9) → −12.7 (7/10) → −15.4 (7/13, FIRE). Both gates met simultaneously for the first time. Pre-registered action: run the Tier-2E Phase-2-vs-live prompt + distribution diff (the Q1-R diagnostic; era-stratifiable via A / A-S1D1 / A-S1D1-B1 stamps). Honesty note: the lead is marginal (0.4pt past, volatile −12.7↔−15.4) — the trigger is genuinely met per the pre-registered rule, so run the diff rather than move the goalposts; but expect possible oscillation. T1 unchanged (advisory-only) — this triggers a DIAGNOSTIC, not an execution change. Cross-check: 24/24; no effective damping (calm tape); DQ 19 HIGH / 5 MED / 0 LOW; 23 HOLD + 1 BUY; 7/6 cohort +5d resolved 24/24; totals 907 rows. NVDA 65% (HIGH) = new near-miss → registry 21 → 22; H4 HIGH-DQ near-miss → 6 (pending 7/20), still short of the n ≥ 10 blocker. Band accuracy (live): 50-59 56.9% (n130) vs 60-69 72.3% (n83).
+
+--7/14 (Phase 3-B Day 6) — the 7/7 cohort (first full S1+D1) resolves 24/24 at 62.5%; Q4-R's volatility artifact shows up live; NVDA repeat near-miss. Cross-check 24/24 — log↔tracker operative reconcile clean; era `A-S1D1-B1`, blend fields on all 24; no effective damping (third calm session); DQ 17 HIGH / 7 MED / 0 LOW; 23 HOLD + 1 BUY (NVDA 65, rejected <70); totals 931 rows. NVDA 65% (HIGH) new near-miss — third in five sessions (7/10 @63 MED, 7/13 @65 HIGH, 7/14 @65 HIGH) → registry 22 → 23; all three +5d pending (7/17, 7/20, 7/21). RESOLUTION — 7/7 cohort (the first full S1+D1 cohort) resolved 24/24, accuracy 15/24 = 62.5%; its 60-69 band n=8 came in 4/8 = 50%. The four D1-damped names resolved: PWR HOLD op47 → +2.20% RIGHT; AIQ HOLD op47 → +0.29% RIGHT; SND HOLD op40 → +7.66% WRONG; CBRS HOLD op35 → +15.97% WRONG. Both "wrong" ones are precisely the Q4-R volatility artifact — CBRS median |+5d move| 10.42%, SND 5.09%, so a fixed ±3% HOLD band is near-impossible for them to satisfy; yesterday's scoping predicted this pattern and it appeared unprompted the next session. (D1's direction was defensible on both — it cut conviction on signals that proved wrong — but at n=4 that is an observation, not evidence; the acceptance instrument remains the WMT/GM tracer.) Q1-R robustness check: live 60-69 = 64.8% (n=108) vs 50-59 55.3% (n=159) — the diagnosis holds. The 7/7 cohort's 50% is within normal cohort variance (60-69 by cohort has ranged 27.3%–87.5% across the live era), not a trend — logged as a watch item only. Blend, day 2 — a same-signal / different-verdict pair: NVDA repeated BUY 65 but blended 65 → 66 today vs 65 → 70 yesterday — the sector score deteriorated sharply (−0.079 → −0.44, XLK selling off) while regime softened (+0.609 → +0.514), so the overlays nearly cancelled → no gate-flip today. Context-sensitivity working as designed, and a fair caution that 7/13's gate-flip was marginal; the two resolve 7/20 and 7/21 → a natural paired comparison for `blend_eval`. H4: HIGH-DQ near-miss 4/5 resolved = 80%, total 7 (2 pending); HIGH 59.1% ≥ MEDIUM 42.7% ✓; n-blocker (≥10) unchanged → stays demoted. DQ live: HIGH 59.1% vs MEDIUM 42.7% — stable, and per Q4-R no action (volatility composition, not miscalibration). WS2 acceptance clock: WMT 45→45→47→46→47→47→47, GM 52→52→52→54→55→55→55 — 6 post-deploy cohorts (7/7–7/14), all null for the tracers; still awaiting a material episode. Flag: tracker arrived named `claude-equity-bot-tracker.xlsx` (hyphens) rather than `tracker_with_registry.xlsx` — identical schema, but if it has been renamed on disk, `t2.bat` / `seed_signal_state.py` / the weekly harnesses all reference the old name and would not find it.
+---
+7/15 (Phase 3-B Day 7) — 7/8 cohort resolves 24/24 at 66.7%; the 60-69 dip diagnosed as normal variance + a rally artifact; NVDA's fourth consecutive near-miss. Cross-check 24/24 — log↔tracker operative reconcile clean; era `A-S1D1-B1`, blend fields on all 24; no effective damping (fourth straight calm session); DQ 14 HIGH / 10 MED / 0 LOW; 23 HOLD + 1 BUY (NVDA 64, rejected <70); totals 955 rows. NVDA 64% (HIGH) — fourth consecutive near-miss (7/10 @63 MED, 7/13 @65 HIGH, 7/14 @65 HIGH, 7/15 @64 HIGH) → registry 23 → 24; all four +5d pending (7/17, 7/20, 7/21, 7/22). RESOLUTION — 7/8 cohort resolved 24/24, accuracy 16/24 = 66.7%; its 60-69 band came in 3/8 = 37.5% — the second consecutive sub-50% 60-69 cohort (7/7: 50.0%, 7/8: 37.5%), i.e. yesterday's watch item. Diagnosed as NON-EVENT on two independent checks: (a) historically unremarkable — three prior runs of ≥2 consecutive ≤50% cohorts exist in the live era, every one length-2 followed by recovery; the band's cohort range is 27%–88%, so this is the 4th such run, inside normal variance; (b) it coincides with a rally — the 7/7 cohort saw 17/24 tickers up at +5d (mean +2.18%), 7/8 saw 15/24 up (mean +1.32%); rising markets push HOLDs through the +3% band (the Q4-R artifact, market-wide rather than instrument-specific). The 7/8 cohort's four biggest movers were all "wrong" HOLDs: NVDA +7.81%, AG +6.08%, AAPL +5.94%, JPM +3.93% (JPM's median move is 1.04% — a genuine outlier for that name). Q1-R HOLDS: live 60-69 = 62.9% (n=116) vs 50-59 56.3% (n=167) — lead narrowed (64.8 → 62.9) but the ordering is intact; no action (T2 retired; the diagnosis does not hinge on the current margin). DQ-mix check (second watch item) — also a non-event: today's 42% MEDIUM looked elevated against the recent 21–29% run, but the series oscillates (7/6 was 46%, 7/2 38%) → noise, not drift. Noted because Q1-R attributed part of the go-live gain to the DQ-mix flip; a genuine MEDIUM uptrend would partly unwind that composition effect. It isn't happening. Blend, day 3 — the NVDA series is becoming a well-controlled natural experiment: same name, same call, three different verdicts driven purely by sector/regime context — 7/13 base 65 → blend 70 (GATE-FLIP; sec −0.079 / reg +0.609); 7/14 base 65 → blend 66 (no flip; sec −0.44 / reg +0.514); 7/15 base 64 → blend 67 (no flip; sec −0.311 / reg +0.673) — the blend tracking XLK's swings. They resolve back-to-back (7/17, 7/20, 7/21, 7/22) → an overlay-predictive-value read arriving earlier than the ≥5-cohort G2 window. H4: HIGH-DQ near-miss 4/5 resolved = 80%, total 8 (3 pending); HIGH 59.6% ≥ MEDIUM 43.9% ✓; blocker (n≥10 resolved) unchanged → stays demoted. WS2 acceptance clock: WMT 45→47→46→47→47→47→47 (flat), GM 52→52→54→55→55→55→55 (flat) — 7 post-deploy cohorts (7/7–7/15), all null for the tracers; still awaiting a material episode. Watchlist question raised (no change made): replacing CBRS with JEPI was considered — CBRS is NOT in `main.py` (scout list is only SPY/QQQ/VTI/NVDA/GLD; the watchlist is `sorted(all_held) + WATCHLIST_SCOUT`, so CBRS is signaled because it is HELD in Schwab). Two independent decisions: selling CBRS is a portfolio action, adding JEPI is a `WATCHLIST_SCOUT` edit. Research finding: removing CBRS alone would raise live accuracy 53.9% → 55.7% (+1.8pt) with zero model change (and narrow the HIGH−MED gap +16.4 → +13.4pt; CBRS is 13 of its 15 signals at MEDIUM, median |+5d move| 10.42%, accuracy 13.3%); swapping it for a structurally low-vol covered-call ETF (JEPI's proxies: SCHD 1.00% median move / 93.3% acc; XLU 0.80% / 100%) would inflate every accuracy number further — a deliberate re-run of the exact composition confound Q1-R spent a session untangling. Ruling: no mid-window population change — if JEPI is wanted, land it at the 3-B exit / 3-C entry boundary where a population change is expected, documented and era-stratifiable. A portfolio decision on CBRS remains Rob's alone and must not be driven by data-collection convenience; if it happens, record the date as a population-change boundary and treat pre/post accuracy as non-comparable (same handling as the go-live cutover).
+---
+* **7/16 (Phase 3-B Day 8) — both watch items CLOSED as non-events (60-69 bounced to 87.5% on cue); GLD's near-miss reverses at +10d (KEEP-70% reinforced); NVDA's fifth consecutive near-miss with visible conviction decay.** **Cross-check 24/24** — log↔tracker operative reconcile clean; era `A-S1D1-B1`, blend fields on all 24; DQ **16 HIGH / 8 MED / 0 LOW**; **23 HOLD + 1 BUY (NVDA 62, rejected <70)**; totals **979 rows**. **D1 fired after four quiet sessions** — AG 45→44 (trail −5.93%, damp 1), AIQ 44→43 (trail −5.94%, damp 1); arithmetic verified; small damps, calm tape continuing. **WATCH ITEM 1 — 60-69 cohort accuracy: CLOSED, non-event.** The 7/9 cohort's 60-69 band came in **7/8 = 87.5%**, ending the two-cohort sub-50% run (7/7: 50.0%, 7/8: 37.5%) at exactly length two — **the 4th such run in the live era, and the 4th to recover immediately**, precisely as the 7/15 historical check predicted. Live **60-69 = 64.5% (n=124)** vs 50-59 **55.1% (n=176)** → **Q1-R's ordering intact and the lead widened back out** (62.9 → 64.5). **WATCH ITEM 2 — DQ mix: CLOSED, non-event.** Pulled back to **33% MEDIUM** (from 42% on 7/15), continuing to oscillate inside its 21–46% range → confirmed noise, not drift; Q1-R's composition driver is not unwinding. Both items come off the watch list absent something genuinely new. **RESOLUTION — 7/9 cohort resolved 24/24, accuracy 14/24 = 58.3%** (16/24 tickers up at +5d — another mildly rising tape). **RESOLUTION — GLD 7/1 near-miss (65%) at +10d: −2.70% → WRONG** (it was RIGHT at +5d with +0.82%) — a horizon flip, consistent with the standing 3-A finding that near-miss BUYs failed both forward horizons live → **further support for the KEEP-70% gate** (the registry asks "should these rejected BUYs have been taken?"; GLD's +10d answer is no). **NVDA 62% (MEDIUM) — fifth consecutive near-miss (7/10 @63 MED, 7/13 @65 HIGH, 7/14 @65 HIGH, 7/15 @64 HIGH, 7/16 @62 MED) → registry 24 → 25**; all five +5d pending, resolving consecutively 7/17, 7/20, 7/21, 7/22, 7/23. **The series is now decaying on two axes at once:** base conviction grinding down **65 → 65 → 64 → 62** and self-assessed **DQ slipping HIGH → MEDIUM**, while the model keeps calling BUY into a weakening sector (XLK sec −0.444) that a strengthening risk-on regime (reg +0.747) partly offsets. Blend trajectory: 7/13 **65 → 70 (GATE-FLIP)**, 7/14 65 → 66, 7/15 64 → 67, 7/16 62 → 65 (no flips after the first). Whether the conviction decay reflects the S1 state loop (the model reading its own softening chain) or plain price action is **not separable from one series** — but it is exactly the behavior S1 was built to surface; **observation only, no verdict.** **H4:** unchanged — HIGH-DQ near-miss **4/5 resolved = 80%**, total 8 (3 pending); HIGH 60.3% ≥ MEDIUM 43.1% ✓; blocker (n≥10 resolved) still the gate → stays demoted. **WS2 acceptance clock:** WMT trail +0.25% (conf 47 flat), GM trail −0.66% (conf 54) — **8 post-deploy cohorts (7/7–7/16), all null for the tracers**; still awaiting a material episode.
+--
+7/17 (Phase 3-B Day 9) — NVDA's first near-miss resolves WRONG (gate correct); the near-miss aggregate now strongly supports KEEP-70%; the blend records its FIRST DISCOUNT. Cross-check 24/24 — log↔tracker operative reconcile clean; era `A-S1D1-B1`, blend fields on all 24; no effective damping; DQ 17 HIGH / 7 MED / 0 LOW; 23 HOLD + 1 BUY (NVDA 62, rejected <70); totals 1,003 rows. NVDA 62% (HIGH) — sixth consecutive near-miss → registry 25 → 26; five still pending (7/13, 7/14, 7/15, 7/16, 7/17), resolving 7/20–7/24. RESOLUTION — NVDA 7/10 near-miss (63%, MEDIUM) +5d = −3.09% → WRONG; the 70% gate was correct (the rejected BUY would have lost). NVDA's full registry history reframes the series: 20 entries back to 5/19; of the 15 resolved, only 5 would have paid = 33.3%. The model has wanted to buy NVDA at 62–68% for two months and the gate has been right to refuse ~2 of 3 times. Aggregate — ALL resolved near-miss BUYs: 10/21 = 47.6% → fewer than half of rejected BUYs would have been profitable: live evidence reinforcing KEEP-70%, now alongside GLD's +10d reversal (7/16). RESOLUTION — 7/10 cohort resolved 24/24, accuracy 14/24 = 58.3%; 60-69 band 4/7 = 57.1%; only 10/24 tickers up at +5d — the tape turned down (vs 15–17/24 up in the prior three cohorts). BLEND — first DISCOUNT recorded: NVDA base 62 → blend 58 (sector collapsed to −0.847, XLK selling off hard; regime softened to +0.465 → overlays net-negative for the first time). Series to date: 7/13 65→70 (GATE-FLIP, confirm), 7/14 65→66 (confirm), 7/15 64→67 (confirm), 7/16 62→65 (confirm), 7/17 62→58 (DISCOUNT). Mechanically important: `blend_eval`'s primary read compares CONFIRMED vs DISCOUNTED signals, and until today the discount arm was empty — the test could not run at all. It now has both arms (4 confirm / 1 discount), all on the same ticker and same call → unusually well-controlled, though n is tiny. Q1-R holds: live 60-69 = 64.1% (n=131) vs 50-59 55.7% (n=185). H4: HIGH-DQ near-miss 4/5 resolved = 80%, total now 9 (4 pending: 7/13, 7/14, 7/15, 7/17 — 7/16 was MEDIUM); HIGH 60.7% ≥ MEDIUM 42.6% ✓. H4's reopen blocker is now close — those four resolve 7/20–7/24 taking resolved 5 → 9; blocker is n ≥ 10, so one further HIGH-DQ near-miss (likely on NVDA's cadence) would trip it. If the 80% hit rate survives to n=10, H4 reopens as a live question (are HIGH-DQ near-misses worth taking?) — be ready, and note the contrast: HIGH-DQ near-miss 80% (n=5) vs ALL near-miss 47.6% (n=21), i.e. MEDIUM-DQ near-misses ≈ 6/16 = 37.5%. WS2 acceptance clock: WMT pinned at conf 47 for nine straight sessions (trail +0.72%), GM 55→54 (trail +0.47%) — 9 post-deploy cohorts (7/7–7/17), all null for the tracers; still no material episode.
+--
+7/20 (Phase 3-B Day 10) — the GATE-FLIP VERDICT: the blend LOST (base was right); first `blend_eval` read is directionally against the blend but n=1; NVDA seventh near-miss + second discount. Cross-check 24/24 — log↔tracker operative reconcile clean; era `A-S1D1-B1`; D1 fired: AG 40→37 (trail −6.82%, damp 3); DQ 19 HIGH / 5 MED / 0 LOW; 23 HOLD + 1 BUY (NVDA 61, rejected <70); totals 1,027 rows. NVDA 61% (HIGH) — seventh consecutive near-miss → registry 26 → 27; five pending (7/14, 7/15, 7/16, 7/17, 7/20). RESOLUTION — 7/13 cohort (first WS1 blend cohort) resolved 24/24, accuracy 17/24 = 70.8% (strong cohort). ★ GATE-FLIP VERDICT — NVDA 7/13: base 65 (REJECT, <70) vs blend 70 (APPROVE). +5d = −2.05% → the APPROVE (blend) was WRONG, the REJECT (base) was RIGHT → BLEND LOST. The one gate-changing decision the blend has made in its entire live history was a bad call — the risk-on regime that drove the 65→70 lift pushed conviction the wrong way on a name that fell. `blend_eval --since 2026-07-13` (6 cohorts, 24 resolved, 6 adjusted = 4 lift / 2 cut): overlays-CONFIRMED n=1 acc 0.0% (−2.05%); overlays-DISCOUNTED 0 resolved yet; gate-flip net −1 (blend worse). Read, honestly threefold: (1) directionally early evidence is AGAINST the blend; (2) it is NOWHERE near a G2 verdict — one resolved flip on one ticker, vs the bar of confirm>discount across folds AND gate-flip net ≥ 0 over ≥5 cohorts; (3) the single-name caveat now bites — the entire blend footprint is NVDA, so even when all six resolve it is a one-ticker result (the caveat logged 7/17; today is why it mattered). Quiet irony worth tracking: the overlays leaned risk-on all week and kept trying to LIFT NVDA while the base model's conviction was DECAYING (65→61) and the near-misses kept resolving wrong — so far the base's skepticism has beaten the blend's context. Early, but that is the direction. TRACKER — EMPTY FORMULA CACHE (verified; supersedes an in-session mis-diagnosis): the Return +5d/+10d and Right?(5d) columns are entirely formulas (`=IF(H="","",(H-G)/G)`) whose stored values are absent because the workbook has not been recalculated in Excel since the last paste — `openpyxl(data_only=True)` therefore reads `None` for every one of them. This is an EMPTY cache, not a stale or corrupted one; the file is not damaged and contains no bad values (a full column scan found 0 absurd cached figures). Correction for the record: a `193%` band figure appeared mid-session and was initially attributed to a corrupted tracker cell — it was in fact a divide bug in an ad-hoc diagnostic print on this end, not data from the tracker; the tracker was never at fault. The operational consequence is real and now verified by code inspection: `h1_lag_trace.py` reads `r5` (col 11), `r10` (col 12) and `right5` (col 14) directly (it pulls Price only for display), so on an unrecalculated workbook its correlations, +10d arc and calibration guardrail run on blanks. Fix before each weekly: open the tracker in Excel → F9 → save. Everything in this entry is price-computed and unaffected. H4 — total reached n=10 but RESOLVED only 6, and the hit rate DROPPED to 4/6 = 67% (from 80%) as NVDA 7/13 + another resolved wrong; the reopen bar is n ≥ 10 resolved at ≥ 60% — so the reopen question is getting WEAKER, not stronger; four more HIGH-DQ near-misses resolve this week and will settle it (if they keep resolving like NVDA's, H4 stays demoted on merit). KEEP-70% reinforced again: all resolved near-miss BUYs 10/22 = 45.5%. Q1-R holds (band figures this session were price-computed and clean; nothing in the data suggests a change). BLEND — second DISCOUNT: NVDA 61 → 57 (sector −0.814, XLK still weak). WS2 acceptance clock: WMT pinned at conf 47 for TEN straight sessions (trail −0.08%), GM 54 (trail −0.75%) — 10 post-deploy cohorts (7/7–7/20), all null for the tracers; still no material episode.
+---
+7/21 (Phase 3-B Day 11) — H4's hit rate falls BELOW its reopen bar (now failing on merit, not sample); NVDA 7/14 resolves wrong with blend and base AGREEING; tracers move but not materially. Cross-check 24/24 — log↔tracker operative reconcile clean; era `A-S1D1-B1`; no effective damping; DQ 18 HIGH / 6 MED / 0 LOW; 23 HOLD + 1 BUY (NVDA 61, rejected <70); totals 1,051 rows. NVDA 61% (HIGH) — eighth consecutive near-miss → registry 27 → 28; five pending (7/15, 7/16, 7/17, 7/20, 7/21). RESOLUTION — 7/14 cohort resolved 24/24, accuracy 16/24 = 66.7% (12/24 up — flat tape). RESOLUTION — NVDA 7/14 near-miss (65%, HIGH) +5d = −0.43% → WRONG; the gate was right again. Notable for WS1: the blend did not flip this one (blend 66, below the 70 gate), so blend and base AGREED and both were correctly cautious — the first case where the overlays' judgment aligned with the correct outcome. ★ H4 — the reopen question is now FAILING ON MERIT, not just sample size. HIGH-DQ near-miss hit rate 4/7 = 57%, which is below the ≥60% reopen bar; trajectory 80% → 67% → 57% as the NVDA cases resolve wrong. Criteria status: n ≥ 10 resolved → 7 (short); hit ≥ 60% → 57% (now FAILING); HIGH ≥ MEDIUM overall → 61.9% vs 43.9% ✓. A week ago H4 looked one signal from reopening; it is now failing the quality bar itself. If this holds, H4 stays demoted because the evidence says so — a cleaner outcome than tripping on a technicality. KEEP-70% strengthening again: all resolved near-miss BUYs 10/23 = 43.5% (from 45.5%) — under half of rejected BUYs would have paid. Q1-R holds: live 60-69 = 64.3% (n=143) vs 50-59 57.1% (n=203). DQ live: HIGH 61.9% vs MEDIUM 43.9% — stable; no action per Q4-R. BLEND: NVDA 61 → 62 (sector −0.232, regime softened to +0.288 — the weakest risk-on reading of the series); no flip. WS2 acceptance clock — tracers MOVED but it is NOT an episode: GM 54 → 58 (+4, the largest post-deploy single-session move) and WMT 47 → 45, ending WMT's ten-session pin. But GM's trail was +0.63% — confidence rose on a SMALL POSITIVE move, whereas the acceptance test requires a material ADVERSE trailing move with a ≤ 2-session confidence response. This does not qualify. 11 post-deploy cohorts (7/7–7/21), still all null for the acceptance instrument.
+---
+7/22 (Phase 3-B Day 12) — regime flips RISK-OFF for the first time (both BUYs discounted); first double near-miss session; NVDA's first winning resolution reverses H4 back above its bar; WMT closes to 0.6pt of the first acceptance episode. Cross-check 24/24 — `signals_2026-07-22.log` ↔ `tracker_with_registry.xlsx` operative reconcile clean; era `A-S1D1-B1`; D1 fired: NKE 38→36 (trail −6.34%, damp 2); DQ 16 HIGH / 8 MED / 0 LOW; 22 HOLD + 2 BUY; totals 1,075 rows. ★ REGIME FLIPPED RISK-OFF — `regime_score −0.205`, the first negative reading after eleven consecutive positives (+0.288 to +0.747). Immediate blend consequence: both BUYs were DISCOUNTED — NVDA 62 → 59 (sector −0.154), GLD 62 → 60 (sector 0.0, so the cut is regime-only) — discounts #3 and #4, and the first driven by the cross-asset leg rather than sector. DOUBLE NEAR-MISS (first of the run): NVDA 62% (MEDIUM) + GLD 62% (HIGH) → registry 28 → 30. GLD's first near-miss since 7/1 (which resolved +0.82% at +5d then reversed to −2.70% at +10d). RESOLUTION — 7/15 cohort resolved 24/24, accuracy 16/24 = 66.7% (15/24 up). RESOLUTION — NVDA 7/15 near-miss (64%, HIGH; blend 67, no flip) +5d = +1.13% → RIGHT — the first of the eight-deep NVDA near-miss series to pay. H4 REVERSED back above its bar: HIGH-DQ near-miss hit rate 57% → 62% (5/8) on that resolution; criteria now n ≥ 10 resolved → 8 (short), hit ≥ 60% → 62% (PASSING), HIGH ≥ MEDIUM ✓. Correction to the 7/21 entry: yesterday's "failing on merit" read was one resolution deep and did not hold — H4 is again short on sample only. Record the reversal rather than the stronger claim. KEEP-70% still supported: all resolved near-miss BUYs 11/24 = 45.8% (from 43.5% — the NVDA hit lifted it, still under half). Q1-R holds: live 60-69 = 65.1% (n=149) vs 50-59 57.7% (n=208). ★ WS2 — WMT is 0.6pt from the first post-deploy episode. Trailing 5-session move −4.40% (`tracker_with_registry.xlsx`) / −4.91% (log H1 tag) against the pre-registered THETA = 5.0%, so it does NOT formally qualify and the clock still reads 0 post-deploy episodes in 12 sessions. But the response behaviour is already visible: WMT confidence 47 → 45 → 42 over three sessions. GM is the mirror image — trailing +6.25%, confidence 54 → 58 → 63. This is the closest the tracers have come since deploy; a modest further WMT slide would produce G1's first genuine test case. `monitor_strip.py` reads: WS1/G2 gate-flip net −1, confirm 33% (n=3) vs discount 0 resolved; WS2/G1 both tracers NO TEST CASES YET; H4 62% (5/8); KEEP-70 45.8%. Tooling committed this session (`t2_check.py`, `t2.bat`, `blend_eval.py`, `monitor_strip.py`, `monitor.bat`, `guardrail_trace.py --weekly`): all now default to `logs\claude_equity_bot_tracker.xlsx` (the master) rather than `tracker_with_registry.xlsx` (the generated report copy) — reading the copy had understated the T2 depth count (100 vs 149). Also fixed an inverted verdict label in `t2_check.py` that printed "depth gate open" while depth was MET. T2 status: depth 149/88 MET, lead −8.7pt vs the −15 trigger and moving away (−15.4 → −12.7 → −8.7) — consistent with Q1-R's finding.
+---
+7/23 (Phase 3-B Day 13) — ★ THE FIRST WS2/G1 EPISODE LANDED, and the response was LAG-0 on the RAW channel with D1 contributing nothing. Detector bug found and fixed in the same session. Cross-check 24/24 — `signals_2026-07-23.log` ↔ `tracker_with_registry.xlsx` operative reconcile clean; era `A-S1D1-B1`; no effective damping anywhere; DQ 19 HIGH / 5 MED / 0 LOW; 23 HOLD + 1 BUY (NVDA 62, MEDIUM, rejected <70); totals 1,099 rows. ★ WS2 / G1 — FIRST POST-DEPLOY EPISODE (13 sessions after deploy). WMT trailing 5-session move −5.24% (log H1 tag, Schwab daily closes) / −5.19% (`tracker_with_registry.xlsx`, Price-at-Signal) — both past the pre-registered THETA = 5.0%, so it qualifies on either series. `monitor_strip.py` now reads "1 post-deploy episode … readable", ending twelve consecutive null sessions. THE RESPONSE — lag 0, −9 points, entirely MODEL-SIDE: WMT confidence 47 → 47 → 47 → 45 → 42 → 38 across 7/16–7/23, i.e. it came down with the slide rather than after it. Critically, `damp=0` on every one of those sessions (the trail only crossed THETA on the final session, and then by 0.24pt, which rounds to zero damping) — so the entire decline is `confidence_raw`, the model's own channel, not D1. That is exactly what G1 measures and exactly what S1 (the prior-signal state input) was built to produce. Contrast the certified Phase 2 baseline behaviour: WMT held 62% through a −11% May slide, catching up only after 3–5 sessions. DISCIPLINE — this is n = 1. The criterion is a table read sustained over ≥ 4 consecutive post-deploy cohorts; this is the first. It is also a smaller slide (−5.2% vs −11%), so it is not a like-for-like comparison with the Phase 2 exhibit, and with a single episode there is no way to separate S1's contribution from ordinary model behaviour. Encouraging, not a verdict. GM remains at 0 post-deploy episodes (trailing +4.72%, confidence rising 54 → 58 → 63 → 62 — the mirror case). ★ DETECTOR BUG FOUND AND FIXED (`monitor_strip.py`). The tool first reported the episode as "0 served ≤2", which was wrong. The `served` test compared confidence at the episode session against confidence in the following two sessions, looking for a further decline — so a same-session (lag-0) response, the strongest possible outcome, scored as "not served." Corrected: the baseline is now the confidence at the start of the trailing window (i−5, pre-slide), and the tool reports the actual response lag and drop magnitude. It now reads `2026-07-23 lag 0 (47→38, −9pt)`. This is the second bug found in `monitor_strip.py` since it was written (the first was the pre/post-deploy episode split on 7/22); the WS2 rows should be treated as provisional until a few more episodes exercise the logic. ★ FORMAL RAW-CHANNEL ACCEPTANCE READ RUN (first one with an episode in it). `python h1_lag_trace.py --since 2026-07-07 --ticker WMT --raw-from-logs "logs\signals_*.log" --suffix _raw_3B --tracker logs\claude_equity_bot_tracker.xlsx` → `h1_lag_trace_WMT_raw_3B.md`. Provenance confirmed: 13 of 13 rows use log RAW confidence (the archived `signals_2026-07-07_run1_coldstart.log` correctly skipped). TABLE READ (the criterion, per §4b): 7/17 trail +1.52% conf 47 · 7/20 −0.90% conf 47 · 7/21 −3.85% conf 45 · 7/22 −4.40% conf 42 · 7/23 −5.19% conf 38 — the response is CONTEMPORANEOUS, and it began at −3.85%, i.e. BEFORE the trail crossed THETA (5.0%). The model's own sensitivity is therefore finer-grained than D1's trigger; S1 is doing the work, D1 never engaged. PRE-REGISTERED SUCCESS METRIC — the number that matters: corr(conf, trailing move) is +0.842 post-deploy RAW vs −0.098 on the full series (old generator). Phase 2 WMT held confidence against the move (the H1 pathology in one figure); the post-deploy raw channel tracks it strongly. DISREGARD the scan's "Estimated update lag = 2 sessions." L=0 +0.842, L=1 +0.937, L=2 +0.958, L=3 +0.800 — L0/L1/L2 are flat within noise, and the "peak" beats L=1 by 0.021 on roughly six pairs. §4b pre-registered exactly this: the scan is confirmatory only at n ≈ 8–10 and a scan pass alone is not success. The table says prompt; the scan cannot discriminate lag 0 from 2 on this sample. Caveat: one clean directional slide, ~8 usable rows, favourable conditions — episodes 2–4 are what convert this into a G1 verdict. TOOLING — stale retired-criterion banner found and patched (`h1_lag_trace.py`). Its output still printed `CALIBRATION GUARDRAIL — (50-59% must lead)` and a `[PASS] 50-59% band leads` verdict — a retired criterion asserted as a live pass/fail, the same class of drift as the weekly runner's T2 banner fixed 7/22, and a T3 hazard. Patched on all three surfaces (console header, verdict line, success-metric bullet, and the `.md` writer) to read "RETIRED (Q1-R closed 2026-07-13) — historical context only; T3: no band-ordering reliance", with a note that the block's rates use the run's `--since` slice and will therefore differ from the live 6/15+ figures in these notes (47.1%/39.6% vs 57.0%/65.8%). RESOLUTION — 7/16 cohort resolved 24/24, accuracy 13/24 = 54.2% — the weakest cohort of the month (15/24 up; a rising tape marking HOLDs wrong, the familiar ±3%-band artifact). RESOLUTION — NVDA 7/16 near-miss (62%, MEDIUM; blend 65, no flip) +5d = +1.39% → RIGHT — the second consecutive NVDA near-miss to pay (after 7/15's +1.13%). KEEP-70% — now a WATCH ITEM. All resolved near-miss BUYs 12/25 = 48.0%, up from 43.5% (7/21) → 45.8% (7/22) → 48.0%. Still under the 50% line that supports the gate, but two consecutive NVDA wins have moved it three sessions running. If it crosses 50%, the live evidence for KEEP-70 weakens and the threshold question deserves re-examination — flag it, do not act on it yet. NVDA 62% (MEDIUM) — ninth near-miss → registry 30 → 31; six pending (7/17, 7/20, 7/21, 7/22 NVDA + GLD, 7/23). BLEND: NVDA 62 → 58 discounted again (sector −0.356, regime −0.029 — nearly flat after yesterday's −0.205, so the cut is sector-driven today). Fifth discount; still none resolved — the discount arm populates 7/24. WS1 confirm arm now 50% (n=4). Q1-R holds: live 60-69 = 65.8% (n=155) vs 50-59 57.0% (n=214). DQ live: HIGH 62.3% (n=361) vs MEDIUM 44.6% (n=166) — stable; no action per Q4-R.
+---
+7/24 (Phase 3-B Day 14) — ★ RECONSTRUCTED 2026-08-04 FROM `logs\signals_2026-07-24.log` AND THE MASTER, CLOSING THE RECORD GAP FLAGGED IN THE 7/30 ENTRY. The notes ran 7/23 (Day 13) directly to 7/27 (Day 15) with no Day 14 entry anywhere in the file, while the master carried a complete 24-row 7/24 cohort — and 7/24 is the very date the WS2 coalescing correction turns on, so the gap sat exactly where G1's evidence is thinnest. THIS ENTRY IS WRITTEN AFTER THE FACT AND IS DATED AS SUCH; it is a reconstruction from primary artifacts, not a contemporaneous session record, and it carries no observations that were not recoverable from the log or the master. RETROSPECTIVE CROSS-CHECK 24/24 CLEAN `[V]` — `signals_2026-07-24.log` ↔ `logs\claude_equity_bot_tracker.xlsx` reconcile on signal, confidence, data quality and price at full precision across all 24 rows, run on 2026-08-04. G4's cross-check streak requirement is therefore satisfied for 7/24 retrospectively, and the entry records that the check was NOT run contemporaneously. COHORT: era `A-S1D1-B1`; 23 HOLD + 1 BUY; DQ 20 HIGH / 4 MEDIUM / 0 LOW; `regime_score` uniform at +0.185 across all 24 names as designed; confidence mean 52.2, median 51.0, sd(pop) 11.57, range 32–72; totals through this session 1,123 rows, 47 cohorts. RISK ENGINE: 23 APPROVED (all HOLDs through CHECK 2) and 1 REJECTED — NVDA BUY at 63%, `BUY confidence too low: 63% < required 70%`, the tenth consecutive NVDA near-miss. NO DAMPING ANYWHERE — zero rows carry a non-zero `damp`, so operative ≡ raw across the whole cohort. NO BLEND ADJUSTMENT ANYWHERE — `base == blend` on all 24 rows, so WS1 contributed nothing this session. ★★ THE WS2 DATUM THAT MATTERS, AND WHY THIS DATE BECAME CONTENTIOUS: WMT read trail5d −2.75% with confidence 38 and a prior chain of 47,47,45,42,38 (dconf −9). The trailing move had RECOVERED above −THETA from the previous session's −5.62%, so 7/24 is NOT an independent episode — it is the tail of the single 7/23 slide, which is precisely what the 2026-07-27 coalescing correction established when post-deploy WMT episodes went 2 → 1. GM was the mirror image at trail5d +10.34%, confidence 65, chain 54,54,58,63,62 (dconf +8) — a large FAVOURABLE move, which under the pre-registered adverse-only definition (DP-8, ruled 7/29) is not an episode and is not counted. ★ THE COHORT RESOLVED 7/31 AT 14/24 = 58.3% — mean +5d −0.41%, dispersion (sd, population) 6.00%, 10 HOLD band-breaches split 3 UP / 7 DOWN; biggest movers MSFT +20.6%, SND −11.0%, AG −10.2%, AAPL −6.9%, FTI −6.6%. Consistent with the identity recorded 7/30: accuracy is the band-breach count, and a moderate breach count on elevated dispersion produces a middling cohort regardless of signal quality. ★ RECORDED AS A PROCESS FINDING: a session can be fully evidenced in the primary artifacts and still be absent from the record, and the absence is invisible to every tool — `retired_criteria_audit.py` scans source files, the cross-check reads the master, and neither knows that a date exists in one and not the other. The gap was found only because the 7/30 entry compared the notes against the master by hand. A cohort-versus-entry reconciliation belongs in the exit checklist. ★ SELF-CORRECTION, SAME SESSION: this entry and the two tool patches made alongside it were first stamped 2026-08-05 and are corrected to 2026-08-04. The cause is the SAME defect already carried on the open list — a UTC clock read at 22:04 CDT returns tomorrow's date — reproduced by hand in dated provenance rather than by code. Recorded because a retrospective cross-check dated to a session that had not yet happened would be unresolvable later, and because the defect class is now demonstrated to reach manual work as well as `datetime.now(timezone.utc)`.
+---
+7/27 (Phase 3-B Day 15) — ★ CROSS-CHECK 24/24 CLEAN; H4 CROSSED ITS REOPENING BAR BY THE THINNEST POSSIBLE MARGIN; AND THE FIRST LIVE RUN OF THE NEW TOOLING EXPOSED THREE DEFECTS, ONE OF WHICH CHANGES A GATE READ. Cross-check 24/24 — `signals_2026-07-27.log` ↔ `tracker_with_registry.xlsx` reconcile clean (±0.05 conf, signal match); era `A-S1D1-B1`; 24 HOLD / 0 BUY; DQ 17 HIGH / 7 MEDIUM / 0 LOW; totals 1,147 rows, 48 cohorts. ★ H4 REOPENS — but read the margin before acting. HIGH-DQ near-miss is now 6/10 resolved = 60.0000% against a ≥60.0% bar, with n exactly at the ≥10 bar and HIGH ≥ MEDIUM overall (63.0%, n=397 vs 46.1%, n=178). All three pre-registered conditions PASS, so by its own rule H4 leaves the backlog. But the hit rate FELL to get there (66.7% → 60.0%); the state flipped only because n crossed 10, and the verdict sits exactly ON the bar — one resolution either way flips it. This is a mechanical threshold crossing on the weakest admissible evidence, not a finding. Recommend recording H4 as REOPENED-BY-RULE and requiring a second consecutive pass at n ≥ 12 before any DQ-conditional design work. ★ KEEP-70 back under the line: 48.1% (13/27), down from 50.0% (13/26) — the watch item flagged 7/23 has retreated; the gate remains supported. ★ WS1 / G2: first gate-flip resolved — 7/13 NVDA base 65 → blend 70, +5d −2.05%, blend WRONG; net −1 on one flip; confirm arm 50% (n=4), discount arm 50% (n=2); 6 blended cohorts +5d-resolved against DP-1's proposed N=5. ★ WMT recovered — trail −5.62% (7/24) → −1.49% (7/27), confidence 38 → 42. ★ THE Q1 GUARDRAIL INFRASTRUCTURE IS RETIRED, the review cadence moves WEEKLY → DAILY, and the chart "squish" turned out to be a structural defect in the x-axis, not a rendering one. ★ GUARDRAIL RETIREMENT — one tool, three artifacts. `guardrail_trace.py` is out of the runner. Retiring it necessarily retires everything it wrote, and all three answered the question Q1-R closed on 7/13: the `Guardrail Trace` sheet (cumulative +5d hit rate by band; header literally reads "The 50-59% band must lead 60-69%"), the `Live Cohort Scoreboard` sheet (columns `Held (50-59>60-69)` and `Cum lead (pt)` — a per-cohort verdict on a suspended decision input), and `regime_stratification.md` (which existed to feed T2's second condition; T2 itself was retired with Q1-R). The `.py` stays in the repo for the record — this is a cadence removal, not a deletion. The closing banner of the runner had to be rewritten in the same edit: it instructed the operator to check two artifacts that would no longer be produced. Population monitoring survives as the weekly band chart on the monitor strip, explicitly labelled context only. ★ THE RETIREMENT IS NOW SELF-ENFORCING — and this matters more than the removal. `build_near_miss_registry.py --emit-master-copy` rebuilds `tracker_with_registry.xlsx` from the master on every run, so a retired tab still sitting in `logs\claude_equity_bot_tracker.xlsx` would be resurrected into the copy indefinitely — stale, with no tool refreshing it, and looking exactly as authoritative as a live one. `monitor_strip.py` therefore drops both retired sheets from the COPY on every run (never the master; guarded) and prints what it dropped. That print is a diagnostic: if it appears on every run, the master still carries the tabs and they should be deleted there once. It did print against the uploaded workbook. ★ CADENCE: WEEKLY → DAILY (`run_weekly_review.bat` → `run_daily_review.bat`). The trigger was a concrete inconsistency: the `Guardrail Trace` sheet read as of 2026-07-17 while the `Signals` tab of the same workbook ran to 7/24 — five sessions stale inside a file being used for daily review. A weekly embed of a daily-glance artifact is not merely late, it is misleadingly current-looking, which is the failure mode this project has already been bitten by twice. Ordering constraint recorded in the bat header: registry regen → strip embed, always (the regen resets the copy, so any earlier embed is destroyed). ANALYST NOTE carried into the runner: running daily is not reading daily — G1/G2 are TABLE reads at their stated n, and a one-session move in any of them is noise. ★ THE SQUISH — I had the wrong diagnosis and the correction is the durable finding. My first read was a rendering bug, and that part is real: `guardrail_trace.py` embeds via `scale = min(1.0, 760.0/img.width)`, so a 1632×884 chart was displayed at 760×411 = 46.6% scale, handing Excel an oversized bitmap and asking Excel to resample it. But that is downstream. The actual defect is the growth rate of the x-axis. One x-tick per cohort on an unbounded time series grows at ~+5 ticks/week; no resolution, figure width or embed scale survives that indefinitely — the 760px cap was fixed while the tick count was not. Weekly aggregation changes the growth rate to +1/week. On current data: 47 cohorts → 9 resolved weeks, and the density improves in the same move — per-cohort band n runs 2–15 (median 8) with hit rates swinging 14%–88%, while per-week band n runs 17–57 (median 38) with hit rates reading 38%–77%. Same series; the per-cohort view was mostly noise. Both fixes shipped, but they are not equals: the resample is a one-time correctness fix, the aggregation is the one that still works at the 3-B exit review. RENDERING RULE recorded in the module header: render big, resample once to the exact embed width (PIL/LANCZOS), then anchor at native size so Excel scales by 0% — never hand openpyxl an oversized PNG and shrink it via `img.width`/`img.height`. ★ `monitor_strip.py` gained `--embed-into`, mirroring the old `guardrail_trace.py` contract: reads the master, writes the generated copy, hard-errors if the two are the same path. The sheet carries an as-of/provenance line, the four open questions, the WS1 gate-flip table, and a WS2/G1 episode ledger (per-episode lag, conf-pre, conf-at-response, drop, served). It is a rendering of the metrics dict, not a transcription — `question_rows()`, `context_line()` and `provenance()` are shared with `monitor_strip.md`, so the two cannot drift. Idempotent (sheet replaced, never stacked) and re-parked in canonical tab order each run. Theme is dark by default and styles the whole sheet, not just the image, so the strip reads as a designed tile rather than a black rectangle on a white grid. ★ NEW TOOL — `retired_criteria_audit.py`. Retiring a question has now taken four separate discoveries, weeks apart, each found by accident: `h1_lag_trace.py` printing the guardrail criterion as a live pass/fail (patched ~7/23), the T2 tripwire firing on a suspended input, the two guardrail sheets, and the runner banner. This tool finds the rest on purpose. It is deliberately two-factor — a retired TOPIC token and live-criterion grammar (`PASS`/`FAIL`/`verdict`/`must lead`/`tripwire`/`reopen`) on the same line — because mentioning a retired question is correct and necessary in provenance and history; the defect is stating it in the grammar of a live decision input. A retirement marker within ±3 lines clears a finding, `# audit: retired-ok` is an explicit opt-out, and it exits 1 on HIGH/MEDIUM so it can become a pre-commit hook. It immediately caught a true positive in my own new code — `context_line()` reported the live 50-59 vs 60-69 split with no retirement marker while the chart beside it was correctly labelled context only. Now marked "monitoring only — the Q1 guardrail is retired; the band split below is population context, not a decision input." ★ PROVENANCE GUARD ADDED, after the check I wrote failed silently. `monitor_strip.py` falls back to a local `THETA = 5.0` when `risk_engine` will not import. Embedding a WS2 episode ledger built on a fallback THETA is a provenance break — it may not match what D1 actually damps on — so the tool now warns loudly before writing. My first implementation of that warning never fired: I tested `"risk_engine" not in THETA_SRC`, but the fallback string is `"local default (risk_engine unavailable)"`, which contains that substring. Replaced with an explicit `THETA_OK` boolean set at import time; the trap is documented in place. Verification: two consecutive embeds → 1 image, not 2 (idempotent); image 1100×482 native, ext 1100×482, 100% scale, `OneCellAnchor`; every drawn bar reconciles to the weekly data within 0.14pt (measured off the rendered pixels); tab order `Dashboard > Signals > Near-Miss BUYs > Cohort Analysis > Monitor Strip > How to Use`; formulas 8,689 → 8,689, LibreOffice recalc 0 errors; workbook 495 KB → 324 KB (the two retired sheets took the old guardrail PNG with them); audit CLEAN / exit 0 on the patched files and exit 1 on the pre-change bat as a positive control. ★ AUDIT RUN — and it found the fourth instance, in the file I did not suspect. `h1_lag_trace.py` was already clean: the 7/23 patch is in place and correctly prints the block as "RETIRED (Q1-R closed 2026-07-13) — historical context only; T3: no band-ordering reliance." `h4_dq_threshold.py` carried the identical block, unpatched — `print("CALIBRATION GUARDRAIL — cohort-window +5d bands (50-59% must lead)")` followed by `ok = lead == "50-59"` and a live `[PASS/WARN]` verdict, i.e. a retired criterion presented as a passing test on every run. Fixed by porting h1's already-approved wording verbatim rather than drafting new language, so the two harnesses now read identically; the patch is dated in place. Both files' `--since/--until` notices reworded from "calibration guardrail uses this same window" to "the retired band-calibration block uses this same window." The audit also produced one FALSE POSITIVE worth recording, because it is a real ambiguity in the project's vocabulary and not a tooling bug: it flagged h4's near-miss lever (`BUY & 60-69% by DQ`). The 60-69 band belongs to two different questions — the RETIRED Q1 guardrail (the 50-59 vs 60-69 comparison) and the LIVE KEEP-70 near-miss band (BUYs the 70% gate rejects), which both H4 and KEEP-70 still turn on. Bare `60-69` was therefore removed as a token; `50-59` and `guardrail` only ever mean the retired comparison. The audit also flagged itself (its own pattern tables are by construction full of these tokens) and now skips its own file, `--include-self` to override. Post-patch: HIGH 0 · MEDIUM 0 · LOW 23, exit 0 across `h1_lag_trace.py`, `h4_dq_threshold.py`, `monitor_strip.py`, `run_daily_review.bat` and the audit itself; every LOW is an internal variable name or a provenance comment. Cross-validation: patched h4 reports HIGH-DQ near-miss 9 resolved / 66.7%, matching the monitor strip's H4 card exactly (`67%`, `6/9`, n short, rate ok) — two independently-written tools agreeing on the same reading. ★★ FIRST LIVE RUN — THREE DEFECTS, AND THE SELF-ENFORCING RETIREMENT CLAIM FAILED ON ITS FIRST OUTING. The 7/27 `run_daily_review.bat` execution confirmed the two things I asked to be checked — THETA read `risk_engine.DampingConfig.THETA` (provenance-clean, warning correctly silent) and WS1 read a non-zero flip count — and then broke in three places. (1) THE RETIREMENT PURGE MISSED A RENAMED TAB. The report copy came back carrying a sheet named `Sheet1` which is the retired guardrail trace: header "Guardrail Compression Trace — cumulative +5d hit rate by confidence band", subtitle "Auto-generated by guardrail_trace.py … as of 2026-07-20. The 50-59% band must lead 60-69%", 42 cohort rows and the chart image. It survived because `RETIRED_SHEETS` matched on sheet NAME, and this one had been renamed in the master. A retired artifact must be identified by what it SAYS, not by what it is called — the purge is now content-based (`RETIRED_SIGNATURES` matched against the first three cells of column A) and catches it. Note the compounding failure: the retired criterion re-entered the workbook and went undetected by `retired_criteria_audit.py`, because the audit scans source files, not workbook contents. (2) THE WS2 EPISODE DETECTOR DOUBLE-COUNTS A SINGLE SLIDE — third bug in this detector, and it CHANGES THE G1 READ. WMT 7/23 (trail −5.19%) and 7/24 (−5.62%) were reported as two post-deploy episodes with identical conf-pre and response (47→38, −9pt) — the tell. A slide holds the trailing window below −THETA for as long as it lasts, so the detector emitted one "episode" per SESSION of one decline. Corrected by coalescing: an episode is now the first session of a qualifying run, which continues until the trail recovers above −THETA. Post-deploy WMT episodes: 2 → 1. Pre-deploy: 4 → 1. G1 therefore has ONE independent test case, not two, and the 7/23 entry's "this is n = 1" discipline still stands unchanged a week later. (3) `h4_dq_threshold.py` PRINTED A VERDICT ON ZERO EVIDENCE. Run against the freshly generated report copy it reported `0/0` on every DQ tier and concluded "STAYS DEMOTED" — while the monitor strip, on the same workbook, read REOPEN. Cause: `Return+5d` and `Was-Right-5d` are formulas, openpyxl reads cached values, and any openpyxl save blanks that cache — which the daily runner now does every session when it embeds the strip. 2,390 formula cells, 100% blank. `monitor_strip.py` is immune by design (it computes returns from the Price columns); h4 reads the formula columns by design. h4 now refuses and exits non-zero rather than print a verdict, naming the cache as the cause and the master as the fix. This is the same failure class the audit was built for — a tool asserting a conclusion it has no evidence for — arriving through a channel the audit cannot see. Post-patch audit across all five files: CLEAN, exit 0.
+---
+7/28 (Phase 3-B Day 16) — ★ H4's REOPEN LASTED EXACTLY ONE SESSION; G2 IS NOW NEGATIVE ON BOTH READS AND NOT ROBUST; AND THE RETIRED-CRITERIA AUDIT RAN ACROSS THE FULL REPO FOR THE FIRST TIME. Cross-check 24/24 — `signals_2026-07-28.log` ↔ `tracker_with_registry.xlsx` reconcile clean (±0.05 conf, signal match); era `A-S1D1-B1`; 24 HOLD / 0 BUY; DQ 17 HIGH / 7 MEDIUM / 0 LOW; totals 1,171 rows, 49 cohorts. Resolutions complete through 7/21. ★★ H4 — REOPENED 7/27, DEMOTED AGAIN 7/28. Record it as STAYING DEMOTED; the 7/27 pass was an artifact of n crossing its bar, not a finding. Yesterday HIGH-DQ near-miss read 6/10 = 60.0000% against a ≥60.0% bar with n exactly at 10 — all three conditions passing on the weakest evidence the rule admits, and flagged at the time as "one resolution either way flips it." The 11th resolved today and missed: 6/11 = 54.5%, `[FAIL] hit rate ≥ 60.0%`. n and the HIGH ≥ MEDIUM condition still pass (HIGH 61.1% n=535 vs MEDIUM 49.1% n=493), so the binding constraint has moved from sample size to rate. THE n ≥ 12 CONFIRMATION RULE PROPOSED YESTERDAY IS VINDICATED WITHIN 24 HOURS — had the REOPEN been recorded as a disposition it would have needed reversing in a single session. Adopt it: no DQ-conditional design work until HIGH-DQ near-miss passes on two consecutive readings at n ≥ 12. TOOL DEFECT (`h4_dq_threshold.py`): the run closes with "The binding gap is sample size on HIGH-DQ near-misses; only a larger 3-A near-miss sample can reopen it." That is now false — n passes at 11 and the rate is what fails. The string is hardcoded and assumes the n-condition is the failing one. Small, but it is a tool explaining a failure incorrectly, which is the same class cleared four times this week. ★★ WS1 / G2 — NEGATIVE ON BOTH READS, AND THE CROSS-VALIDATION IS NOT ROBUST. `blend_eval.py --since 2026-07-13`: 12 cohorts, 288 signals, 168 +5d-resolved, 10 blend-adjusted (lift 5, cut 5 — now symmetric, previously discount-heavy**)*. (A) Overlay predictive value [primary]: overlays CONFIRMED 40.0% (n=5) vs overlays DISCOUNTED 50.0% (n=2) → gap −10.0pt, i.e. the wrong direction — the signals the overlays liked did worse than the ones they disliked. (B) Gate-flip @ 70%: 1 disagreement of 7 resolved BUYs — 7/13 NVDA base 65 / blend 70, blend APPROVES, +5d −2.1%, blend worse → net −1. (C) Leave-one-cohort-out folds: `[+0, +0, −25, −25, +40, −60, +0, −10, −10, −10, −10, −10]`, min −60pt and signs MIXED — the criterion requires all folds the same sign, so robustness fails independently of the point estimate. DISCIPLINE: this is NEGATIVE AND UNDERPOWERED, not a verdict. n=5 vs n=2 on the primary read cannot carry a conclusion in either direction, and the footprint remains near-single-name. But it is worth stating plainly that G2's evidence has never once pointed the right way, and G2's allowed dispositions are VERDICT or DESCOPE — it cannot be parked. ★★ DP-6 AND DP-7 RULED (both dated 2026-07-28). DP-6 — G1 counting basis = EPISODES, not cohorts, on the reasoning that a cohort with no material move carries no information about response-to-material-move, so a cohort reading would close G1 on evidence that is substantively one data point. This ruling makes G1 STRICTER: it moves from "15 post-deploy cohorts logged, count met" to 1 independent episode of the 4 required. DP-7 — G2 gains a BREADTH condition: ≥ 2 distinct tickers with resolved adjusted signals. Currently NVDA-only; GLD's 7/22 BUY (conf 62) resolves 7/29, which is when the condition is met. NOTED AND NOT YET RULED: a 6:1 NVDA:GLD split clears the letter of "≥ 2 tickers" while leaving the footprint essentially single-name — a per-ticker minimum or concentration cap remains open. DP-8 (bidirectional episodes) and DP-9 (universe beyond WMT/GM) were RAISED AND DELIBERATELY LEFT UNRULED; both would increase the episode count on a gate that is blocking the exit, and DP-9 contradicts explicit pre-registered wording ("WMT primary / GM secondary"), so neither may be adopted silently. ★★ FIRST FULL-REPO AUDIT RUN — 23 HIGH / 34 MEDIUM, of which roughly FIVE are genuine. The headline count is misleading and the triage matters more than the total. GENUINE (fix): `t2_check.py` and `t2.bat` still print " T2 FIRES — both gates met. Run the Tier-2E diff. *" and describe the firing conditions in the present tense. T2 is retired; this is a live instruction on a dead tripwire, and it is exactly the defect pattern found in `h1_lag_trace.py` (7/23) and `h4_dq_threshold.py` (7/27). EXPECTED (housekeeping): `run_weekly_review.bat` (delete — superseded 7/27) and `guardrail_trace.py` ×3 (retained-but-unmaintained; needs a RETIRED header block so its own file declares its status). FALSE POSITIVES — three classes, each a real ambiguity in the project's vocabulary rather than a tooling bug: (i) `Retired\h2_direction_asymmetry.py` and `Retired\h3_thesis_stability.py` ×4 — already retired by location; the audit should skip a `Retired\` directory. (ii) `docs\analyst_notes.md` ×4 — historical entries SHOULD describe the guardrail as live, because it was live then. The record must never be rewritten to match present belief; the audit must exclude the notes. (iii) `WS1_Deploy_Notes.md`, `WS2_Deploy_Notes.md`, `WS2_H1_Feature_Spec.md`, `Phase3B_Session_Manifest.md` ×5 — `T2` there is a TEST-CASE ID (`|T2|Blend math table`, `|T2|Damping table`), not the tripwire. This is precisely parallel to the bare-`60-69` ambiguity fixed on 7/27, where one token served both a retired and a live question. The audit is not hook-ready until those three exclusions land. ★ 7/21 COHORT RESOLVED 10/24 = 41.7% — the weakest since 7/16, and it is a DISPERSION artifact, not a directional one. 13 of the 14 wrong calls were HOLDs marked wrong by breaching the ±3% band, and those breaches split 7 UP / 6 DOWN on a cohort whose mean +5d was +0.03% with 11 of 24 names up. A flat tape with high dispersion marks HOLDs wrong in both directions simultaneously. This is not the rising-tape variant seen on 7/16; it is the same underlying ±3%-band volatility sensitivity presenting symmetrically, and it is the strongest single-cohort argument yet for the parked Q4-2 vol-scaled secondary metric. ★ DATA INTEGRITY — TWO GHOST ROWS FOUND (new, G4-relevant). `h4_dq_threshold.py` reported `other: 2 (0.2%)` in its DQ distribution. Traced to Signals rows 222 and 226, both dated 2026-06-01 — AG and FTI — carrying a date and ticker but NULL signal, NULL confidence and NULL data_quality. They are not 429-skips (those produce no row at all per the workflow §14) and not parse-error signals (those carry conf 0 plus an error flag). Most likely a partial paste from the 6/01 session. Impact is small but real: they inflate every denominator computed as "signal rows" by 2, and they are an OPEN DATA-INTEGRITY ITEM, which G4 requires to be empty at exit. Decide whether to delete the rows or annotate them, and record which. ★ KEEP-70 STRENGTHENED: 13/28 = 46.4%, down from 48.1% (7/27) and 50.0% (7/24) — the watch item raised 7/23 has now retreated two sessions running and sits comfortably under the 50% line that supports the gate. ★ WS2 / G1 UNCHANGED — still 1 independent post-deploy episode of 4 (WMT 7/23, lag 0, 47→38). No new episode on 7/28; GM still has none. ★ CONTEXT (monitoring only, no criterion attached): within the 60-69 band, HIGH-DQ reads 64.0% (n=214) vs MEDIUM 40.5% (n=42) — a 23.5pt spread; Q4-R closed this as a volatility artifact and no DQ lever follows. LOW-DQ overall 9/21 = 42.9%, avg +5d −4.85% — consistently poor but n=21. ★ DEPLOYMENTS AND DOCUMENTS. `h1_lag_trace.py`, `h4_dq_threshold.py` and `retired_criteria_audit.py` replaced in root today (7/28); `monitor_strip.py` and `run_daily_review.bat` were deployed 7/27 and confirmed live by the Monitor Strip tab reading the coalesced episode count. `Daily_Workflow_v5_3_Phase3B.docx` drafted — cadence change, the formula-cache section rewritten, retired-artifact list, two new operator lessons ("a renamed tab is still the tab it was"; "a clean console is not a completed run") and a new §17 on retired-criteria discipline. `Phase3B_Closeout_Decision_Worksheet_v1.docx` drafted (G6 "drafted" satisfied). ★ OPERATIONAL CONFIRMATION: the uploaded `tracker_with_registry.xlsx` carried a LIVE formula cache (only pending-resolution rows blank), confirming the "open in Excel after the daily run" step is being followed — the step that became load-bearing when the strip embed started blanking the cache every session.
+
+\---
+
+*Archive ends at the 2026-07-28 entry. Continues in `analyst_notes_current.md`.*
+
+*Advisory-only · no orders · not financial advice.*
