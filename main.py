@@ -112,6 +112,32 @@ WATCHLIST_SCOUT = [
     "NVDA",
     "GLD",
     "SPCX",
+    "GM",
+    # CORN — added 2026-08-14 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
+    #
+    # ANALYST NOTE:
+    #   CORN was sold out of the Individual account on 2026-08-14 and would
+    #   otherwise have dropped out of the run entirely. It is a T-A covered
+    #   name inside E4's denominator, which was FROZEN at its 2026-08-13
+    #   membership by the ruling of 2026-08-14. Losing its rows would take
+    #   practical coverage from 15/24 = 62.5% to 14/24 = 58.3% while the
+    #   pre-registered denominator stayed at 62.5%. Scouting preserves supply
+    #   without touching the frozen population.
+    #
+    #   THIS IS IDEMPOTENT AND SAFE EITHER WAY. The watchlist build below
+    #   dedupes `sorted(all_held) + WATCHLIST_SCOUT`, so if any CORN position
+    #   remains at Schwab the name is still classified [HELD] and this entry is
+    #   discarded; only a genuinely unheld CORN becomes [SCOUT].
+    #
+    #   RECORDED CONSEQUENCE — THIS CHANGES CORN'S PROMPT, and it is written
+    #   down rather than discovered later. Held names receive cost basis, share
+    #   count, account and open-P&L context; scouts receive "scouting only — no
+    #   current position held." CORN's rows from 2026-08-17 forward are
+    #   therefore NOT prompt-comparable to its rows before that date. Any
+    #   within-ticker CORN read — E4-2 §3.2 in particular — must segment on
+    #   2026-08-17 or state explicitly that it pools two prompt regimes. The
+    #   same caveat will apply to any future held -> scout transition.
+    "CORN",
 ]
 
 MONITOR_HOLDINGS = True
@@ -740,6 +766,19 @@ def run_bot():
         process_ticker(ticker, portfolios, quote_cache, news_cache,
                        history_cache, signal_state, blend_caches,
                        prompt_caches)
+
+    # DP-3C-j (2026-08-20): report how much EDGAR fetch/extract time the run
+    # actually spent against EDGAR_MAX_SECONDS. Until the budget was moved
+    # inside edgar_client it measured run wall clock, so this number could not
+    # be stated at all — the 2026-08-03 estimate of "~6%" was inferred from
+    # timestamps rather than measured. It is measured now, and it is the line
+    # that says whether the ceiling is anywhere near binding.
+    if EDGAR_ENABLED:
+        try:
+            from edgar_client import budget_report
+            log.info(budget_report())
+        except Exception as e:                       # never fail the run on a log line
+            log.warning(f"[EDGAR] budget report unavailable: {e}")
 
     # STEP 5: Generate ticker suggestions
     if ENABLE_SUGGESTIONS:

@@ -127,8 +127,30 @@ def get_quote(ticker: str) -> dict:
         # For ETFs, suppress unreliable fundamental fields.
         # We pass None instead of the raw value so downstream code can
         # decide what to display.
-        pe_ratio = None if is_etf else fundamental.get("peRatio", 0)
-        eps      = None if is_etf else fundamental.get("eps", 0)
+        #
+        # ANALYST NOTE (2026-08-17): the `, 0` defaults were REMOVED. They made
+        #   a MISSING fundamental indistinguishable from a genuine zero, so a
+        #   name Schwab reports nothing for was rendered into the prompt as
+        #   "EPS: $0" and the model reasoned from it -- CBRS's own signal text
+        #   reads "P/E near 480 on near-zero EPS". That is the same
+        #   missing-versus-wrong distinction `fin=degraded` exists for on the
+        #   EDGAR side (DP-3C-t(b)), arriving in a different file.
+        #   Absent now yields None; a genuine 0.0 still yields 0.0.
+        #   claude_signal.py L157-163 already renders None as "N/A" for BOTH
+        #   fields, so no downstream change is required and none was made.
+        #   peRatio is fixed alongside eps because it is the same defect on the
+        #   adjacent line and is equally None-safe downstream; leaving it would
+        #   half-fix a single fault.
+        #   NOT CHANGED: `divYield` carries the same `, 0` default on L154 below
+        #   and on L153/L159 of claude_signal.py, but it is formatted with
+        #   "{:.2f}%" which raises TypeError on None. Fixing it needs a
+        #   formatter change too, so it is recorded rather than half-done.
+        #   THIS EDIT CHANGES WHAT THE MODEL RECEIVES and lands mid-E4, so it
+        #   needs a dated decision-point entry. quote_dump.py must be re-run to
+        #   learn which names actually move: the existing dump was captured
+        #   THROUGH the defaulting code and has already lost that information.
+        pe_ratio = None if is_etf else fundamental.get("peRatio")
+        eps      = None if is_etf else fundamental.get("eps")
 
         return {
             "ticker"            : ticker,

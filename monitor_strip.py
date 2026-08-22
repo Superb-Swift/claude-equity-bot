@@ -433,13 +433,32 @@ def question_rows(m):
             (f"{d} lag {lg} ({pre}→{now}, −{dr}pt)" if lg is not None
              else f"{d} NO RESPONSE YET" if dr is None else f"{d} no response")
             for d, lg, pre, now, dr in e.get("detail", []))
+        # CHANNEL AND BASIS DISCLOSURE, added 2026-08-21 per the 8/20 review's
+        # finding #2. This strip reported ONE response number and never said
+        # which confidence channel produced it. It is the OPERATIVE channel:
+        # ws2_episodes() reads x["conf"], which is the tracker's Conf% column =
+        # json.confidence = D.op, i.e. POST-damping. G1's FAIL condition is
+        # "model-side remedy class exhausted at 3-B", and D1 is not the remedy
+        # under test, so the channel that ANSWERS G1 is the RAW one. The two
+        # agreed on every session until 2026-08-20, the first post-deploy session
+        # on which a tracer was damped; on that episode they returned lag 0
+        # operative against lag 1 raw. Both cleared the <=2 bar so the disposition
+        # did not turn on it -- it will the moment either channel reads 3+.
+        # The trailing move is likewise THIS tool's basis: `window` TRACKER ROWS
+        # off Price at Signal, NOT market sessions off closes, while THETA is
+        # imported from risk_engine, which damps on the other basis.
         out.append((
             f"**WS2 / G1** {tk} clock",
             (f"**{e['episodes']} post-deploy episode(s)** in {e['post_sessions']} session(s)"
              f" ({e['served']} responded ≤{RESPONSE_SESSIONS} sessions); "
              f"{e['pre']} pre-deploy; last episode {last}"
              + (f", {e['since']} session(s) ago" if e["since"] is not None else "")
-             + (f". Episodes: {lags}" if lags else "")),
+             + (f". Episodes: {lags}" if lags else "")
+             + ". **Scored on the OPERATIVE channel** (tracker `Conf %` = "
+               "`json.confidence` = `D.op`, post-damping); the model-side channel "
+               "G1 turns on is in `h1_lag_trace_" + tk + "_raw_3B.md`. Trailing "
+               "move is computed over tracker ROWS off `Price at Signal`, not "
+               "market sessions off closes."),
             f"≥1 episode with response ≤{RESPONSE_SESSIONS} sessions",
             "readable" if e["episodes"] else "NO TEST CASES YET",
         ))
@@ -719,7 +738,9 @@ def embed_into_workbook(m, png_path, embed_path, width_px=EMBED_WIDTH_PX,
         r += 1
 
     # --- WS2 episode ledger (the G1 acceptance clock, row by row) ------------
-    ws.cell(r, 1, f"WS2 / G1 episode ledger (THETA = {THETA:.1f}%)").font = f_hdr
+    ws.cell(r, 1, f"WS2 / G1 episode ledger (THETA = {THETA:.1f}%) — "
+                  f"OPERATIVE channel (post-damping); trailing move over tracker "
+                  f"rows off Price at Signal").font = f_hdr
     r += 1
     for c, t in enumerate(("Ticker", "Episode", "Lag", "Conf pre",
                            "Conf at response", "Drop (pt)", "Served"), start=1):

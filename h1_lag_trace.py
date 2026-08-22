@@ -86,9 +86,31 @@ def as_date(v):
 
 
 def conf_pct(v):
+    """Tracker Conf% cells are stored as fractions (0.57), so they must be scaled.
+
+    DEFECT FIXED 2026-08-21 (found in the 8/21 closing review, on a live exhibit).
+    This returned a bare `v * 100.0`, and IEEE-754 makes 0.57 * 100 ==
+    56.99999999999999. The two display paths below then printed `int(conf)`,
+    which TRUNCATES -- so every confidence of 0.29, 0.57 or 0.58 (the only three
+    two-decimal fractions with this property) rendered ONE POINT LOW. It reached
+    the record: h1_lag_trace_GM_3B.md printed 56% for 2026-08-17 and 2026-08-20
+    against a tracker, a log `confidence`, a `confidence_raw` and a
+    `confidence_blend` that ALL read 57, and printed 57% for 2026-07-21 against
+    a tracker 58 -- a value present in no channel anywhere in the stack.
+    The `--raw-from-logs` variant escaped on the post-deploy rows only because
+    the override replaces the float with an exact int parsed from the log, which
+    is why the operative and raw exhibits disagreed on two GM sessions that
+    carry damp 0 and therefore CANNOT differ by construction.
+    SCOPE: display only. `confs` below is the unrounded float, so the lag scan
+    and both correlations were never affected -- the 8/21 review states that
+    separation rather than leaving it to be assumed.
+    """
     if v is None:
         return None
-    return v * 100.0 if v <= 1.0 else float(v)
+    # round() at the source is deliberate: it removes the dust once, so every
+    # consumer -- display, correlation, banding -- sees one number rather than
+    # each having to defend itself.
+    return round(v * 100.0, 6) if v <= 1.0 else float(v)
 
 
 def pearson(xs, ys):
@@ -242,9 +264,13 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
         print("  DEGRADED (display only): the +5d, +10d and R5 columns will read")
         print("  '—' throughout, and the RETIRED band-calibration block will show")
         print("  zero counts. Do not read anything into either.")
-        print("  UNAFFECTED: Date | Sig | Conf | Trail — the columns the G1 table")
-        print("  read is scored on. Confidence is a raw value; the trailing move")
-        print("  is computed from the Price columns. THE ACCEPTANCE READ IS VALID.")
+        print("  UNAFFECTED BY THE BLANK CACHE: Date | Sig | Conf | Trail — the")
+        print("  columns the G1 table read is scored on. THE ACCEPTANCE READ IS VALID.")
+        print("  AMENDED 2026-08-21: this block previously said Conf was 'a raw value'.")
+        print("  It is a SCALED cell value (fraction x 100), and the scaling carried a")
+        print("  truncation defect until 2026-08-21 — see conf_pct(). 'Unaffected by")
+        print("  the blank cache' is not the same claim as 'exact', and stating the")
+        print("  stronger one is how the defect survived unread.")
         print("  CAUSE: openpyxl saves clear cached formula values; the daily")
         print("  runner writes this workbook every session.")
         print("  FIX: point --tracker at the MASTER (logs\\claude_equity_bot_tracker")
@@ -260,8 +286,14 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
                 x["conf"] = v
                 n_raw += 1
         print(f"   [raw-from-logs] {n_raw} of {len(rows)} rows use log RAW "
-              f"confidence; remainder keep tracker values (exact for "
-              f"pre-deploy rows, where raw == operative by construction)")
+              f"confidence; remainder keep tracker values (raw == operative by "
+              f"construction on pre-deploy rows)")
+        # AMENDED 2026-08-21: the word previously used here was "exact". It was
+        # not: the tracker path scaled a fraction and the display truncated it,
+        # so the fallback rows could read one point low while the overridden
+        # rows read exactly -- which is precisely the asymmetry that made the
+        # operative and raw exhibits disagree on GM 8/17 and 8/20. Fixed in
+        # conf_pct(); the claim is now narrowed to what it can support.
     confs = [x["conf"] for x in rows]
     prices = [x["p0"] for x in rows]
     # trailing window-day move from the signal-capture price series
@@ -279,7 +311,7 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
     print("-" * 78)
     for i, x in enumerate(rows):
         print(f"{x['date'].isoformat():<12}{x['signal']:<6}"
-              f"{(str(int(x['conf']))+'%') if x['conf'] is not None else '—':>6}"
+              f"{(str(round(x['conf']))+'%') if x['conf'] is not None else '—':>6}"
               f"{pct(trail[i]):>9}{pct(x['r5'], plus=True):>9}{pct(x['r10'], plus=True):>9}"
               f"{(x['right5'] or '—'):>5}")
 
@@ -393,12 +425,31 @@ def write_md(res, ticker, window, tracker, out_dir, suffix=""):
             "because the cohorts are unresolved. The retired band-calibration "
             "block likewise shows zero counts. **The `Conf` and `Trail` columns — "
             "the ones the G1 table read is scored on — are unaffected**, being a "
-            "raw cell value and a Price-column computation respectively. "
+            "scaled cell value and a Price-column computation respectively. "
             "Regenerate against the master tracker for a complete exhibit.", ""]
+    # BASIS DISCLOSURE, added 2026-08-21. The Trail column and the run's own
+    # H1[trail5d=...] / D[trail=...] tags are TWO DIFFERENT MEASUREMENTS and the
+    # exhibit never said so. They differ on two axes: this column walks back
+    # `window` TRACKER ROWS (so a session a ticker missed is skipped, not
+    # counted) and prices off `Price at Signal` (a ~09:3x quote), while the run
+    # computes over consecutive MARKET sessions off CLOSES. On 2026-08-21 the two
+    # gave GM OPPOSITE SIGNS -- this exhibit -0.31%, the run +2.75% -- because
+    # GM's missing 2026-08-18 row moved this column's t-5 anchor from 8/14 to
+    # 8/13. Both are correct under their own definition; neither was labelled.
+    # It matters because monitor_strip's G1 episode detector uses THIS basis
+    # while importing THETA from the damping engine, which uses the other.
+    lines[4:4] = [
+        "> **TRAIL BASIS.** `Trail" + str(window) + "d` walks back " + str(window)
+        + " **tracker rows** (a session this ticker missed is skipped, not counted) "
+          "and prices off **Price at Signal**, a ~09:3x quote. The run's own "
+          "`H1[trail5d=…]` / `D[trail=…]` tags walk back " + str(window)
+        + " **market sessions** and price off **closes**. The two can differ in "
+          "magnitude and, where a row is missing, in SIGN. Recorded 2026-08-21 "
+          "after GM read −0.31% here against +2.75% in the run.", ""]
     for i, x in enumerate(rows):
         lines.append(
             f"| {x['date'].isoformat()} | {x['signal']} | "
-            f"{(str(int(x['conf']))+'%') if x['conf'] is not None else '—'} | "
+            f"{(str(round(x['conf']))+'%') if x['conf'] is not None else '—'} | "
             f"{pct(trail[i])} | {pct(x['r5'], plus=True)} | "
             f"{pct(x['r10'], plus=True)} | {x['right5'] or '—'} |")
     if res["arc"]:
