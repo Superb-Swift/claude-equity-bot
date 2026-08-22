@@ -40,3 +40,20 @@ claude_equity_bot_tracker.xlsx
 # tracker via seed_signal_state.py; raw-confidence channel, see signal_state.py)
 signal_state.json
 edgar_cache/
+
+# Generated review exhibits - rewritten by the runners every session.
+# The numbers survive in docs/Phase3C_ClosingReview_*.md, which ARE tracked.
+band_price_*.md
+implied_return_*.md
+value_anchor_*.md
+signal_scan_*.md
+h1_lag_trace_*.md
+sweep_*.md
+monitor_strip.md
+near_miss_registry.md
+actionable_registry.md
+h4_dq_threshold_baseline.md
+quote_dump*.json
+fundamental_probe.json
+value_notes.html
+git_push_monitor.txt
