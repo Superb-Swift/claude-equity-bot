@@ -57,3 +57,7 @@ quote_dump*.json
 fundamental_probe.json
 value_notes.html
 git_push_monitor.txt
+
+# Generated registry copy - carries account labels, prices and confidences.
+# Untracked 2026-08-22; its history is purged in JOB B.
+Retired/near_miss_registry.xlsx
