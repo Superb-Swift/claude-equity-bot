@@ -1,0 +1,307 @@
+=============================================================================
+REPO CATCH-UP + EXPOSURE REMEDIATION RUNBOOK — v3, 2026-08-22
+Claude Equity Bot · repo Superb-Swift/claude-equity-bot
+Companion to commit_backlog_runbook_2026-08-10.txt, same house rules.
+=============================================================================
+
+WHY THIS EXISTS — TWO SEPARATE JOBS, DELIBERATELY SEQUENCED
+
+  JOB A (safe, reversible)   The repo is stale at roughly 2026-07-27. The whole
+                             Phase 3-C layer is unpushed: EDGAR, the valuation
+                             layer, the integrity pass, the audits. Four retired
+                             tools still sit at the repo root.
+
+  JOB B (DESTRUCTIVE, NOT reversible)
+                             TWO spreadsheets are TRACKED and PUBLIC:
+                             tracker_with_registry.xlsx, which .gitignore lists
+                             under "contains personal trading outcomes", and
+                             Retired/near_miss_registry.xlsx, which is not in
+                             .gitignore at all. Neither ignore bites, because
+                             both were committed before the rules existed.
+                             This is STOP CONDITION 0.5 of the 8/10 runbook,
+                             fired — twice.
+
+  A RUNS FIRST AND IS PUSHED FIRST. Rewriting history over commits that only
+  exist on your disk would put unpushed work inside a rewrite you cannot undo.
+
+  repo_catchup.bat automates JOB A end to end and REFUSES to run JOB B without
+  a typed confirmation. That split is deliberate: your own 8/10 runbook says
+  "ONE COMMAND AT A TIME. Batch sequences have failed on push before," and a
+  force-push is the one command in this project that cannot be walked back.
+
+
+v2 — WHAT THE 2026-08-21 18:55 LIVE RUN CHANGED
+
+  The v1 script STOPPED at Phase 0.4, correctly, and told you so badly. Three
+  things came out of it, and only the first was a bug in the script:
+
+  1. PARSE BUG, FIXED. v1 wrote  set "FAIL=...commit(s)"  inside a
+     parenthesised IF block. cmd closes the block on the ")" in "(s)" and then
+     chokes, printing "BEHIND was unexpected at this time." The STOP itself
+     was correct. v2 uses goto-labels for every IF, removing the class rather
+     than patching the instance.
+
+  2. THE DIVERGENCE IS BENIGN AND IS NOW HANDLED. origin gained 7f60462
+     "Add files via upload" — your README upload through the GitHub web UI,
+     which I confirmed is BYTE-IDENTICAL to the rewrite. Local was ahead 2 /
+     behind 1. v2 verifies that identity, discards the redundant local copy
+     (zero loss), then rebases your two local commits on top.
+
+  3. A SECOND EXPOSED SPREADSHEET, MISSED BY v1. Cloning the repo rather than
+     reading the web view found that Retired/near_miss_registry.xlsx is ALSO
+     tracked and public. It carries signal dates, tickers, ACCOUNT LABELS
+     (Scout / Roth IRA), confidences and prices. Lighter than the tracker —
+     no cost basis or P&L — but the same class. JOB B now purges both.
+
+  AND A PROCESS NOTE WORTH KEEPING: v1's file list came from a GitHub web
+  view that was stale, and the run exposed it. v2 stages by category and
+  tolerates missing paths, so the script cannot silently assume a repo shape
+  again.
+
+
+v3 — WHAT THE 2026-08-22 11:59 LIVE RUN CHANGED
+
+  v2's rebase aborted, and it aborted PROTECTING YOUR DATA. The message:
+
+      error: The following untracked working tree files would be overwritten
+             by checkout:  docs/analyst_notes.md
+
+  DIAGNOSIS. One of your two local commits removed docs/analyst_notes.md from
+  tracking — the notes were reorganised into analyst_notes_current.md plus the
+  dated splices under docs/note splices/. rebuild_notes.py then regenerated
+  analyst_notes.md on disk, so locally it is UNTRACKED, while origin still
+  tracks the old 191KB copy. A rebase has to check out origin's tree to replay
+  your commits on top, and that checkout would have written origin's old copy
+  over your current 666KB running record. Git refused. Correctly.
+
+  FIX: MERGE INSTEAD OF REBASE. A merge only touches files that actually
+  differ between the two sides — here README.md alone — and never checks out
+  origin's full tree, so the untracked record is never at risk. The cost is a
+  merge commit rather than linear history. That is a fair price for not
+  putting the project's single most valuable file in the path of a checkout.
+
+  Rehearsed on a mock reproducing the exact shape — untracked-locally,
+  tracked-on-origin, different content: merge reported "1 file changed", the
+  record was untouched on disk, Phase 3 then re-added it as the CURRENT
+  version, and the push landed as a fast-forward.
+
+  ONE CONSEQUENCE TO SEE COMING: pushing replaces origin's 191KB
+  docs/analyst_notes.md with your current 666KB one. It was scanned on
+  2026-08-22 before that was proposed — no account numbers, no portfolio
+  values, and its single "cost basis" mention DESCRIBES the prompt mechanism
+  rather than disclosing a position. The one judgement call is a worked
+  example citing a $6,000 position against $100,000 and $200,000 account
+  sizes. If those round numbers are real rather than illustrative, redact
+  that line before pushing. The script pauses and says so.
+
+BOTH JOBS WERE REHEARSED AGAIN AT v2, 2026-08-22, against a mock reproducing
+your EXACT state — ahead 2 / behind 1, origin carrying the README upload, and
+the same untracked exhibit set your run printed:
+
+  JOB A   reconciled ahead-2/behind-1 to ahead-2 with no conflict, then
+          produced four clean commits — .gitignore alone; four renames at
+          R100; the 3-C layer; the corrections — with ZERO leftover untracked
+          files, and `git push --dry-run` reported a plain FAST-FORWARD.
+          No force needed anywhere in JOB A.
+
+  JOB B   git filter-repo removed BOTH spreadsheets from every commit;
+          `git log --all -- <paths>` came back empty; `git rev-list --objects
+          --all` retained ZERO references; all commits survived with new SHAs;
+          and filter-repo removed the remote, which is why B.6 exists.
+
+=============================================================================
+WHAT CHANGES — read this before running anything
+=============================================================================
+
+ADDED (17 files, the Phase 3-C layer):
+    band_price.py                edgar_client.py            outcome_sanity.py
+    build_actionable_registry.py edgar_parser_audit.py      phase_dispatch_audit.py
+    fundamental_probe.py         implied_return.py          quote_dump.py
+    log_tracker_crosscheck.py    retired_criteria_audit.py  signal_scan.py
+    value_anchor.py              xbrl_sweep.py
+    run_daily_review.bat         scan.bat                   value.bat
+
+MOVED root -> Retired\ (already moved on disk; git records it as a rename):
+    guardrail_trace.py    run_weekly_review.bat    t2.bat    t2_check.py
+
+MODIFIED:
+    README.md          rewritten for Phase 3-C
+    h1_lag_trace.py    conf_pct truncation fix + TRAIL BASIS disclosure
+    signal_scan.py     EXPECTED_N retired, cohort-membership check landed
+    monitor_strip.py   channel + basis disclosure on the G1 rows
+    implied_return.py  section 1 price-source correction + peRatio evidence
+    main.py            era derivation, EDGAR provider registration
+    risk_engine.py     DP-3C-o CHECK 6 demotion / CHECK 6b enforcement
+    edgar_client.py    DP-3C-j EDGAR-time budget accumulator
+
+UNTRACKED (JOB B) — BOTH are tracked and public today:
+    tracker_with_registry.xlsx        Signals tab, account labels, outcomes
+    Retired/near_miss_registry.xlsx   signal dates, tickers, account labels,
+                                      confidences, prices (found 2026-08-22)
+
+.gitignore GAINS — generated review exhibits. They are rewritten every session
+by the runners, so tracking them churns the repo on every commit. The NUMBERS
+survive regardless: every figure they carry is quoted with [V] in the dated
+closing reviews under docs\, which ARE tracked.
+    band_price_*.md  implied_return_*.md  value_anchor_*.md  signal_scan_*.md
+    h1_lag_trace_*.md  sweep_*.md  monitor_strip.md  near_miss_registry.md
+    actionable_registry.md  h4_dq_threshold_baseline.md
+    quote_dump*.json  fundamental_probe.json  value_notes.html
+    git_push_monitor.txt
+
+    NOT added by the script, but you should add it during JOB B:
+    Retired/near_miss_registry.xlsx — otherwise the next `git add -A` after
+    the purge re-commits the very file JOB B just removed from history.
+
+    IF YOU DISAGREE, say so before running: dropping those lines from
+    .gitignore is a one-line edit and the exhibits get tracked instead. This
+    is a judgement call, not a rule.
+
+NOT TOUCHED — still ignored, still local only:
+    .env  token.json  edgar_cache\  logs\  *.docx  signal_state.json
+    claude_equity_bot_tracker.xlsx   (the MASTER — correctly ignored, and it
+                                      has never been tracked)
+
+
+=============================================================================
+JOB A — RUN THIS
+=============================================================================
+
+    cd C:\Users\rober\claude-equity-bot
+    repo_catchup.bat
+
+The script performs Phase 0 preflight and STOPS on any of these, exactly as
+the 8/10 runbook requires:
+
+    * git not on PATH, or this is not a git repo
+    * a secret already tracked (token / .env / key / credential in git ls-files)
+    * anything already STAGED — it would be swept into a labelled commit
+    * origin unreachable, or `git fetch` fails on auth
+    * local README.md NOT byte-identical to origin's — v2 assumes 7f60462 was
+      an upload of the same file; if that stops being true it must not guess
+    * a merge that conflicts — resolve by hand; the working tree is intact
+    * a rebase or merge already in progress
+
+Where v1 stopped dead on "behind origin", v3 RECONCILES BY MERGING: if
+README.md still carries uncommitted changes it confirms they are byte-identical
+to origin's and discards the redundant copy, then merges origin/main. Only
+README.md moves. Rehearsed; the result pushes as a fast-forward.
+
+It then makes FOUR commits, grouped so the history stays bisectable:
+
+    1. chore: ignore generated review exhibits
+    2. refactor: move retired Phase 3-A/3-B tooling to Retired/
+    3. feat: Phase 3-C — EDGAR, valuation layer, integrity pass, audits
+    4. fix: instrument corrections + README rewrite for Phase 3-C
+
+...and pushes. It does NOT touch tracker_with_registry.xlsx and it does NOT
+rewrite history.
+
+  STOP AND VERIFY BEFORE JOB B:
+    git log --oneline -5
+    git status
+    Open the repo in a browser. Confirm the four commits are there and the
+    Phase 3-C files are visible.
+
+
+=============================================================================
+JOB B — THE HISTORY REWRITE. DESTRUCTIVE. READ ALL OF IT FIRST.
+=============================================================================
+
+WHAT IT DOES        Purges tracker_with_registry.xlsx from every commit in the
+                    repository's history, then force-pushes the rewritten
+                    history over origin/main.
+
+WHAT IT COSTS       * Every commit SHA after the first touch of that file
+                      changes. Any existing clone or fork is broken and must
+                      be re-cloned. If nobody else has cloned it, this costs
+                      nothing.
+                    * Open pull requests and issue links to specific commits
+                      will break.
+                    * GitHub keeps unreachable objects cached for a period and
+                      may still serve them by direct SHA URL. To purge those
+                      fully you must ask GitHub Support to run gc on the repo,
+                      AFTER the force-push lands. The rewrite alone is not the
+                      whole job.
+
+WHAT IT DOES NOT    The file is not a credential — no rotation is needed. It is
+NEED                personal trading data, so the remediation is removal and
+                    reduced discoverability, not key rotation.
+
+  --- B.1  Install the tool (git filter-branch is deprecated; do not use it)
+      pip install git-filter-repo
+
+  --- B.2  Work on a FRESH CLONE. filter-repo requires a clean, freshly-cloned
+           copy and will refuse otherwise. Never run it on your working folder.
+      cd C:\Users\rober
+      git clone https://github.com/Superb-Swift/claude-equity-bot.git ceb-rewrite
+      cd ceb-rewrite
+
+  --- B.3  Confirm the files are actually in history before purging them
+      git log --oneline --all -- tracker_with_registry.xlsx Retired/near_miss_registry.xlsx
+
+      STOP CONDITION. If this prints nothing, the file is not in history and
+      there is nothing to rewrite. Do not force-push. Tell me.
+
+  --- B.4  Purge BOTH. near_miss_registry.xlsx was found on 2026-08-22 by
+           cloning the repo; it carries account labels, prices and confidences.
+      git filter-repo --path tracker_with_registry.xlsx --path Retired/near_miss_registry.xlsx --invert-paths --force
+
+  --- B.5  Verify the purge BEFORE pushing anything
+      git log --oneline --all -- tracker_with_registry.xlsx Retired/near_miss_registry.xlsx
+
+      STOP CONDITION. This must now print NOTHING. If it prints a commit,
+      the rewrite did not take. Do not push.
+
+  --- B.6  filter-repo removes the remote on purpose, as a safety measure.
+           Put it back deliberately.
+      git remote add origin https://github.com/Superb-Swift/claude-equity-bot.git
+
+  --- B.7  THE IRREVERSIBLE COMMAND. Everything above is still undoable by
+           deleting the ceb-rewrite folder. This is not.
+      git push origin --force --all
+      git push origin --force --tags
+
+  --- B.8  Verify on GitHub
+      Browse the repo root. tracker_with_registry.xlsx must be gone.
+      Try a direct URL to an OLD commit that contained it — if it still
+      resolves, that is the cached-object case: open a GitHub Support request
+      asking them to garbage-collect unreachable objects on the repository.
+
+  --- B.9  Your working folder still points at the OLD history. Re-point it.
+      cd C:\Users\rober\claude-equity-bot
+      git fetch origin
+      git reset --hard origin/main
+
+      STOP CONDITION. `git reset --hard` discards uncommitted local changes.
+      Run `git status` first and confirm it is clean. JOB A committed and
+      pushed everything, so it should be — verify rather than assume.
+
+  --- B.10  Clean up
+      rmdir /s /q C:\Users\rober\ceb-rewrite
+
+
+=============================================================================
+AFTERWARDS
+=============================================================================
+
+  * Confirm .gitignore now bites for BOTH:
+        git check-ignore -v tracker_with_registry.xlsx
+        git check-ignore -v Retired/near_miss_registry.xlsx
+    near_miss_registry.xlsx is NOT currently in .gitignore — add it, or the
+    next `git add -A` re-commits it.
+    It must name the .gitignore line. If it prints nothing, the ignore is
+    still not taking effect and the file will be re-committed on the next
+    `git add -A`.
+
+  * The 8/10 runbook's Phase 0.3 secret check is worth re-running after any
+    history rewrite:
+        git ls-files | findstr /I "token .env secret key credential"
+    Must print nothing.
+
+  * Record the outcome in docs\analyst_notes.md and clear the commit-backlog
+    item that has been carried since 2026-07-27.
+
+=============================================================================
+Advisory-only · no orders · not financial advice.
+=============================================================================

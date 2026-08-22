@@ -310,25 +310,123 @@ def _user_agent():
 
 
 _last_call = [0.0]
-_budget    = {"start": None, "tripped": False}
+
+# --- DP-3C-j IMPLEMENTED 2026-08-20 -----------------------------------------
+# DP-3C-j ruled on 2026-08-03 that "the EDGAR budget bounds time spent INSIDE
+# edgar_client fetch/extract, not run wall clock." Until today it did not. The
+# budget started at prefetch and compared against time.monotonic(), so EVERY
+# Claude signal call, news fetch and quote round-trip in the whole run counted
+# against a ceiling nominally allocated to EDGAR. Measured 2026-08-03: EDGAR was
+# ~6% of the window it was being charged for. The consequences were not
+# theoretical:
+#
+#   2026-08-03  the warning fired at JPM; eight names lost their statements
+#               block and the in-run recompute was abandoned before it cached
+#               (F-1). "Cache writes DO persist" — but only if the write is
+#               reached.
+#   2026-08-18  fired at NTR, the 11th of 25 tickers, with 15 remaining. ONE
+#               name degraded.
+#   2026-08-20  fired again. ONE name degraded: CORN, the LAST ticker in the
+#               order, which had filed a NEW 10-Q on 2026-08-14. A new
+#               accession is a cold cache entry; the cold extraction was
+#               abandoned at the budget every session and therefore never
+#               written, so the same name degraded on every session after its
+#               filing. THAT IS NOT A CORN PROBLEM. Any covered name whose new
+#               periodic lands while it sits late in the processing order does
+#               the same, silently, on a quarterly cadence.
+#
+# THE FIX: the budget is now an ACCUMULATOR of time actually spent inside this
+# module, not a wall clock started once. _charge() measures a span; it is
+# re-entrant so a nested _http_get inside edgar_context is not double-counted;
+# and _spent() includes the in-flight span so one very long fetch cannot sail
+# past the ceiling without tripping it.
+#
+# EXPECTED EFFECT, stated in advance so it can be checked rather than assumed:
+# against ~7s of real EDGAR work per run, a 120s EDGAR-time ceiling should
+# never trip. If it does, that is a genuine EDGAR slowdown and worth reading —
+# which is what a budget is for, and what this one has never been able to say.
+_budget = {"spent": 0.0, "depth": 0, "t0": None, "tripped": False}
+
+# Why the most recent _http_get returned None. Lets extract_financials
+# distinguish "the budget cut this short" from "this filer has nothing",
+# which the pre-fix code explicitly could not — see the KNOWN LIMIT note it
+# carried, which named instrumenting _http_get as the fix and called it out
+# of scope. It is in scope now.
+_last_fetch = {"reason": None}
 
 
 def reset_budget():
-    """Start (or restart) the per-run EDGAR wall clock."""
-    _budget["start"] = time.monotonic()
+    """Reset the per-run EDGAR time accumulator."""
+    _budget["spent"] = 0.0
+    _budget["depth"] = 0
+    _budget["t0"] = None
     _budget["tripped"] = False
+    _last_fetch["reason"] = None
+
+
+class _charge:
+    """Charge wall time spent INSIDE edgar_client against the EDGAR budget.
+
+    Re-entrant on purpose: edgar_context() wraps a whole ticker and calls
+    _http_get() several times inside it. Only the OUTERMOST span charges, so
+    nested spans are measured once, not once per level."""
+
+    def __enter__(self):
+        if _budget["depth"] == 0:
+            _budget["t0"] = time.monotonic()
+        _budget["depth"] += 1
+        return self
+
+    def __exit__(self, *exc):
+        _budget["depth"] -= 1
+        if _budget["depth"] <= 0:
+            _budget["depth"] = 0
+            if _budget["t0"] is not None:
+                _budget["spent"] += time.monotonic() - _budget["t0"]
+            _budget["t0"] = None
+        return False
+
+
+def budget_spent():
+    """Seconds of EDGAR fetch/extract charged so far, INCLUDING any span
+    currently open. The in-flight term matters: without it a single long
+    fetch could exceed the ceiling and never trip it, because nothing would
+    be added to the accumulator until after the fetch returned."""
+    s = _budget["spent"]
+    if _budget["depth"] > 0 and _budget["t0"] is not None:
+        s += time.monotonic() - _budget["t0"]
+    return s
 
 
 def budget_exceeded():
-    if _budget["start"] is None:
-        reset_budget()
-        return False
-    over = (time.monotonic() - _budget["start"]) > EDGAR_MAX_SECONDS
+    over = budget_spent() > EDGAR_MAX_SECONDS
     if over and not _budget["tripped"]:
         _budget["tripped"] = True
-        log.warning("[EDGAR] run budget of %.0fs exhausted — remaining tickers "
-                    "degrade to no-EDGAR for this run.", EDGAR_MAX_SECONDS)
+        # TEXT RETIRED AND REPLACED 2026-08-20 per DP-3C-j. The old wording —
+        # "remaining tickers degrade to no-EDGAR for this run" — asserted a
+        # run-wide consequence that the per-ticker tags in the same file
+        # contradicted on 8/18 and 8/20, when fourteen of fifteen remaining
+        # names rendered full sections from warm cache and exactly one
+        # degraded. A reader taking it at face value concluded a cohort-level
+        # treatment loss that had not happened. Degradation is PER TICKER and
+        # only the fin= tag knows it; this line now says so.
+        log.warning("[EDGAR] budget of %.0fs of EDGAR fetch/extract time is spent. "
+                    "Names already served from warm cache are UNAFFECTED; only a "
+                    "ticker needing a COLD fetch from here on degrades, and each "
+                    "one says so in its own fin= tag. Read the tags, not this line.",
+                    EDGAR_MAX_SECONDS)
     return over
+
+
+def budget_report():
+    """One line of provenance for the run: how much EDGAR time was actually
+    spent against the ceiling. Recorded because the pre-fix budget could not
+    answer the question it existed to enforce."""
+    return ("[EDGAR] budget: {:.1f}s of EDGAR fetch/extract used of {:.0f}s "
+            "({:.0f}% of ceiling){}".format(
+                budget_spent(), EDGAR_MAX_SECONDS,
+                100.0 * budget_spent() / EDGAR_MAX_SECONDS if EDGAR_MAX_SECONDS else 0.0,
+                " — TRIPPED" if _budget["tripped"] else ""))
 
 
 def _throttle():
@@ -346,43 +444,59 @@ def _http_get(url, as_json=False):
     fetch failure omits the EDGAR section and the run continues on price +
     news, exactly the way a missing S1 or trajectory section degrades today.
     """
+    # ORDER MATTERS, and it is budget-first as of 2026-08-20. The budget is an
+    # unconditional stop on further EDGAR work, so it is answered before any
+    # question about whether the work COULD have been done. Checked outside the
+    # charge span on purpose: refusing a fetch costs no EDGAR time and must not
+    # be billed as though it did.
+    if budget_exceeded():
+        _last_fetch["reason"] = "budget"
+        return None
+
     ua = _user_agent()
     if not ua:
         log.warning("[EDGAR] SEC_USER_AGENT is not set — skipping fetch. "
                     "Add it to .env (Tier-0 secret); a generic UA returns 403.")
-        return None
-
-    if budget_exceeded():
+        _last_fetch["reason"] = "no-user-agent"
         return None
 
     headers = {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
 
-    for attempt in range(MAX_RETRIES + 1):
-        _throttle()
-        try:
-            if _requests is not None:
-                r = _requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-                if r.status_code == 429:
-                    time.sleep(1.0 + attempt)
-                    continue
-                if r.status_code == 403:
-                    log.error("[EDGAR] 403 for %s — check SEC_USER_AGENT; "
-                              "the IP may be blocked ~10 min.", url)
-                    return None
-                if r.status_code != 200:
-                    log.warning("[EDGAR] HTTP %s for %s", r.status_code, url)
-                    return None
-                return r.json() if as_json else r.text
-            else:                                        # pragma: no cover
-                req = _urlreq.Request(url, headers=headers)
-                with _urlreq.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                    body = resp.read().decode("utf-8", errors="replace")
-                return json.loads(body) if as_json else body
-        except Exception as e:
-            log.warning("[EDGAR] fetch failed (%s/%s) %s: %s",
-                        attempt + 1, MAX_RETRIES + 1, url, e)
-            time.sleep(0.5 * (attempt + 1))
-    return None
+    # DP-3C-j: everything from here to the return is EDGAR time — the throttle
+    # sleep included, because a rate-limit wait is time this module spends and
+    # a ceiling that ignored it would under-count the thing it bounds.
+    with _charge():
+        for attempt in range(MAX_RETRIES + 1):
+            _throttle()
+            try:
+                if _requests is not None:
+                    r = _requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+                    if r.status_code == 429:
+                        time.sleep(1.0 + attempt)
+                        continue
+                    if r.status_code == 403:
+                        log.error("[EDGAR] 403 for %s — check SEC_USER_AGENT; "
+                                  "the IP may be blocked ~10 min.", url)
+                        _last_fetch["reason"] = "http-403"
+                        return None
+                    if r.status_code != 200:
+                        log.warning("[EDGAR] HTTP %s for %s", r.status_code, url)
+                        _last_fetch["reason"] = "http-%s" % r.status_code
+                        return None
+                    _last_fetch["reason"] = None
+                    return r.json() if as_json else r.text
+                else:                                    # pragma: no cover
+                    req = _urlreq.Request(url, headers=headers)
+                    with _urlreq.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                        body = resp.read().decode("utf-8", errors="replace")
+                    _last_fetch["reason"] = None
+                    return json.loads(body) if as_json else body
+            except Exception as e:
+                log.warning("[EDGAR] fetch failed (%s/%s) %s: %s",
+                            attempt + 1, MAX_RETRIES + 1, url, e)
+                time.sleep(0.5 * (attempt + 1))
+        _last_fetch["reason"] = "fetch-failed"
+        return None
 
 
 # =============================================================================
@@ -1462,14 +1576,21 @@ def extract_financials(cik10, latest_accession=None, fetch=True, facts=None,
             return out
         facts = _http_get(XBRL_FACTS_URL.format(cik10=cik10), as_json=True)
     if not facts:
-        # budget_exceeded() is already True at this point iff the run clock
-        # tripped it — checking, not tripping, it a second time. KNOWN LIMIT:
-        # if the budget happened to trip for unrelated reasons in the same
-        # window a genuinely-filing-less ticker was also fetched, this reads
-        # "degraded" rather than "none" — the two are not perfectly
-        # separable from here without instrumenting _http_get itself, which
-        # is out of scope for this fix. Recorded rather than hidden.
-        out["degraded"] = budget_exceeded()
+        # KNOWN LIMIT CLOSED 2026-08-20. The previous version set
+        # out["degraded"] = budget_exceeded(), and its own comment named the
+        # defect: "if the budget happened to trip for unrelated reasons in the
+        # same window a genuinely-filing-less ticker was also fetched, this
+        # reads 'degraded' rather than 'none' — the two are not perfectly
+        # separable from here without instrumenting _http_get itself, which is
+        # out of scope for this fix."
+        #
+        # _http_get is now instrumented, so the two ARE separable: the budget
+        # is only responsible when it is the reason THIS fetch returned
+        # nothing. A filer with no XBRL facts now reads fin=none even on a
+        # session where the budget tripped for someone else — which is what
+        # DP-3C-j asked for, since a tag that means two different things is a
+        # tool reporting a value it did not compute.
+        out["degraded"] = (_last_fetch["reason"] == "budget")
         return out
 
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
@@ -1873,6 +1994,23 @@ def last_meta(ticker):
 
 def edgar_context(ticker, caches):
     """ContextProvider(mode="prompt") entry point.
+
+    DP-3C-j (implemented 2026-08-20): the whole per-ticker call is charged to
+    the EDGAR budget. This is the span that makes the budget mean what the
+    ruling says it means — it covers extraction and parsing, not only network
+    time, and it covers nothing else, because this function does nothing else.
+    The Claude signal call, the news fetch and the quote round-trip that used
+    to be billed to EDGAR happen outside it and are no longer charged.
+
+    _charge is re-entrant, so the several _http_get calls nested inside are
+    measured once by this span rather than once each.
+    """
+    with _charge():
+        return _edgar_context_inner(ticker, caches)
+
+
+def _edgar_context_inner(ticker, caches):
+    """The body. See edgar_context for the contract.
 
     CONTRACT (context_providers.py): returns (text, meta). Never raises into
     the run; "" contributes nothing to the prompt.
@@ -2294,12 +2432,54 @@ def cmd_selftest():
           "000032019326000070_q.htm")
     check("no accession -> no fetch", fetch_document("0000320193", "", "q.htm"), None)
 
-    print("run budget")
+    print("run budget — DP-3C-j: EDGAR fetch/extract time, NOT run wall clock")
     reset_budget()
     check("fresh budget not exceeded", budget_exceeded(), False)
-    _budget["start"] = time.monotonic() - (EDGAR_MAX_SECONDS + 1)
-    check("expired budget trips", budget_exceeded(), True)
+    check("fresh budget has spent nothing", round(budget_spent(), 6), 0.0)
+
+    # THE REGRESSION THIS BLOCK EXISTS TO PREVENT. Before 2026-08-20 the budget
+    # was a wall clock started at prefetch, so merely WAITING — for a Claude
+    # call, a news fetch, a quote — consumed it. Assert that it no longer does:
+    # real time passes and the accumulator does not move.
+    time.sleep(0.05)
+    check("wall-clock time OUTSIDE edgar_client is NOT charged",
+          round(budget_spent(), 6), 0.0)
+
+    # ...and that time INSIDE it is.
+    with _charge():
+        time.sleep(0.05)
+    check("time inside a charge span IS charged", budget_spent() >= 0.04, True)
+
+    # Re-entrancy: edgar_context wraps a ticker and calls _http_get several
+    # times inside it. Nested spans must be measured once, not once per level.
+    reset_budget()
+    with _charge():
+        with _charge():
+            with _charge():
+                time.sleep(0.05)
+    nested = budget_spent()
+    check("nested spans are not double-counted", nested < 0.12, True)
+    check("...and the depth unwinds to zero", _budget["depth"], 0)
+
+    # In-flight accounting: a span still open must already count, or one long
+    # fetch could pass the ceiling and never trip it.
+    reset_budget()
+    _budget["spent"] = EDGAR_MAX_SECONDS - 0.01
+    with _charge():
+        time.sleep(0.05)
+        check("an OPEN span counts toward the ceiling (in-flight)",
+              budget_exceeded(), True)
+
+    reset_budget()
+    _budget["spent"] = EDGAR_MAX_SECONDS + 1
+    check("spent budget trips", budget_exceeded(), True)
     check("fetch short-circuits when tripped", _http_get(CIK_MAP_URL), None)
+    check("...and records WHY it short-circuited", _last_fetch["reason"], "budget")
+    check("...and a refused fetch costs no EDGAR time",
+          round(budget_spent(), 3), round(EDGAR_MAX_SECONDS + 1, 3))
+    check("budget_report names the ceiling and the spend",
+          "of EDGAR fetch/extract used" in budget_report() and "TRIPPED" in budget_report(),
+          True)
     reset_budget()
 
     print("XBRL financial statements")
@@ -2782,14 +2962,48 @@ def cmd_selftest():
                     "financials": {"n_lines": 0, "period": None, "degraded": True}}),
           "E[8k=0; form4=0f; periodic=10-Q@2026-05-01; fin=degraded]")
 
-    print("extract_financials — degraded flag reflects the run budget, "
-          "not a guess")
+    print("extract_financials — degraded flag names the ACTUAL cause, not a guess")
     reset_budget()
     check("fresh budget: absent financials read fin=none, not degraded",
           extract_financials("0", None, facts={})["degraded"], False)
-    _budget["start"] = time.monotonic() - (EDGAR_MAX_SECONDS + 1)
-    check("tripped budget: absent financials read degraded",
+
+    _budget["spent"] = EDGAR_MAX_SECONDS + 1
+    check("budget-starved fetch: absent financials read degraded",
           extract_financials("0", None, fetch=True)["degraded"], True)
+
+    # KNOWN LIMIT CLOSED 2026-08-20. The old flag was `budget_exceeded()`, so a
+    # genuinely filing-less ticker fetched in the same window as an unrelated
+    # budget trip read "degraded" rather than "none" — the code's own comment
+    # said so and called the fix out of scope. _http_get is instrumented now,
+    # so the cause is recorded rather than inferred: a fetch that failed for a
+    # NON-budget reason must not be blamed on the budget even while the budget
+    # is tripped.
+    # facts={} not facts=None: with facts=None and fetch=False the function
+    # returns before it ever reaches the degraded branch, so a test written
+    # that way passes without exercising anything. Caught by this selftest
+    # while writing it, and recorded because a test that cannot fail is the
+    # same defect class as a check that cannot pass.
+    _last_fetch["reason"] = "fetch-failed"
+    check("tripped budget + unrelated fetch failure reads none, NOT degraded",
+          extract_financials("0", None, facts={})["degraded"], False)
+    _last_fetch["reason"] = "budget"
+    check("...and a genuine budget cut still reads degraded",
+          extract_financials("0", None, facts={})["degraded"], True)
+    reset_budget()
+
+    print("the run-level warning text — DP-3C-j, retired 2026-08-20")
+    reset_budget()
+    _budget["spent"] = EDGAR_MAX_SECONDS + 1
+    _msgs = []
+    _h = type("H", (logging.Handler,), {"emit": lambda s, r: _msgs.append(r.getMessage())})()
+    log.addHandler(_h)
+    budget_exceeded()
+    log.removeHandler(_h)
+    _warn = " ".join(_msgs)
+    check("warning no longer claims a run-wide consequence",
+          "remaining tickers degrade" in _warn, False)
+    check("...and points the reader at the per-ticker tags",
+          "fin=" in _warn and "warm cache" in _warn, True)
     reset_budget()
 
     print()
