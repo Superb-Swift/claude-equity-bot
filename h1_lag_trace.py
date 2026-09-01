@@ -186,8 +186,18 @@ def band_calibration(tracker):
              else "60-69" if 60 <= p < 70 else None)
         if b is None:
             continue
+        # FIXED 2026-08-26. This previously incremented the denominator
+        # for EVERY row in the band and the numerator only on YES, so an
+        # unresolved +5d counted as a miss. On the 2026-08-26 slice that
+        # deflated the three printed rates by 5.2, 9.5 and 9.5 points --
+        # non-uniformly, because it depends on the unresolved tail's band
+        # mix, and worst on the newest data. A row belongs in the
+        # denominator only once it has an outcome.
+        verdict = str(ws.cell(row=r, column=COL["right5"]).value or "").strip().upper()
+        if verdict not in ("YES", "NO"):
+            continue
         agg[b][1] += 1
-        if str(ws.cell(row=r, column=COL["right5"]).value or "").strip().upper() == "YES":
+        if verdict == "YES":
             agg[b][0] += 1
     wb.close()
     return agg
@@ -394,6 +404,7 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
 
     return dict(best_L=best_L, r_now=r_now, r_fwd=r_fwd, ok_cal=ok_cal,
                 cache_blank=cache_blank,
+                raw_rows=n_raw, raw_used=(raw_map is not None),
                 rows=rows, trail=trail, arc=arc, agg=agg)
 
 
@@ -410,9 +421,26 @@ def write_md(res, ticker, window, tracker, out_dir, suffix=""):
     def _r(v):
         return "—" if v is None else f"{v:+.3f}"
 
-    lines = [f"# H1 Lag Trace — {ticker}",
-             f"*Source: `{os.path.basename(tracker)}` · window {window}d · "
-             f"generated {dt.datetime.now():%Y-%m-%d %H:%M}.*", "",
+    # PROVENANCE, corrected 2026-08-26. Under --raw-from-logs the Conf
+    # column is the RAW pre-damping channel, which is NOT in the tracker --
+    # the tracker stores the OPERATIVE value. Crediting only the workbook
+    # made the WMT exhibit look wrong against its own stated source on
+    # every damped row (08-20..08-24 printed 42/38/38 against a stored
+    # 0.35, the D1 floor). Say where each column came from.
+    if res.get("raw_used"):
+        src = (f"*Prices and outcomes: `{os.path.basename(tracker)}`. "
+               f"**`Conf` is the RAW pre-damping channel, parsed from the "
+               f"session logs** ({res.get('raw_rows', 0)} row(s) overridden; "
+               f"the rest fall back to the tracker's operative value, which "
+               f"equals raw wherever damping was inactive). The tracker "
+               f"itself stores OPERATIVE confidence and will differ from "
+               f"this column on any damped row.* · window {window}d · "
+               f"generated {dt.datetime.now():%Y-%m-%d %H:%M}.")
+    else:
+        src = (f"*Source: `{os.path.basename(tracker)}` (`Conf` is the "
+               f"OPERATIVE, post-damping channel) · window {window}d · "
+               f"generated {dt.datetime.now():%Y-%m-%d %H:%M}.*")
+    lines = [f"# H1 Lag Trace — {ticker}", src, "",
              f"**Estimated update lag: {res['best_L']} session(s)** · "
              f"corr(conf, trailing move) = {_r(res['r_now'])} · "
              f"corr(conf, +5d) = {_r(res['r_fwd'])}", "",
@@ -439,13 +467,23 @@ def write_md(res, ticker, window, tracker, out_dir, suffix=""):
     # It matters because monitor_strip's G1 episode detector uses THIS basis
     # while importing THETA from the damping engine, which uses the other.
     lines[4:4] = [
-        "> **TRAIL BASIS.** `Trail" + str(window) + "d` walks back " + str(window)
+        "> **TRAIL BASIS — THREE differences, not two.** `Trail" + str(window)
+        + "d` walks back " + str(window)
         + " **tracker rows** (a session this ticker missed is skipped, not counted) "
-          "and prices off **Price at Signal**, a ~09:3x quote. The run's own "
-          "`H1[trail5d=…]` / `D[trail=…]` tags walk back " + str(window)
-        + " **market sessions** and price off **closes**. The two can differ in "
-          "magnitude and, where a row is missing, in SIGN. Recorded 2026-08-21 "
-          "after GM read −0.31% here against +2.75% in the run.", ""]
+          "and prices off **Price at Signal**, a ~09:3x quote, ending at the "
+          "most recent row. The run's own `H1[trail5d=…]` / `D[trail=…]` tags "
+          "price off **closes** — but their window is **shifted one session "
+          "forward and its right edge is a live intraday print**, because "
+          "`schwab_client.get_price_history()` dates candles in local time and "
+          "admits the in-progress session (measured every run by "
+          "`trail_basis_audit.py`; diagnosis in "
+          "`H1_Window_OffByOne_Defect_2026-08-26.md`). **That third term is "
+          "the largest.** Recorded 2026-08-21 after GM read −0.31% here "
+          "against +2.75% in the run; amended 2026-08-26 after WMT read "
+          "**−10.20% here against +0.78% in the run** — opposite signs, 10.98 "
+          "points, on the WS2 tracer. Under the documented contract for that "
+          "function, **this column is the closer of the two**; the run's "
+          "figure is the one that is wrong, and THETA damping uses it.", ""]
     for i, x in enumerate(rows):
         lines.append(
             f"| {x['date'].isoformat()} | {x['signal']} | "

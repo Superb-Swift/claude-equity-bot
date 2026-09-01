@@ -61,3 +61,8 @@ git_push_monitor.txt
 # Generated registry copy - carries account labels, prices and confidences.
 # Untracked 2026-08-22; its history is purged in JOB B.
 Retired/near_miss_registry.xlsx
+
+# Source backups produced by the patch scripts. Kept on disk under
+# Retired\patches\backups\ for reproducibility; git already has the history.
+*.bak
+*.bak-*

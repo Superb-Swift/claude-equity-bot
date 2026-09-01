@@ -16,8 +16,19 @@
 
 import os
 import schwab
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
+
+# H1 WINDOW FIX (proposed 2026-08-26): Schwab stamps daily candles in a
+# zone east of this machine. Converting with local-time fromtimestamp()
+# dated every candle one day early, which let today's in-progress candle
+# through the completed-sessions filter. Both sides of the comparison are
+# now explicit: candle dates come from UTC, 'today' comes from Eastern.
+try:
+    from zoneinfo import ZoneInfo
+    _MARKET_TZ = ZoneInfo("America/New_York")
+except Exception:                      # pragma: no cover
+    _MARKET_TZ = timezone.utc
 
 load_dotenv()
 
@@ -208,17 +219,27 @@ def get_price_history(ticker: str, days: int = 5) -> list:
         response = client.get_price_history_every_day(ticker)
         candles = response.json().get("candles", [])
 
-        today = datetime.now().date()
+        today = datetime.now(_MARKET_TZ).date()
         closes = []
         for c in candles:
             ts = c.get("datetime")
             close = c.get("close")
             if ts is None or close is None:
                 continue
-            # Schwab candle 'datetime' is epoch milliseconds.
-            cdate = datetime.fromtimestamp(ts / 1000).date()
+            # Schwab candle 'datetime' is epoch milliseconds, stamped in a
+            # market-side zone. Date it in UTC and compare against the
+            # market's own 'today' -- never the machine's local date.
+            cdate = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
             if cdate < today:                 # completed sessions only
                 closes.append({"date": cdate.isoformat(), "close": close})
+
+        # The docstring promises the in-progress candle is excluded. Say so
+        # out loud rather than trusting it: this is the exact condition that
+        # silently held from at least 2026-08-13 to 2026-08-26.
+        if closes and closes[-1]["date"] >= today.isoformat():
+            print(f"[schwab_client] WARNING: newest candle for {ticker} is "
+                  f"{closes[-1]['date']} against market today {today} -- "
+                  f"an in-progress session reached the H1 window.")
 
         return closes[-days:]
 

@@ -12,7 +12,18 @@ REM  Usage:  scan.bat                 (uses today's date)
 REM          scan.bat 2026-07-30      (explicit date)
 REM
 REM  Exit 0 = clean. Exit 1 = findings. Exit 2 = could not run.
-REM  None of the three tools writes to any workbook. All are formula-cache immune.
+REM  None of the tools writes to any workbook. All are formula-cache immune.
+REM
+REM  AMENDED 2026-08-26: two checks added so nobody has to remember them.
+REM    * trading_calendar --selftest    - the NYSE session calendar, reconciled
+REM      against the master. Gates: a calendar that disagrees with the record
+REM      makes every horizon mapping below it untrustworthy.
+REM    * trail_basis_audit              - measures the H1 trailing window.
+REM      REPORTS ONLY. It is expected to find the known open window defect
+REM      (H1_Window_OffByOne_Defect_2026-08-26.md) and must not turn the scan
+REM      red every day for an item awaiting a ruling.
+REM  outcome_sanity now also carries Check F (log-close reconciliation), which
+REM  likewise reports without gating. No new commands to run.
 REM ============================================================================
 setlocal
 
@@ -32,11 +43,22 @@ set "MASTER=logs\claude_equity_bot_tracker.xlsx"
 
 if not exist "%LOGFILE%" (
     echo ERROR: no log for %RUNDATE% at %LOGFILE%
-    echo        NYSE holiday? No log is produced and there is nothing to scan.
+    REM Distinguish "market was shut" from "the bot did not run", which are not
+    REM the same fact and used to print the same message.
+    python -c "import datetime,sys;sys.path.insert(0,'.');import trading_calendar as c;d=datetime.date.fromisoformat('%RUNDATE%');print('        NOT AN NYSE SESSION (weekend or holiday) - nothing to scan.') if not c.is_trading_day(d) else (print('        PRE-REGISTERED NO-RUN SESSION: '+c.BOT_ABSENT[d][0]) or print('        See '+c.BOT_ABSENT[d][1]+'. The market traded; the bot did not.') if d in c.BOT_ABSENT else print('        Market was OPEN and no log exists. That is a MISSED RUN, not a holiday.'))" 2>nul
     exit /b 2
 )
 
 set "RC=0"
+
+echo.
+echo ### trading calendar - selftest and reconciliation vs the master
+python trading_calendar.py --selftest --tracker "%MASTER%"
+if errorlevel 1 (
+    echo   STOP: the session calendar disagrees with the record. Every horizon
+    echo         mapping below this line is untrustworthy until that is resolved.
+    set "RC=1"
+)
 
 echo.
 echo ### signal_scan - %RUNDATE%
@@ -49,7 +71,7 @@ python log_tracker_crosscheck.py --log "%LOGFILE%" --tracker "%MASTER%"
 if errorlevel 1 set "RC=1"
 
 echo.
-echo ### outcome sanity - manual-entry outcome columns
+echo ### outcome sanity - manual outcome columns, + Check F (log-close reconcile)
 python outcome_sanity.py --tracker "%MASTER%"
 if errorlevel 2 (
     echo   NOTE: outcome_sanity could not run. It must be given the MASTER,
@@ -57,6 +79,17 @@ if errorlevel 2 (
     set "RC=2"
 ) else if errorlevel 1 (
     set "RC=1"
+)
+
+echo.
+echo ### H1 trailing-window audit - REPORTING ONLY, does not gate this scan
+python trail_basis_audit.py --tracker "%MASTER%" >nul 2>&1
+if errorlevel 1 (
+    echo   The H1 window defect is still present and still UNRULED.
+    echo   Detail: python trail_basis_audit.py
+    echo   Decide:  H1_Window_OffByOne_Defect_2026-08-26.md
+) else (
+    echo   Window spans the sessions its label claims. Nothing owed.
 )
 
 echo.

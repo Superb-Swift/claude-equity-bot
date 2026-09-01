@@ -1,0 +1,215 @@
+--- edgar_client.py.bak	2026-08-26 01:31:51.188922407 +0000
++++ edgar_client.py	2026-08-26 01:31:51.215488507 +0000
+@@ -83,8 +83,20 @@
+                     "{accession_nodash}/{document}")
+ FILING_INDEX_URL = ("https://www.sec.gov/Archives/edgar/data/{cik}/"
+                     "{accession_nodash}/index.json")
++FILING_HEADER_URL = ("https://www.sec.gov/Archives/edgar/data/{cik}/"
++                     "{accession_nodash}/{accession}-index-headers.html")
+ XBRL_FACTS_URL   = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
+ 
++# A PROVISIONAL extract is one whose period is not the period the filing
++# itself reports, because the facts for that period were not in this CIK's
++# companyfacts feed when it was computed. The fin_ cache is keyed by the
++# LATEST PERIODIC ACCESSION, which is right for an immutable document and
++# wrong for a feed that fills in afterwards: without this, one provisional
++# extract is pinned until the NEXT periodic is filed -- a full quarter.
++# Found on DOW 2026-08-26: the Q2 extract written 2026-08-11 would have been
++# served unchanged until the Q3 10-Q in late October.
++PROVISIONAL_RECHECK_SECONDS = 6 * 3600
++
+ # SEC etiquette (Scope Spec §1). 10 req/sec per IP; the spec asks for >=120 ms.
+ # A missing or generic User-Agent returns 403 plus a ~10-minute IP block.
+ RATE_LIMIT_DELAY = 0.125          # seconds between ANY two SEC calls
+@@ -1538,6 +1550,80 @@
+     return TOTAL_REVENUE_CONCEPT, key, tot_latest, tot_prior
+ 
+ 
++_CIK_IN_HEADER = re.compile(r"CENTRAL\s+INDEX\s+KEY:\s*(\d{10})", re.I)
++
++
++def _submission_filer_ciks(cik10, accession):
++    """Every FILER CIK on one submission, in the order the header lists them.
++
++    ANALYST NOTE (2026-08-26, DOW). A COMBINED FILING is one document with
++    two registrants -- a parent and a subsidiary co-registering a single
++    10-Q. SEC's XBRL ingest attributes the facts to ONE CIK, and it is not
++    always the primary filer's. DOW Inc. (CIK 1751788) filed accession
++    0001751788-26-000147 for the period ended 2026-06-30 with The Dow
++    Chemical Company (CIK 29915) as co-filer, and companyfacts placed the
++    ENTIRE Q2 statement set under 29915. CIK 1751788's feed stops at the Q1
++    accession; CIK 29915's own history stops in 2018 and then resumes with
++    this one accession. Verified against data.sec.gov on 2026-08-26.
++
++    Returns [] on any failure -- this is an exception path and must never
++    raise into a run (E3).
++    """
++    if not accession:
++        return []
++    body = _http_get(FILING_HEADER_URL.format(
++        cik=cik10.lstrip("0") or "0",
++        accession_nodash=accession.replace("-", ""),
++        accession=accession))
++    if not body:
++        return []
++    out, seen = [], set()
++    for m in _CIK_IN_HEADER.finditer(body):
++        c = m.group(1)
++        if c not in seen:
++            seen.add(c)
++            out.append(c)
++    return out
++
++
++def _facts_from_co_registrant(cik10, accession, report_date):
++    """Recover one filing's facts from a co-filer's companyfacts feed.
++
++    THE ACCESSION IS THE JOIN KEY AND THE ONLY ONE. Entries tagged with this
++    accession came from the document already identified, whichever CIK SEC
++    filed them under. Entries tagged with any OTHER accession are a different
++    registrant's numbers -- in a parent/subsidiary pair they are genuinely
++    different financials -- and are DROPPED, never merged. This is the same
++    discipline value_anchor's two-route join uses when it refuses to resolve
++    a ticker on a filename prefix: match exactly or report nothing.
++
++    Returns (facts_subset, cik) or (None, None).
++    """
++    for cand in _submission_filer_ciks(cik10, accession):
++        if cand == cik10:
++            continue
++        facts = _http_get(XBRL_FACTS_URL.format(cik10=cand), as_json=True)
++        if not facts:
++            continue
++        gaap = (facts.get("facts") or {}).get("us-gaap") or {}
++        kept = {}
++        for concept, node in gaap.items():
++            units = {}
++            for unit_key, entries in (node.get("units") or {}).items():
++                rows = [e for e in entries if e.get("accn") == accession]
++                if rows:
++                    units[unit_key] = rows
++            if units:
++                kept[concept] = dict(node, units=units)
++        if kept and _has_entry_at(kept, report_date):
++            log.info("[EDGAR] %s: facts for %s absent from CIK %s; recovered "
++                     "%d concept(s) from co-registrant CIK %s on the SAME "
++                     "accession %s", accession, report_date, cik10,
++                     len(kept), cand, accession)
++            return {"facts": {"us-gaap": kept}}, cand
++    return None, None
++
++
+ def extract_financials(cik10, latest_accession=None, fetch=True, facts=None,
+                        report_date=None):
+     """Headline financial statement lines from XBRL, with year-over-year.
+@@ -1565,9 +1651,31 @@
+                 with open(cache_file, encoding="utf-8") as f:
+                     cached = json.load(f)
+                 if cached.get("schema") == EXTRACT_SCHEMA:
+-                    return cached
+-                log.info("[EDGAR] financials cache schema %s != %s — recomputing",
+-                         cached.get("schema"), EXTRACT_SCHEMA)
++                    # An extract whose period is not the filing's own period
++                    # was computed before the feed caught up. Accession-keying
++                    # would serve it until the NEXT periodic, so re-check it on
++                    # an interval instead. Derived here rather than trusted
++                    # from the file, so caches written before this change are
++                    # classified correctly without a schema bump -- bumping
++                    # would invalidate every ticker's extract at once and
++                    # spend the whole EDGAR budget refetching companyfacts.
++                    provisional = bool(report_date and cached.get("period")
++                                       and cached["period"] != report_date)
++                    if not provisional:
++                        return cached
++                    try:
++                        age = time.time() - os.path.getmtime(cache_file)
++                    except OSError:
++                        age = PROVISIONAL_RECHECK_SECONDS
++                    if age < PROVISIONAL_RECHECK_SECONDS:
++                        cached["provisional"] = True
++                        return cached
++                    log.info("[EDGAR] financials for %s are PROVISIONAL "
++                             "(extract at %s, filing reports %s) — re-checking",
++                             latest_accession, cached["period"], report_date)
++                else:
++                    log.info("[EDGAR] financials cache schema %s != %s — recomputing",
++                             cached.get("schema"), EXTRACT_SCHEMA)
+             except (OSError, ValueError, AttributeError):
+                 pass
+ 
+@@ -1708,6 +1816,28 @@
+ 
+     out["dropped"] = _consistency_filter(out["lines"])
+ 
++    # The primary CIK's feed did not carry the filing's own period. Before
++    # accepting the prior period as the answer, check whether a co-registrant
++    # on the SAME accession carries it. Only reached on the exception path, so
++    # it costs nothing on a healthy ticker.
++    if (fetch and report_date and latest_accession
++            and out.get("period") and out["period"] != report_date):
++        alt, alt_cik = _facts_from_co_registrant(
++            cik10, latest_accession, report_date)
++        if alt:
++            rec = extract_financials("0", None, fetch=False, facts=alt,
++                                     report_date=report_date)
++            if rec.get("lines") and rec.get("period") == report_date:
++                rec["co_registrant_cik"] = alt_cik
++                out = rec
++
++    # Stamped on the object AND written to the cache so the next run can tell
++    # a settled extract from one still waiting on the feed. DP-3C-j's rule:
++    # a field that means two different things is a tool reporting a value it
++    # did not compute.
++    out["provisional"] = bool(report_date and out.get("period")
++                              and out["period"] != report_date)
++
+     if cache_file and out["lines"]:
+         try:
+             os.makedirs(EDGAR_CACHE_DIR, exist_ok=True)
+@@ -1783,10 +1913,16 @@
+     #   silently misleading. Say it explicitly when the two disagree.
+     if periodic and periodic.get("report") and fin.get("period"):
+         if fin["period"] < periodic["report"]:
++            # CORRECTED 2026-08-26. This previously read "is not yet
++            # published by SEC", which is a CAUSE the client cannot observe
++            # and which was FALSE for DOW: the Q2 2026 facts were published
++            # on the filing date, under the co-registrant's CIK. State what
++            # was actually observed -- the facts are not in the feed this
++            # client read -- and let the reason stay unclaimed.
+             lines.append(
+                 f"  NOTE: these are the PRIOR period's figures — XBRL data for "
+                 f"the {periodic.get('form')} covering {periodic['report']} is "
+-                f"not yet published by SEC.")
++                f"not present in this filer's companyfacts feed.")
+ 
+     for ln in fin.get("dropped", []):
+         lines.append(f"  (a reported {ln['label'].lower()} figure was withheld: "
+@@ -1952,7 +2088,18 @@
+ 
+     fin = meta.get("financials") or {}
+     if fin.get("n_lines"):
+-        parts.append(f"fin={fin['n_lines']}@{fin.get('period')}")
++        # DP-3C-j's rule applied to a second way this tag could mean two
++        # things: `fin=7@2026-03-31` read identically whether that period IS
++        # the filing's period or is a fallback because the feed lacks it. The
++        # PROMPT said so in prose; the tag did not, and the exhibits read the
++        # tag. `~prov` = provisional. `+coregNNNNNNNNNN` = recovered from a
++        # co-registrant's feed on the same accession.
++        tag = f"fin={fin['n_lines']}@{fin.get('period')}"
++        if fin.get("provisional"):
++            tag += "~prov"
++        elif fin.get("co_registrant_cik"):
++            tag += f"+coreg{fin['co_registrant_cik']}"
++        parts.append(tag)
+     elif fin.get("degraded"):
+         parts.append("fin=degraded")
+     else:
+@@ -2052,6 +2199,8 @@
+                      "form4": form4, "periodic": periodic,
+                      "financials": {"n_lines": len(financials["lines"]),
+                                     "period": financials.get("period"),
++                                    "provisional": financials.get("provisional", False),
++                                    "co_registrant_cik": financials.get("co_registrant_cik"),
+                                     "degraded": financials.get("degraded", False)},
+                      "forms_seen": sorted({r["form"] for r in rows})[:20]})
+         return section, meta

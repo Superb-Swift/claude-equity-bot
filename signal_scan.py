@@ -58,6 +58,11 @@ TRACERS = ("WMT", "GM")          # pre-registered: WMT primary / GM secondary
 KNOWN_ERAS = {
     "A-S1D1-B1":    "pre-EDGAR (3-B)",
     "A-S1D1-B1-E1": "EDGAR live (3-C)",
+    # ADDED 2026-08-26 with the H1 window ruling. D2 = trailing move over
+    # five COMPLETED sessions; D1 = the shifted window ending on a live
+    # intraday print. Same treatment, different measurement.
+    "A-S1D2-B1":    "pre-EDGAR (3-B), H1 window corrected",
+    "A-S1D2-B1-E1": "EDGAR live (3-C), H1 window corrected",
 }
 # Treatment rank, for the era-change alarm's DIRECTION rule (added 2026-08-20).
 #   higher = more treatment. A move DOWN is a regression; a move UP is a recovery.
@@ -73,6 +78,11 @@ KNOWN_ERAS = {
 ERA_RANK = {
     "A-S1D1-B1":    0,
     "A-S1D1-B1-E1": 1,
+    # RANK IS TREATMENT, and the H1 window ruling changes none of it: the
+    # EDGAR arm is untouched. Equal rank across the D1->D2 line is the
+    # correct statement and is what routes it to the third branch below.
+    "A-S1D2-B1":    0,
+    "A-S1D2-B1-E1": 1,
 }
 BUY_GATE = 70                    # KEEP 70% - unchanged
 SELL_GATE = 65                   # risk_engine.RiskConfig.MIN_CONFIDENCE_SELL
@@ -399,6 +409,17 @@ def run_integrity(records, theta_src, warnings, prior=None):
                                 "Check EQUITY_EDGAR. This cohort is a CONTROL run: it is ABSENT "
                                 "from E4 rather than excluded from it, and the E4 clock does "
                                 "not advance".format(p_date, p_era, this_era)))
+                elif now == was:
+                    # ADDED 2026-08-26. A deliberate generation bump at the SAME
+                    # treatment rank is neither a loss nor a recovery, and the
+                    # RESTORED advice below would be actively wrong for it.
+                    out.append(("WARN",
+                                "era stamp CHANGED since {}: {} -> {}  ** SAME treatment "
+                                "rank, so nothing was lost or restored. This is a ruled "
+                                "generation bump. Cohorts either side are DIFFERENT "
+                                "MEASUREMENTS on the changed channel - do not pool across "
+                                "the line. Confirm the ruling is recorded."
+                                .format(p_date, p_era, this_era)))
                 else:
                     out.append(("WARN",
                                 "era stamp RESTORED since {}: {} -> {}  ** treatment is back and "

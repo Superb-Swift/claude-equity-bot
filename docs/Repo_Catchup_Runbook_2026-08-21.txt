@@ -1,5 +1,5 @@
 =============================================================================
-REPO CATCH-UP + EXPOSURE REMEDIATION RUNBOOK — v3, 2026-08-22
+REPO CATCH-UP + EXPOSURE REMEDIATION RUNBOOK — v4, 2026-08-22
 Claude Equity Bot · repo Superb-Swift/claude-equity-bot
 Companion to commit_backlog_runbook_2026-08-10.txt, same house rules.
 =============================================================================
@@ -57,6 +57,37 @@ v2 — WHAT THE 2026-08-21 18:55 LIVE RUN CHANGED
   view that was stale, and the run exposed it. v2 stages by category and
   tolerates missing paths, so the script cannot silently assume a repo shape
   again.
+
+
+v4 — JOB A IS DONE. WHAT THE PUSH REVEALED, INCLUDING A CORRECTION
+
+  JOB A completed 2026-08-22 12:26 and pushed as 7f60462..bc6b4a9. Verified
+  against a fresh clone of origin: all 17 Phase 3-C files present, all four
+  retired tools moved, no secret tracked, docs/analyst_notes.md landed at the
+  current 666,565 bytes, and all four corrected instruments carry their
+  2026-08-21 changes.
+
+  CORRECTION I OWE YOU — tracker_with_registry.xlsx. I reported it as "tracked
+  and public because .gitignore does not bite." The first half was true of
+  ORIGIN when I read it; the cause was not. YOU had already untracked it, in
+  local commit 909bda7, which was simply unpushed. Pushing JOB A carried that
+  removal with it. So:
+      * NOT tracked going forward - already fixed by you, now published
+      * STILL IN HISTORY - 4 commits, 3 reachable blobs. JOB B still applies.
+  I read origin correctly and then attributed it to the wrong cause. The
+  remedy is unchanged; the diagnosis was wrong.
+
+  STILL LIVE — Retired/near_miss_registry.xlsx. Tracked on origin right now,
+  2 history entries, 2 reachable blobs. Account labels, prices, confidences.
+
+  THIRD INSTANCE OF THE SAME CLASS — the exhibit ignores are INERT. JOB A's
+  .gitignore patterns correctly kept the NEW dated exhibits out, but twenty
+  files were already tracked from earlier commits and an ignore rule never
+  untracks. They will churn on every session until removed from the index.
+
+  RUN repo_untrack_exhibits.bat BEFORE JOB B. It is git rm --cached only:
+  every file stays on disk, history is untouched, and it also untracks the
+  registry copy so JOB B's purge is not immediately undone by the next add.
 
 
 v3 — WHAT THE 2026-08-22 11:59 LIVE RUN CHANGED
@@ -164,7 +195,7 @@ NOT TOUCHED — still ignored, still local only:
 
 
 =============================================================================
-JOB A — RUN THIS
+JOB A — DONE 2026-08-22 (7f60462..bc6b4a9). Kept for the record.
 =============================================================================
 
     cd C:\Users\rober\claude-equity-bot

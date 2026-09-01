@@ -103,7 +103,17 @@ AB_VARIANTS = ("A", "B")
 #   diagnostic smoke -> go-live next AM. Set EQUITY_EDGAR=1 at go-live only.
 EDGAR_ENABLED = os.environ.get("EQUITY_EDGAR", "0") == "1"
 
-PROMPT_VARIANT = "A-S1D1-B1-E1" if EDGAR_ENABLED else "A-S1D1-B1"
+# ERA BUMP 2026-08-26, ruled by the operator. The H1 trailing window was
+# shifted one session forward and ended on a live intraday print; see
+# H1_Window_OffByOne_Defect_2026-08-26.md. risk_engine.compute_trail_pct()
+# reads that series and feeds THETA damping, so the D generation is what
+# changes. S1, B1 and E1 are untouched and keep their numbers deliberately:
+# the stamp should say WHICH channel moved, not merely that something did.
+#
+# DO NOT POOL ACROSS THIS LINE. H1 trailing moves before and after are
+# different measurements, so any lag, damping or episode series spanning it
+# is measuring two things. Same discipline as DP-3C-o.
+PROMPT_VARIANT = "A-S1D2-B1-E1" if EDGAR_ENABLED else "A-S1D2-B1"
 
 WATCHLIST_SCOUT = [
     "SPY",
@@ -113,7 +123,12 @@ WATCHLIST_SCOUT = [
     "GLD",
     "SPCX",
     "GM",
+    "NTR",
+    "USO",
     # CORN — added 2026-08-14 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
+    # GM — added 2026-08-18 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
+    # NTR — added 2026-08-25 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
+    # USO — added 2026-08-25 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
     #
     # ANALYST NOTE:
     #   CORN was sold out of the Individual account on 2026-08-14 and would
