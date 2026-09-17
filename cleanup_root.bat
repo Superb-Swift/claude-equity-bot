@@ -49,9 +49,19 @@ set "LOGRET=logs\Retired"
 set "DOCARC=docs\Archived"
 
 REM ---- run stamp -----------------------------------------------------------
-for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value 2^>nul') do set "LDT=%%I"
-if not defined LDT set "LDT=00000000000000"
-set "STAMP=%LDT:~0,8%_%LDT:~8,6%"
+REM  2026-09-17 (repo remediation R5): wmic is absent from current Windows
+REM  builds, so the old 'wmic os get localdatetime' call returned nothing and
+REM  STAMP fell through to 00000000_000000 on EVERY run. MANIFEST and UNDO are
+REM  opened with '>' (truncate), so each APPLY silently overwrote the previous
+REM  run's undo script. PowerShell Get-Date is the supported replacement, and
+REM  an unstamped run now ABORTS instead of proceeding.
+set "STAMP="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"`) do set "STAMP=%%I"
+if not defined STAMP (
+  echo   FATAL: could not resolve a run stamp. Refusing to run unstamped,
+  echo          because an unstamped run overwrites the previous run's undo.
+  exit /b 1
+)
 set "MANIFEST=cleanup_manifest_%STAMP%.txt"
 set "UNDO=undo_cleanup_%STAMP%.bat"
 

@@ -16,7 +16,15 @@ Thumbs.db
 
 # Logs
 *.log
-logs/
+# logs/* rather than logs/ so the two negations below are honoured: git
+# cannot re-include a file whose parent DIRECTORY is excluded. (2026-09-17)
+logs/*
+# ...EXCEPT the two provenance ledgers: the readings behind ruled decision
+# points (rulings.py) and the audit trail of every master close entered or
+# repaired (enter_closes.py / repair_outcome_close.py). Neither holds account
+# data. The master itself stays ignored (personal trading outcomes).
+!logs/instrument_readings.json
+!logs/outcome_close_repairs.log
 
 # Microsoft Office temp/lock files
 ~$*.docx
@@ -66,3 +74,16 @@ Retired/near_miss_registry.xlsx
 # Retired\patches\backups\ for reproducibility; git already has the history.
 *.bak
 *.bak-*
+
+# Local-only folders (2026-09-17): session hand-offs and pre-change source
+# backups. Both stay on disk; git already has the history.
+Claude outputs/
+Retired/patches/backups/
+
+# One-off run artifacts (repo remediation R2/R5, 2026-09-17)
+closes_*.tsv
+cleanup_manifest_*.txt
+cleanup_docs_manifest_*.txt
+undo_cleanup_*.bat
+# Master backups written by enter_closes / repair_outcome_close
+*_backup_*.xlsx

@@ -1,8 +1,22 @@
-# Claude Equity Bot - declared Python dependency for the analysis tooling.
-# The four hypothesis harnesses (h1_lag_trace, h2_direction_asymmetry,
-# h3_thesis_stability, h4_dq_threshold) and build_near_miss_registry read the
-# .xlsx tracker via openpyxl. The bot core (claude_signal, schwab_client,
-# main, parse_log_to_tracker) uses only the standard library plus the bot's
-# runtime packages (schwab-py, anthropic, finnhub, flask), installed separately.
-# To capture your full environment exactly:  pip freeze > requirements-lock.txt
+# Claude Equity Bot - complete runtime + analysis dependency set.
+#
+# 2026-09-17 (repo remediation R8a): this file used to declare openpyxl only,
+# with the bot's runtime packages living in README prose. A README is not a
+# manifest, and an unpinned broker or model client can change response shapes
+# under a measurement apparatus that assumes field semantics are stable.
+#
+# Install:            pip install -r requirements.txt
+# Exact environment:  pip freeze > requirements-lock.txt   (commit it)
+#
+# Bot runtime
+schwab-py
+anthropic
+finnhub-python
+python-dotenv
+flask
+cryptography
+# Analysis tooling and the daily runners
 openpyxl>=3.1
+matplotlib       # h1_lag_trace chart, monitor_strip cards
+numpy            # monitor_strip
+Pillow           # monitor_strip PNG resample + workbook embed

@@ -11,7 +11,8 @@
 #     WS1 / G2   blend vs base        gate-flip net + confirm/discount arms
 #     WS2 / G1   H1 acceptance clock  episodes detected + response verdict
 #     H4         DQ-conditional gate  HIGH-DQ near-miss n & hit% vs the bars
-#     KEEP-70    the 70% BUY gate     all resolved near-miss BUYs
+#     KEEP-70    the 70% BUY gate     near-miss BUY EPISODES (DP-3C-y basis)
+#     DP-3C-w    prospective arm      episode count, blind until n = 10
 #     context    registry size, live band split
 #
 # EPISODE DETECTION (WS2) — the one encoded judgement, and it is NOT a new
@@ -72,6 +73,14 @@ WS2_DEPLOY = dt.date(2026, 7, 7)      # S1+D1 go-live (era A-S1D1) — G1 clock 
 WS1_DEPLOY = dt.date(2026, 7, 13)     # blend go-live (era A-S1D1-B1)
 TRACERS = ("WMT", "GM")               # WS2 primary / secondary
 RESPONSE_SESSIONS = 2                 # G1: confidence must respond within 2
+# DP-3C-aa (2026-09-03), applied here 2026-09-16. The H1 window fix changed the
+# trailing move THETA damps on. Only responses measured on the corrected
+# channel (episodes from D2_START) are evidence for G1, plus the one pre-fix
+# response that survives recomputation. WMT 2026-08-20's response was produced
+# by THETA firing on the defective window and is VACATED. The bar is unchanged.
+D2_START = dt.date(2026, 9, 1)
+G1_VACATED = {("WMT", dt.date(2026, 8, 20))}
+G1_SURVIVES = {("WMT", dt.date(2026, 7, 23))}
 HOLD_BAND = 0.03                      # +/-3% -> a HOLD was "right"
 BUY_GATE = 70                         # KEEP-70
 # H4 reopen bar. Raised 10 -> 12 on 2026-07-28 after the 7/27 REOPEN lasted
@@ -167,12 +176,36 @@ def load_rows(tracker):
 
 
 def load_blend(pattern):
-    """{(date,ticker): {base, blend}} from the logs (blend lives only there)."""
+    """{(date,ticker): {base, blend}} from the logs (blend lives only there).
+
+    ANALYST NOTE (2026-09-08): this used to call glob.glob(pattern) directly,
+    which is NON-RECURSIVE. When the logs were tidied into month subfolders
+    ("05 May signals", "06 June signals", "07 July Signals", "08 August
+    Signals"), the loose set in logs/ fell to five files — 2026-09-01 onward —
+    and this function silently stopped seeing four months of history. The WS1
+    gate-flip ledger went from "4 resolved gate-flips, net +2" (2026-08-27
+    review) to "1 flip, net -1" with nothing reporting the change. A resolved
+    flip cannot un-resolve; the ledger had simply been narrowed to the current
+    month and was still being printed as though it were the whole record.
+
+    The blend channel exists ONLY in the logs — there is no tracker column, by
+    design — so for WS1 the log set IS the ledger. signal_logs.discover walks
+    the archive subfolders; the caller reports the span it actually read.
+
+    Note the comment on the skipped branch below also read "archived/renamed
+    logs", i.e. the archive case was anticipated here and handled by SKIPPING
+    it. That is now the one thing this function must not do.
+    """
     out = {}
-    for fp in sorted(glob.glob(pattern)):
+    try:
+        import signal_logs
+        paths, _info = signal_logs.discover(pattern)
+    except Exception:
+        paths = sorted(glob.glob(pattern))
+    for fp in paths:
         m = re.search(r"signals_(\d{4}-\d{2}-\d{2})", os.path.basename(fp))
         if not m:
-            continue                                  # archived/renamed logs
+            continue                                  # undated / renamed logs
         d = dt.date.fromisoformat(m.group(1))
         for line in open(fp, encoding="utf-8", errors="replace"):
             if "Signal JSON" not in line:
@@ -365,13 +398,33 @@ def weekly_bands(rows):
 def collect(tracker, logs):
     rows = load_rows(tracker)
     blend = load_blend(logs) if logs else {}
+    # What log set did we ACTUALLY read? The WS1 ledger is built entirely from
+    # it, so a reader cannot judge that row without this. See signal_logs.
+    try:
+        import signal_logs
+        _paths, log_info = signal_logs.discover(logs) if logs else ([], dict(
+            n=0, n_archived=0, n_loose=0, n_excluded_retired=0,
+            first=None, last=None))
+        log_report = signal_logs.report(log_info, indent="")
+        log_warn = signal_logs.short_span_warning(log_info, indent="")
+    except Exception as e:
+        log_info, log_report, log_warn = {}, f"[logs] unavailable: {e}", ""
     live = [x for x in rows if x["date"] >= LIVE_START]
     n59, a59 = _acc([x for x in live if isinstance(x["conf"], (int, float)) and 50 <= x["conf"] < 60])
     n69, a69 = _acc([x for x in live if isinstance(x["conf"], (int, float)) and 60 <= x["conf"] < 70])
     nH, aH = _acc([x for x in live if x["dq"] == "HIGH"])
     nM, aM = _acc([x for x in live if x["dq"] == "MEDIUM"])
+    cohort_dates = sorted({x["date"] for x in rows})
+    try:
+        import episodes
+        k70 = episodes.keep70(rows, cohort_dates)          # DP-3C-y ruled basis
+        arm = episodes.dp3cw_arm(rows, cohort_dates)       # DP-3C-w, blind
+    except Exception as e:                                  # noqa: BLE001
+        k70, arm = None, dict(error=str(e))
     return dict(
+        k70=k70, dp3cw=arm,
         tracker=tracker, logs=logs,
+        log_info=log_info, log_report=log_report, log_warn=log_warn,
         as_of=max(x["date"] for x in rows), n_rows=len(rows),
         n_cohorts=len({x["date"] for x in rows}),
         ws1=ws1_blend(rows, blend), ws2=ws2_episodes(rows), nm=near_miss(rows),
@@ -407,8 +460,75 @@ def context_line(m):
             f"DQ HIGH {dq['aH']:.1f}% (n={dq['nH']}) vs MEDIUM {dq['aM']:.1f}% (n={dq['nM']}).")
 
 
+def _h4_state(n_ok, r_ok):
+    """H4's state, read from the ruling registry rather than recomputed.
+
+    ANALYST NOTE (2026-09-08): this cell used to end "— 2 consecutive required,
+    NOT TRACKED HERE", and the H4 watchdog carried the same disclaimer. DP-3C-x
+    had already ruled H4 PROMOTED on 2026-09-03, effective 2026-09-01, on three
+    consecutive passing readings. Two instruments were disclaiming a condition
+    that a third document had already satisfied. Both now read rulings.py, and
+    the streak is counted from a durable log instead of recalled.
+    """
+    try:
+        import rulings
+        if not rulings.is_open("H4"):
+            r = rulings.RULINGS["H4"]
+            return (f"RULED {r['dp']}: {r['status']} (ruled {r['ruled_on']}, "
+                    f"effective {r['effective']}) — monitoring only, no verdict")
+        run = rulings.consecutive_passes("H4")
+        streak = f" — {run} consecutive passing reading(s) of {H4_CONSECUTIVE} required"
+    except Exception:
+        streak = f" — {H4_CONSECUTIVE} consecutive required (streak unavailable)"
+    return (f"{'passes this reading' if (n_ok and r_ok) else 'demoted'} "
+            f"({'n ok' if n_ok else 'n short'}, "
+            f"{'rate ok' if r_ok else 'rate FAILING'})"
+            + (streak if (n_ok and r_ok) else ""))
+
+
+def _dp3cw_row(m):
+    """DP-3C-w's prospective arm — ADDED 2026-09-08, COUNTED 2026-09-16.
+
+    On 2026-09-08 this row reported the clock only, because episode
+    qualification belonged to "the registry that owns that rule" and a
+    second definition would have been a second source of truth. That owner
+    now exists as episodes.dp3cw_arm(), and this row calls it -- one
+    definition, two readers. The actionable registry RECORDS the reading;
+    this row only DISPLAYS it.
+
+    BLIND BY CONSTRUCTION (DP-3C-ah): below 10 resolved qualifying episodes
+    the function returns counts only; rho does not exist to be printed.
+    """
+    try:
+        import rulings
+        r = rulings.RULINGS["DP-3C-w"]
+        opened, bar, status = r["effective"], r["bar"], r["status"]
+        recorded = rulings.readings("DP-3C-w")
+    except Exception:
+        opened, bar, status, recorded = dt.date(2026, 9, 3), "see DP-3C-w", "OPEN", []
+    arm = m.get("dp3cw") or {}
+    if "error" in arm or "n_open" not in arm:
+        reading = (f"arm opened **{opened}**; counter unavailable "
+                   f"({arm.get('error', 'no data')})")
+        state = f"{status} — counter unavailable"
+    else:
+        reading = (f"arm opened **{opened}**: **{arm['n_open']} episode(s) opened, "
+                   f"{arm['n_resolved']} resolved** of 10 needed; "
+                   f"{len(arm['tickers'])} ticker(s) of 4 "
+                   f"({', '.join(arm['tickers']) or 'none'}). Discovery sample "
+                   f"(21 rows, 3 names, 4 episodes, ρ = −0.834) is FROZEN and never re-read.")
+        if recorded:
+            e = recorded[0]
+            state = (f"READ {e['date']} (recorded): {e['detail'].get('verdict')}")
+        elif arm.get("read_ready"):
+            state = f"READ DATE REACHED — {arm['verdict']} (recorded by the actionable registry)"
+        else:
+            state = "COLLECTING — counts only; ρ is not computed before n = 10"
+    return ("**DP-3C-w** confidence inversion (prospective)", reading, bar, state)
+
+
 def question_rows(m):
-    """The four open questions as (question, reading, bar, state) tuples."""
+    """The open questions as (question, reading, bar, state) tuples."""
     ws1, ws2, nm = m["ws1"], m["ws2"], m["nm"]
     h4_n_ok = nm["hi_resolved"] >= H4_MIN_N
     h4_r_ok = nm["hi_rate"] >= H4_MIN_HIT
@@ -417,7 +537,16 @@ def question_rows(m):
         "**WS1 / G2** blend vs base",
         f"gate-flip net **{ws1['net']:+d}** ({len(ws1['flips'])} flip(s)); "
         f"confirm {ws1['acc_confirm']:.0f}% (n={ws1['n_confirm']}) "
-        f"vs discount {ws1['acc_discount']:.0f}% (n={ws1['n_discount']})",
+        f"vs discount {ws1['acc_discount']:.0f}% (n={ws1['n_discount']}). "
+        # ADDED 2026-09-08. This ledger is built ENTIRELY from the logs — the
+        # blend has no tracker column by design — so the log span is not
+        # provenance trivia, it is the ledger's denominator. Without it, the
+        # 2026-09-08 truncation from 4 resolved flips to 1 was invisible.
+        f"**Built from {m['log_info'].get('n', 0)} log(s)"
+        + (f", {m['log_info']['first']} .. {m['log_info']['last']}"
+           if m["log_info"].get("first") else "")
+        + ".** A cumulative ledger cannot be read past the logs it was built "
+          "from; if that span is short, this row is a window, not a record.",
         # FIXED 2026-08-13. This row printed a LIVE acceptance bar and a state of
         # "on track"/"negative" for a gate DESCOPED on 2026-07-31 - first flagged
         # 2026-08-05 and carried through four-plus regenerations. The numbers
@@ -429,10 +558,24 @@ def question_rows(m):
     for tk in TRACERS:
         e = ws2[tk]
         last = e["last"].isoformat() if e["last"] else "none"
+
+        def _g1_tag(d):
+            if (tk, d) in G1_VACATED:
+                return " [VACATED, DP-3C-aa]"
+            if (tk, d) in G1_SURVIVES:
+                return " [stands, DP-3C-aa]"
+            if d < D2_START:
+                return " [pre-fix: recorded, not evidence]"
+            return " [corrected channel]"
         lags = ", ".join(
             (f"{d} lag {lg} ({pre}→{now}, −{dr}pt)" if lg is not None
              else f"{d} NO RESPONSE YET" if dr is None else f"{d} no response")
+            + _g1_tag(d)
             for d, lg, pre, now, dr in e.get("detail", []))
+        evidence = [(d, lg) for d, lg, _p, _n, _dr in e.get("detail", [])
+                    if (tk, d) not in G1_VACATED
+                    and ((tk, d) in G1_SURVIVES or d >= D2_START)]
+        ev_served = sum(1 for _d, lg in evidence if lg is not None)
         # CHANNEL AND BASIS DISCLOSURE, added 2026-08-21 per the 8/20 review's
         # finding #2. This strip reported ONE response number and never said
         # which confidence channel produced it. It is the OPERATIVE channel:
@@ -459,8 +602,12 @@ def question_rows(m):
                "G1 turns on is in `h1_lag_trace_" + tk + "_raw_3B.md`. Trailing "
                "move is computed over tracker ROWS off `Price at Signal`, not "
                "market sessions off closes."),
-            f"≥1 episode with response ≤{RESPONSE_SESSIONS} sessions",
-            "readable" if e["episodes"] else "NO TEST CASES YET",
+            f"≥1 episode with response ≤{RESPONSE_SESSIONS} sessions "
+            f"(evidence per DP-3C-aa: corrected channel from {D2_START}, plus "
+            f"WMT 2026-07-23)",
+            (f"{len(evidence)} evidence episode(s), {ev_served} responded — "
+             f"INSUFFICIENT TEST CONDITIONS; bar not lowered"
+             if e["episodes"] else "NO TEST CASES YET"),
         ))
     out.append((
         "**H4** DQ-conditional gate",
@@ -468,19 +615,36 @@ def question_rows(m):
         f"({nm['hi_hits']}/{nm['hi_resolved']} resolved, {nm['hi_total']} total)",
         f"n ≥ {H4_MIN_N} resolved AND hit ≥ {H4_MIN_HIT:.0f}% "
         f"on {H4_CONSECUTIVE} consecutive readings",
-        (f"{'passes this reading' if (h4_n_ok and h4_r_ok) else 'demoted'} "
-         f"({'n ok' if h4_n_ok else 'n short'}, "
-         f"{'rate ok' if h4_r_ok else 'rate FAILING'})"
-         + (f" — {H4_CONSECUTIVE} consecutive required, not tracked here"
-            if (h4_n_ok and h4_r_ok) else "")),
+        _h4_state(h4_n_ok, h4_r_ok),
     ))
-    out.append((
-        "**KEEP-70** the BUY gate",
-        f"rejected BUYs that would have paid: **{nm['rate']:.1f}%** "
-        f"({nm['hits']}/{nm['resolved']})",
-        "< 50% supports keeping 70",
-        "supported" if nm["rate"] < 50 else "review",
-    ))
+    k70 = m.get("k70")
+    if k70 and k70["ep_n"]:
+        # RULED 2026-09-03 (DP-3C-y), applied 2026-09-16. The EPISODE basis,
+        # scored on the opening row, is the verdict; the row basis is printed
+        # beside it as descriptive. The bar is "<= 50.0%" (was "< 50%" here).
+        # Computed by episodes.keep70(), shared with the near-miss registry.
+        # A second instrument is also called KEEP-70 --
+        # build_near_miss_registry's FROZEN 2026-06-12 verdict on the 7-row
+        # locked cohort. Different question; both may be right.
+        out.append((
+            "**KEEP-70** the BUY gate",
+            f"rejected BUY **episodes** that would have paid: "
+            f"**{k70['ep_rate']:.1f}%** ({k70['ep_hit']}/{k70['ep_n']}, "
+            f"{k70['episodes']} episodes); row basis {k70['row_rate']:.1f}% "
+            f"({k70['row_hit']}/{k70['row_n']}) — descriptive only",
+            "≤ 50.0% supports keeping 70 (DP-3C-y: episode basis, opening row)",
+            ("supported" if k70["verdict"] == "SUPPORTED" else
+             "NOT SUPPORTED — recorded; the gate does not move on it"),
+        ))
+    else:
+        out.append((
+            "**KEEP-70** the BUY gate",
+            f"row basis {nm['rate']:.1f}% ({nm['hits']}/{nm['resolved']}); "
+            f"episode basis unavailable",
+            "≤ 50.0% supports keeping 70 (DP-3C-y: episode basis)",
+            "UNREADABLE — the ruled basis could not be computed",
+        ))
+    out.append(_dp3cw_row(m))
     return out
 
 
@@ -519,15 +683,22 @@ BAND_69 = "#E8663C"      # 60-69 band
 
 
 def _cards(m):
-    """The four open questions as (label, value, sub, kind) — kind drives colour."""
+    """The four open questions as (label, value, sub, kind) — kind drives colour.
+    The KEEP-70 card reads the EPISODE basis (DP-3C-y) since 2026-09-16."""
     ws1, ws2, nm = m["ws1"], m["ws2"], m["nm"]
     eps = sum(ws2[t]["episodes"] for t in TRACERS)
-    served = sum(ws2[t]["served"] for t in TRACERS)
+    # DP-3C-aa (applied 2026-09-16): the card counts EVIDENCE episodes, not
+    # every detected episode, so it cannot show the vacated WMT 08-20 response.
+    ev = [(t, d, lg) for t in TRACERS
+          for d, lg, _p, _n, _dr in ws2[t].get("detail", [])
+          if (t, d) not in G1_VACATED and ((t, d) in G1_SURVIVES or d >= D2_START)]
+    ev_served = sum(1 for _t, _d, lg in ev if lg is not None)
     h4_ok = (nm["hi_resolved"] >= H4_MIN_N) and (nm["hi_rate"] >= H4_MIN_HIT)
     if eps:
-        ws2_val, ws2_sub, ws2_kind = (f"{eps}",
-                                      f"episodes · {served} served \u2264{RESPONSE_SESSIONS}",
-                                      "pos" if served else "neg")
+        ws2_val, ws2_sub, ws2_kind = (f"{len(ev)}",
+                                      f"evidence episode(s) · {ev_served} served "
+                                      f"\u2264{RESPONSE_SESSIONS} · {eps} detected",
+                                      "pos" if ev_served else "neg")
     else:
         nulls = max(ws2[t]["post_sessions"] for t in TRACERS)
         ws2_val, ws2_sub, ws2_kind = f"{nulls}", "null cohorts · no episode", "neg"
@@ -539,10 +710,19 @@ def _cards(m):
          f"{nm['hi_hits']}/{nm['hi_resolved']} · bar is {H4_MIN_HIT:.0f}% "
          f"at n≥{H4_MIN_N}, ×{H4_CONSECUTIVE}",
          "pos" if h4_ok else "mute"),
-        ("KEEP-70 evidence", f"{nm['rate']:.1f}%",
-         f"{nm['hits']}/{nm['resolved']} rejected BUYs",
-         "pos" if nm["rate"] < 50 else "neg"),
+        _keep70_card(m, nm),
     ]
+
+
+def _keep70_card(m, nm):
+    """KEEP-70 card on the RULED basis (DP-3C-y, applied 2026-09-16)."""
+    k = m.get("k70")
+    if k and k["ep_n"]:
+        return ("KEEP-70 (episodes)", f"{k['ep_rate']:.1f}%",
+                f"{k['ep_hit']}/{k['ep_n']} episodes · bar ≤50.0% · rows {k['row_rate']:.0f}%",
+                "pos" if k["ep_rate"] <= 50.0 else "neg")
+    return ("KEEP-70 (rows only)", f"{nm['rate']:.1f}%",
+            f"{nm['hits']}/{nm['resolved']} rows · ruled basis unavailable", "mute")
 
 
 def make_png(m, out_path, theme=DEFAULT_THEME, width_px=EMBED_WIDTH_PX):

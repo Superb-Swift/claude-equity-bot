@@ -36,15 +36,37 @@ import argparse
 import datetime as dt
 import sys
 
-DEFAULT_TICKERS = ["AAPL", "AG", "AIQ", "CBRS", "CORN", "DOW", "FTI", "GLD", "GM",
-                   "JPM", "MSFT", "NKE", "NTR", "NVDA", "PM", "PWR", "QQQ", "RTX",
-                   "SCHD", "SND", "SPCX", "SPY", "USO", "VTI", "WMT", "XLU"]
+# AMENDED 2026-09-16: the default ticker set is DERIVED from the master's most
+# recent cohort (the same rule DP-3C-ae (ii) applied to the cross-check). The
+# hand-copied 26-name list it replaces had gone stale as the watchlist grew.
+DEFAULT_TRACKER = "logs/claude_equity_bot_tracker.xlsx"
+
+
+def tickers_from_master(path):
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        ws = wb["Signals"]
+        by_date = {}
+        for r in ws.iter_rows(min_row=5, max_col=2, values_only=True):
+            d, tk = r[0], r[1]
+            if hasattr(d, "date") and tk:
+                by_date.setdefault(d.date(), set()).add(str(tk).strip().upper())
+        wb.close()
+        if not by_date:
+            return []
+        return sorted(by_date[max(by_date)])
+    except Exception as e:                                    # noqa: BLE001
+        print("[warn] could not read tickers from %s: %s" % (path, e), file=sys.stderr)
+        return []
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Settled closes for one date, many tickers.")
     ap.add_argument("--date", required=True, help="YYYY-MM-DD")
-    ap.add_argument("--tickers", default=",".join(DEFAULT_TICKERS))
+    ap.add_argument("--tickers", default=None,
+                    help="comma list; default = the master's most recent cohort")
+    ap.add_argument("--tracker", default=DEFAULT_TRACKER)
     ap.add_argument("--out", default=None, help="write TSV here as well as stdout")
     ap.add_argument("--force", action="store_true",
                     help="source even if the session is not settled (do not)")
@@ -84,28 +106,34 @@ def main() -> int:
               file=sys.stderr)
 
     try:
-        from schwab_client import get_price_history
+        from repair_outcome_close import fetch_daily_closes
     except Exception as e:
-        print("ERROR: could not import schwab_client: %s" % e, file=sys.stderr)
+        print("ERROR: could not import repair_outcome_close: %s" % e, file=sys.stderr)
         return 2
 
-    tickers = [t.strip().upper() for t in a.tickers.split(",") if t.strip()]
+    if a.tickers:
+        tickers = [t.strip().upper() for t in a.tickers.split(",") if t.strip()]
+    else:
+        tickers = tickers_from_master(a.tracker)
+        if not tickers:
+            print("ERROR: no tickers given and none readable from %s" % a.tracker,
+                  file=sys.stderr)
+            return 2
     lines = ["date\tticker\tclose\tsource"]
     misses = []
     for tk in tickers:
-        try:
-            # Ask for a generous window and pick the exact date out of it, rather
-            # than trusting the tail slice: the window itself is the thing the H1
-            # ruling is about, and this tool must not inherit that assumption.
-            hist = get_price_history(tk, days=40) or []
-        except Exception as e:
-            misses.append((tk, "fetch failed: %s" % e))
+        # AMENDED 2026-09-16: get_price_history() drops the current session's
+        # candle by design, so it could never return today's close even after
+        # 16:15 ET. fetch_daily_closes() returns every candle, dated in UTC,
+        # and the settlement gate above decides whether the newest is usable.
+        seen = fetch_daily_closes(tk, quiet=True)
+        if not seen:
+            misses.append((tk, "fetch failed or no candles"))
             continue
-        hit = next((c for c in hist if c.get("date") == target.isoformat()), None)
-        if hit is None:
+        if target not in seen:
             misses.append((tk, "no candle dated %s in the returned window" % target))
             continue
-        lines.append("%s\t%s\t%s\tschwab" % (target, tk, hit["close"]))
+        lines.append("%s\t%s\t%s\tschwab" % (target, tk, seen[target]))
 
     out = "\n".join(lines)
     print(out)
@@ -119,10 +147,8 @@ def main() -> int:
               file=sys.stderr)
         for tk, why in misses:
             print("    %-6s %s" % (tk, why), file=sys.stderr)
-        print("  NOTE: while the H1 window defect is unfixed, candle dates are one\n"
-              "  day early, so an exact-date match can miss. If every ticker misses,\n"
-              "  that is the defect, not a bad date -- see\n"
-              "  H1_Window_OffByOne_Defect_2026-08-26.md.", file=sys.stderr)
+        print("  NOTE: candles are dated in UTC (fixed 2026-09-16). If EVERY ticker\n"
+              "  misses, suspect the date or the feed, not one name.", file=sys.stderr)
     return 0
 
 

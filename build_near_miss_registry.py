@@ -80,8 +80,28 @@ DEFAULT_LOCK_CUTOFF = dt.date(2026, 6, 1)   # <= cutoff -> LOCKED ; > cutoff -> 
 EXPECT_LOCKED = 7                            # frozen invariant; the locked cohort is immutable
 
 # Frozen locked-segment baselines (immutable; used as a sanity reconciliation).
+#
+# ANALYST NOTE (2026-09-08): comp10 read 6 and had been WARNing against a live
+#   1/7. The LOCKED POPULATION is immutable at 7 rows; its RESOLUTION was not,
+#   and this baseline was captured while the seventh row was still open at
+#   +10d. It has since resolved, as a miss — hit10 stayed 1 while comp10 moved
+#   6 -> 7. So the invariant was asserting a denominator that was always going
+#   to move, and the WARN it produced was the check catching up with reality
+#   rather than catching anything.
+#
+#   That is not a harmless mislabel. It fires the run-level banner "one or more
+#   checks WARNed — inspect before trusting the run" on an otherwise all-PASS
+#   instrument, EVERY run, on a condition known to be benign. A warning channel
+#   that cries wolf is worth less than no warning channel, because the operator
+#   learns to skip it — and this one sits on the registry carrying the BUY
+#   gate's evidence.
+#
+#   comp10 is now 7 and the locked cohort is FULLY RESOLVED at both horizons,
+#   so every field here is finally immutable in fact and not merely in label.
+#   The check itself is also rewritten below to distinguish "still resolving"
+#   from "wrong", so this cannot recur if the population is ever re-cut.
 LOCKED_BASELINE = dict(hit5=4, comp5=7, rate5=4 / 7, avg5=-0.0090,
-                       hit10=1, comp10=6, avg10=-0.0284)
+                       hit10=1, comp10=7, avg10=-0.0300)
 BASELINE_TOL = 0.0015
 
 # NYSE full-closure holidays. 2026 is complete; extend when the project runs
@@ -160,11 +180,54 @@ class NearMiss:
     d5: dt.date
     d10: dt.date
     segment: str         # "LOCKED" | "EXTENDED"
+    era: str = "D2"      # DP-3C-v: "D1" before 2026-09-01, "D2" from it
+    flag: str = ""       # DP-3C-v: "D1-WINDOW" on the one row the fix would move
+
+
+# DP-3C-v (2026-09-03), applied 2026-09-16. The H1 window fix changed what the
+# model was shown from the 2026-09-01 cohort (era D2). Registries record what
+# was EMITTED; rows are never added or removed on a counterfactual. The era is
+# carried so "does KEEP-70 read differently either side of the fix?" can be
+# asked later. It is NOT answerable now and no split reading is taken.
+D2_START = dt.date(2026, 9, 1)
+# The only BUY among the 60 rows the D1 defect moved: 62% as emitted, 59% on
+# the corrected window (below the band floor). It STAYS, flagged.
+D1_WINDOW_FLAGS = {(dt.date(2026, 8, 27), "PWR"): "D1-WINDOW"}
 
 
 # --------------------------------------------------------------------------- #
 # Read + filter (READ-ONLY on the source workbook)
 # --------------------------------------------------------------------------- #
+
+LIVE_KEEP70 = {}     # filled by main(); read by the writers
+
+
+def live_keep70(tracker_path):
+    """episodes.keep70() over the whole master (price-derived +5d)."""
+    import episodes
+    wb = openpyxl.load_workbook(tracker_path, data_only=True, read_only=True)
+    ws = wb[SIGNALS_SHEET]
+    rows, dates, blank = [], set(), 0
+    for v in ws.iter_rows(min_row=FIRST_DATA_ROW, max_row=LAST_DATA_ROW_CAP,
+                          min_col=1, max_col=COL["p5"], values_only=True):
+        d = as_date(v[0])
+        if d is None:
+            blank += 1
+            if blank >= 25:
+                break
+            continue
+        blank = 0
+        dates.add(d)
+        conf, p0, p5 = v[COL["conf"] - 1], v[COL["p0"] - 1], v[COL["p5"] - 1]
+        ok = isinstance(p0, (int, float)) and isinstance(p5, (int, float)) and p0
+        rows.append(dict(
+            date=d, ticker=str(v[COL["ticker"] - 1] or "").strip().upper(),
+            signal=str(v[COL["signal"] - 1] or "").strip().upper(),
+            conf=(conf * 100 if isinstance(conf, (int, float)) and conf <= 1 else conf),
+            ret5=((p5 - p0) / p0) if ok else None))
+    wb.close()
+    return episodes.keep70(rows, sorted(dates))
+
 
 def load_near_misses(tracker_path: str, lock_cutoff: dt.date) -> list[NearMiss]:
     wb = openpyxl.load_workbook(tracker_path, data_only=True, read_only=True)
@@ -212,6 +275,8 @@ def load_near_misses(tracker_path: str, lock_cutoff: dt.date) -> list[NearMiss]:
             d5=add_trading_days(d, 5, NYSE_HOLIDAYS),
             d10=add_trading_days(d, 10, NYSE_HOLIDAYS),
             segment="LOCKED" if d <= lock_cutoff else "EXTENDED",
+            era="D1" if d < D2_START else "D2",
+            flag=D1_WINDOW_FLAGS.get((d, str(tk).strip().upper()), ""),
         ))
     wb.close()
     rows.sort(key=lambda x: (x.date, x.ticker))
@@ -284,11 +349,11 @@ def mdrow(cells):
 HEADERS = ["Signal Date", "Ticker", "Account", "Conf %", "Data Quality",
            "Price at Signal", "+5d Date", "+10d Date", "Price +5d", "Price +10d",
            "Return +5d", "Return +10d", "Was Claude Right? (5d)",
-           "Was Claude Right? (10d)", "Notes", "Segment"]
+           "Was Claude Right? (10d)", "Notes", "Segment", "H1 Era", "Flag"]
 # column letters
 A = {name: get_column_letter(i + 1) for i, name in enumerate(
     ["sigdate", "ticker", "acct", "conf", "dq", "p0", "d5", "d10",
-     "p5", "p10", "r5", "r10", "right5", "right10", "notes", "seg"])}
+     "p5", "p10", "r5", "r10", "right5", "right10", "notes", "seg", "era", "flag"])}
 
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -355,6 +420,8 @@ def write_xlsx(rows, locked, extended, out_path, tracker_path, lock_cutoff):
              fill=fill, align="center")
         cell(r, 15, x.notes, fill=fill)
         cell(r, 16, x.segment, fill=fill, align="center", size=9)
+        cell(r, 17, x.era, fill=fill, align="center", size=9)
+        cell(r, 18, x.flag, fill=fill, align="center", size=9, bold=bool(x.flag))
         r += 1
     data_end = r - 1
 
@@ -408,6 +475,25 @@ def write_xlsx(rows, locked, extended, out_path, tracker_path, lock_cutoff):
          fmt="0", align="right", bold=True, size=9)
     rr += 2
 
+    # ----- LIVE KEEP-70 on the ruled basis (DP-3C-y), added 2026-09-16 ----- #
+    k70 = LIVE_KEEP70.get("k")
+    if k70:
+        cell(rr, 1, "LIVE KEEP-70 — DP-3C-y ruled basis (EPISODE, opening row)",
+             bold=True, fill=LABEL_FILL, size=10)
+        rr += 1
+        for name, val in [
+            ("EPISODE basis — rejected BUYs that paid",
+             f"{k70['ep_hit']}/{k70['ep_n']} = {k70['ep_rate']:.2f}%" if k70["ep_n"] else "—"),
+            ("Bar", "≤ 50.0% supports keeping 70"),
+            ("State", k70["verdict"] + " (does not move the gate)"),
+            ("ROW basis (descriptive, never the verdict)",
+             f"{k70['row_hit']}/{k70['row_n']} = {k70['row_rate']:.2f}%" if k70["row_n"] else "—"),
+        ]:
+            cell(rr, 1, name, size=9)
+            cell(rr, 2, val, size=9, bold=name == "State")
+            rr += 1
+        rr += 1
+
     # ----- Verdict box (resolved) ----- #
     head, rationale = verdict_text(locked)
     cell(rr, 1, "VERDICT — RESOLVED 2026-06-12 (Phase 2 close)", bold=True,
@@ -431,7 +517,7 @@ def write_xlsx(rows, locked, extended, out_path, tracker_path, lock_cutoff):
          size=8, color="808080", border=False)
 
     # column widths
-    widths = [12, 8, 11, 7, 9, 13, 12, 12, 11, 11, 11, 11, 14, 14, 30, 10]
+    widths = [12, 8, 11, 7, 9, 13, 12, 12, 11, 11, 11, 11, 14, 14, 30, 10, 8, 12]
     for i, w in enumerate(widths):
         ws.column_dimensions[get_column_letter(i + 1)].width = w
     ws.freeze_panes = "A5"
@@ -472,6 +558,21 @@ def write_markdown(rows, locked, extended, md_path, tracker_path, lock_cutoff):
 
     head, rationale = verdict_text(locked)
     total = len(rows)
+    k70 = LIVE_KEEP70.get("k")
+    live_md = ""
+    if k70 and k70["ep_n"]:
+        live_md = (
+            "## LIVE KEEP-70 — DP-3C-y ruled basis\n\n"
+            f"- **EPISODE basis (opening row): {k70['ep_hit']}/{k70['ep_n']} = "
+            f"{k70['ep_rate']:.2f}% → {k70['verdict']}** against `≤ 50.0% supports keeping 70`\n"
+            f"- ROW basis (descriptive, never the verdict): {k70['row_hit']}/{k70['row_n']} = "
+            f"{k70['row_rate']:.2f}%\n"
+            f"- {k70['episodes']} episodes from {k70['rows']} rows (DP-3C-m over consecutive cohorts, DP-3C-ab)\n"
+            "- A NOT SUPPORTED reading does not move the gate.\n\n")
+    flagged = [x for x in rows if x.flag]
+    era_md = ("*H1 era (DP-3C-v): D1 rows before 2026-09-01, D2 from it. Flagged: "
+              + (", ".join(f"{x.ticker} {x.date} `{x.flag}`" for x in flagged) or "none")
+              + ". Registries record what was emitted; no split reading is taken.*\n\n")
     md = f"""# Near-Miss BUY Registry — auto-generated
 
 *Source: `{os.path.basename(tracker_path)}` · Signals tab · generated \
@@ -481,7 +582,7 @@ Prices/returns sourced from Signals, never transcribed.*
 
 **Total near-miss BUYs: {total}**  (LOCKED {locked['n']} + EXTENDED {extended['n']})
 
-## LOCKED — final 7-of-7 verdict cohort
+{live_md}{era_md}## LOCKED — final 7-of-7 verdict cohort
 *Signals on/before {lock_cutoff:%Y-%m-%d}. Immutable; basis for the Q2 verdict.*
 
 {scorecard(locked)}
@@ -495,9 +596,15 @@ Prices/returns sourced from Signals, never transcribed.*
 
 {seg_table("EXTENDED")}
 
-## Verdict — RESOLVED 2026-06-12
+## Verdict — RESOLVED 2026-06-12 (FROZEN — not a live reading)
 
 **Decision: {head}**
+
+> **Population:** the immutable {locked['n']}-row LOCKED cohort only, tested against
+> **loosening** gates. A separate, LIVE instrument is also called KEEP-70 —
+> the episode-basis reading above (DP-3C-y), also shown on the monitor strip. The two ask different questions of different populations and may point
+> opposite ways without either being wrong. Quote each with its population
+> attached, or neither.
 
 {rationale}
 
@@ -536,8 +643,46 @@ def console_digest(rows, locked, extended, expect_locked):
     line("avg +5d", pct(extended["avg5"], plus=True))
     line("completed +10d", extended["comp10"])
 
+    # ANALYST NOTE (2026-09-08): this line used to print bare, as
+    #   "VERDICT: KEEP 70% threshold", and it is the ONLY emission of the three
+    #   that dropped the date. The .xlsx cell reads "VERDICT — RESOLVED
+    #   2026-06-12 (Phase 2 close)" and the .md heading reads "Verdict —
+    #   RESOLVED 2026-06-12"; the console said neither.
+    #
+    #   That matters because a SECOND, LIVE instrument is also called KEEP-70:
+    #   monitor_strip's "rejected BUYs that would have paid", read against a
+    #   "< 50% supports keeping 70" bar. The two ask different questions of
+    #   different populations and can legitimately point opposite ways — this
+    #   one tests the FROZEN 7-row locked cohort against LOOSENING gates
+    #   (hit >= 75% AND avg +5d >= 3%), which is a high bar deliberately hard
+    #   to clear. Printed side by side in one scan with one of them undated,
+    #   they read as a contradiction that is not there. Date it, name its
+    #   population, and point at the live channel.
     head, _ = verdict_text(locked)
-    print(f"\nVERDICT: {head}")
+    print(f"\nVERDICT (FROZEN, resolved 2026-06-12 at the Phase 2 close): {head}")
+    print(f"  basis: the immutable {locked['n']}-row LOCKED cohort only, against "
+          f"LOOSENING gates (hit >= {pct(GATE_HIT_RATE)} AND avg +5d >= "
+          f"{pct(GATE_AVG_RETURN)}); reads {pct(locked['rate5'])} / "
+          f"{pct(locked['avg5'], plus=True)} and fails both.")
+    print("  this is NOT a live reading of the 70% gate.")
+    k70 = LIVE_KEEP70.get("k")
+    if k70:
+        # ADDED 2026-09-16: the live channel on the RULED basis (DP-3C-y),
+        # computed with episodes.keep70() -- the same function the monitor
+        # strip uses, so the two cannot disagree about what an episode is.
+        print("\nLIVE KEEP-70 (DP-3C-y: EPISODE basis, opening row; bar <= 50.0%):")
+        line("episode basis +5d", f"{k70['ep_hit']}/{k70['ep_n']} = "
+             + (f"{k70['ep_rate']:.2f}%" if k70["ep_n"] else "n/a")
+             + f"  -> {k70['verdict']}")
+        line("row basis (descriptive)", f"{k70['row_hit']}/{k70['row_n']} = "
+             + (f"{k70['row_rate']:.2f}%" if k70["row_n"] else "n/a"))
+        line("episodes / rows", f"{k70['episodes']} / {k70['rows']}")
+        print("  A NOT SUPPORTED reading is a fact about the gate's rejections; it is")
+        print("  not a reason to move the gate (DP-3C-y).")
+    d1 = sum(1 for x in rows if x.era == "D1")
+    print(f"\nH1 era (DP-3C-v): D1 {d1} rows, D2 {len(rows) - d1} rows; flagged: "
+          + (", ".join(f"{x.ticker} {x.date} {x.flag}" for x in rows if x.flag) or "none")
+          + ". No split reading is taken.")
 
     # ---- self-validation ----
     print("\n" + "-" * 64)
@@ -578,8 +723,26 @@ def console_digest(rows, locked, extended, expect_locked):
           locked["hit5"] == b["hit5"] and locked["comp5"] == b["comp5"])
     check(f"locked avg +5d ≈ {pct(b['avg5'], plus=True)} (±{BASELINE_TOL})",
           locked["avg5"] is not None and abs(locked["avg5"] - b["avg5"]) <= BASELINE_TOL)
-    check(f"locked hit +10d == {b['hit10']}/{b['comp10']}",
-          locked["hit10"] == b["hit10"] and locked["comp10"] == b["comp10"])
+    # ANALYST NOTE (2026-09-08): the +10d reconciliation is split into the part
+    #   that is TRULY frozen and the part that merely finished moving.
+    #
+    #   HIT COUNT is the invariant. The locked population cannot gain rows, so a
+    #   resolved winner cannot become a loser: hit10 may only ever equal its
+    #   baseline. If it moves, something rewrote history and that is a real WARN.
+    #
+    #   COMPLETION is a progress counter, not an assertion. While rows are still
+    #   open at +10d, comp10 < baseline is the EXPECTED state and must not fire
+    #   the run-level warning banner — that is precisely what produced a
+    #   standing false WARN against the old comp10=6. It is reported, not
+    #   checked. Only OVER-completion (more resolved rows than the frozen
+    #   population can contain) is an error.
+    check(f"locked hit +10d count == {b['hit10']} (frozen; a resolved row "
+          f"cannot change outcome)", locked["hit10"] == b["hit10"])
+    check(f"locked +10d completion never exceeds the frozen population "
+          f"({b['comp10']})", locked["comp10"] <= b["comp10"])
+    if locked["comp10"] < b["comp10"]:
+        print(f"  [note] locked +10d still resolving: {locked['comp10']} of "
+              f"{b['comp10']} complete — not a finding, and deliberately not a WARN")
 
     if not ok:
         print("\n  ⚠️  One or more checks WARNed — inspect before trusting the run.")
@@ -623,6 +786,10 @@ def main(argv=None):
         sys.exit("ERROR: no near-miss BUYs found — check the band/label config.")
     locked = summarize(rows, "LOCKED")
     extended = summarize(rows, "EXTENDED")
+    try:
+        LIVE_KEEP70["k"] = live_keep70(args.tracker)
+    except Exception as e:                              # noqa: BLE001
+        print(f"[warn] live KEEP-70 unavailable: {e}")
 
     xlsx_path = os.path.join(args.out_dir, "near_miss_registry.xlsx")
     md_path = os.path.join(args.out_dir, "near_miss_registry.md")

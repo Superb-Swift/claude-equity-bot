@@ -234,6 +234,9 @@ def parse_log(path):
     return records, warnings
 
 
+REGIME_STEP_WARN = 0.50   # DP-3C-ae (iv): reporting trigger, not a bar
+
+
 def prior_session_log(this_log):
     """(Path, 'YYYY-MM-DD') of the newest canonical cohort log strictly BEFORE
     this one, or (None, None). See the anchoring note above LOG_NAME_RE."""
@@ -286,8 +289,13 @@ def prior_era(this_log, explicit=None):
     if len(eras) != 1:
         return "not-compared", ("prior log {} is not era-uniform ({}) - nothing to "
                                 "compare against".format(path.name, eras or "no era stamp"))
+    # 6th element ADDED 2026-09-16 (DP-3C-ae (iv)): the prior session's
+    # regime_score, so the step check reads it off the SAME parse. None when
+    # the prior log is not regime-uniform. Consumers guard on len() >= 6.
+    p_reg = sorted({r["regime_score"] for r in recs if r.get("regime_score") is not None})
     return "ok", (eras[0], date, path.name, len(recs),
-                  frozenset(r["ticker"] for r in recs if r.get("ticker")))
+                  frozenset(r["ticker"] for r in recs if r.get("ticker")),
+                  p_reg[0] if len(p_reg) == 1 else None)
 
 
 def fmt(v, spec="", dash="--"):
@@ -347,7 +355,7 @@ def run_integrity(records, theta_src, warnings, prior=None):
             out.append(("NOCHK", "cohort membership NOT COMPARED - prior log carries "
                                  "no ticker set (count {})".format(n)))
         else:
-            _pe, _pdate, _pname, _pn, _ptk = _p_detail
+            _pe, _pdate, _pname, _pn, _ptk = _p_detail[:5]
             here = frozenset(r["ticker"] for r in records if r.get("ticker"))
             added, removed = sorted(here - _ptk), sorted(_ptk - here)
             if not added and not removed:
@@ -483,6 +491,28 @@ def run_integrity(records, theta_src, warnings, prior=None):
     out.append(("OK" if len(regimes) == 1 else "FAIL",
                 "regime_score uniform at {}".format(regimes[0]) if len(regimes) == 1
                 else "regime_score NOT uniform: {}".format(regimes)))
+    # DP-3C-ae (iv), applied 2026-09-16. Uniformity never detected anything in
+    # 21 sessions; RANGE and STEP are the properties at risk.
+    #   range: -1.0 <= regime_score <= +1.0, else FAIL
+    #   step : |change from the prior session| > REGIME_STEP_WARN -> WARN.
+    # The 0.50 step is a REPORTING TRIGGER calibrated on 21 observations, not a
+    # bar; re-derive it at 60+ observations.
+    bad_range = [v for v in regimes if not (-1.0 <= float(v) <= 1.0)]
+    out.append(("FAIL" if bad_range else "OK",
+                "regime_score OUT OF RANGE [-1, +1]: {}".format(bad_range) if bad_range
+                else "regime_score within [-1, +1]"))
+    p_reg = None
+    if prior is not None and prior[0] == "ok" and len(prior[1]) >= 6:
+        p_reg = prior[1][5]
+    if len(regimes) == 1 and p_reg is not None:
+        step = float(regimes[0]) - float(p_reg)
+        out.append(("WARN" if abs(step) > REGIME_STEP_WARN else "OK",
+                    "regime_score step {:+.3f} ({} -> {}) vs prior session {}{}".format(
+                        step, p_reg, regimes[0], prior[1][1],
+                        " exceeds the {:.2f} reporting trigger".format(REGIME_STEP_WARN)
+                        if abs(step) > REGIME_STEP_WARN else "")))
+    else:
+        out.append(("NOCHK", "regime_score step NOT COMPARED - no regime-uniform prior log"))
 
     cold = [r["ticker"] for r in records if r.get("cold")]
     if cold:
@@ -519,9 +549,51 @@ def reconcile(records):
     tally("D.raw == B.base",
           lambda r: r["raw"] == r["base"],
           lambda r: "raw {} vs base {}".format(r["raw"], r["base"]))
-    tally("D.op == B.blend_op",
-          lambda r: r["op"] == r["blend_op"],
-          lambda r: "op {} vs blend_op {}".format(r["op"], r["blend_op"]))
+    # ANALYST NOTE (2026-09-08): this check is SPLIT IN TWO, closing an item
+    #   owed since 2026-08-19 -- but not in the way it was owed.
+    #
+    #   THE ORIGINAL REQUEST (8/19, restated 8/25): "rephrase the D.op ==
+    #   B.blend_op check as informational rather than FAIL, so the run's
+    #   findings count means what it says." WS1/G2 is DESCOPED; a disagreement
+    #   between the operative channel and a channel nothing reads is not a
+    #   defect, and for fourteen sessions it was the ONLY thing standing
+    #   between signal_scan and a zero-findings run.
+    #
+    #   WHY A PLAIN DOWNGRADE IS NOW WRONG: on 2026-09-08 the disagreement
+    #   acquired a consequence. The three disagreeing rows were exactly the
+    #   three BUYs, and MSFT read op 70 against blend_op 69 with a CHECK 5 gate
+    #   of 70 -- admitted at ZERO MARGIN on the channel giving the higher
+    #   number, rejected on the other. It was the second occurrence: the
+    #   2026-08-27 review records "the blend would have knocked MSFT to 69,
+    #   below the gate; NVDA to 71, still clearing." Downgrading everything to
+    #   informational would have retired the check in the same session it first
+    #   mattered.
+    #
+    #   So: the bare disagreement is INFO, and a disagreement that would ERASE
+    #   AN ADMITTED ROW'S MARGIN is a FINDING. Nothing here reads the blend, no
+    #   admission changes, and WS1 stays descoped -- the finding is about the
+    #   ledger recording a resolved two-channel disagreement silently, in the
+    #   admitting direction, on a zero-margin row.
+    checks.append(("D.op == B.blend_op  [INFO: WS1 descoped, no disposition]",
+                   sum(1 for r in records if r["op"] == r["blend_op"]),
+                   len(records), []))
+    _info_gap = [(r["ticker"], "op {} vs blend_op {}".format(r["op"], r["blend_op"]))
+                 for r in records if r["op"] != r["blend_op"]]
+
+    def _would_lose_gate(r):
+        """True when the row CLEARS its CHECK 5 gate on D.op and would NOT on
+        B.blend_op. Gates mirrored from risk_engine; SELL has its own."""
+        gate = {"BUY": 70, "SELL": 65}.get(r.get("signal"))
+        if gate is None or r.get("op") is None or r.get("blend_op") is None:
+            return False
+        return r["op"] >= gate > r["blend_op"]
+
+    tally("no ADMITTED row loses its gate on the other channel",
+          lambda r: not _would_lose_gate(r),
+          lambda r: "op {} clears {} gate {} but blend_op {} does NOT "
+                    "— admitted at margin {:+d} on the higher channel".format(
+                        r["op"], r["signal"], {"BUY": 70, "SELL": 65}[r["signal"]],
+                        r["blend_op"], r["op"] - {"BUY": 70, "SELL": 65}[r["signal"]]))
     # D1 applies FLOOR=35, which clamps the reduction and never raises confidence.
     # The D tag reports the COMPUTED damp, not the APPLIED reduction, so raw-op is
     # smaller than damp whenever the floor binds. Verified on 7/7 damped rows across
@@ -541,7 +613,7 @@ def reconcile(records):
     disc = [r for r in records if r["blend"] != r["blend_op"]]
     tracks_pre = sum(1 for r in disc if r["j_blend"] == r["blend"])
     tracks_post = sum(1 for r in disc if r["j_blend"] == r["blend_op"])
-    return checks, (len(disc), tracks_pre, tracks_post)
+    return checks, (len(disc), tracks_pre, tracks_post), _info_gap
 
 
 def render(records, theta, theta_src, warnings, counterfactual, prior=None):
@@ -551,7 +623,7 @@ def render(records, theta, theta_src, warnings, counterfactual, prior=None):
     times = sorted(r["time"] for r in records if r["time"])
 
     integrity = run_integrity(records, theta_src, warnings, prior)
-    checks, (n_disc, pre, post) = reconcile(records)
+    checks, (n_disc, pre, post), info_gap = reconcile(records)
     # NOCHK counts as a finding. "I could not check" must not cost less
     # attention than "I checked and it is fine" -- 2026-08-19.
     fails = [c for c in integrity if c[0] in ("FAIL", "NOCHK")] + [c for c in checks if c[3]]
@@ -610,9 +682,21 @@ def render(records, theta, theta_src, warnings, counterfactual, prior=None):
     add("CHANNEL RECONCILIATION")
     add("-" * 78)
     for label, ok, total, bad in checks:
-        add("  [{:<4}] {:<44} {}/{}".format("OK" if not bad else "FAIL", label, ok, total))
+        kind = "INFO" if label.startswith("D.op == B.blend_op") else \
+               ("OK" if not bad else "FAIL")
+        add("  [{:<4}] {:<52} {}/{}".format(kind, label, ok, total))
         for tkr, detail in bad:
             add("           {:<6} {}".format(tkr, detail))
+        # The informational row lists its disagreements too -- they are still
+        # worth seeing, they are simply not findings on a descoped channel.
+        if label.startswith("D.op == B.blend_op") and info_gap:
+            for tkr, detail in info_gap:
+                add("           {:<6} {}".format(tkr, detail))
+            add("           (WS1/G2 is DESCOPED -- context only, no disposition "
+                "is read from the blend.")
+            add("            A disagreement that would ERASE AN ADMITTED ROW'S "
+                "MARGIN is checked")
+            add("            separately below and IS a finding.)")
     add("")
     add("  json.confidence_blend semantics (rows where blend != blend_op: n={}):".format(n_disc))
     if n_disc == 0:
@@ -945,6 +1029,26 @@ def selftest():
             shutil.rmtree(d4, ignore_errors=True)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+    # 7. DP-3C-ae (iv), 2026-09-16: regime RANGE and STEP, both directions.
+    print("  -- regime_score range/step (DP-3C-ae iv)")
+    base = dict(ticker="AAPL", era="A-S1D2-B1-E1", j_raw=60, j_blend=60, base=60,
+                blend=60, cold=False, conf=60, error=None)
+
+    def _lv(recs, prior, needle):
+        return [lv for lv, m in run_integrity(recs, "test", [], prior) if needle in m]
+
+    in_range = [dict(base, regime_score=-0.2)]
+    ok &= _st_check("in-range value -> range OK", _lv(in_range, None, "within [-1, +1]"), ["OK"])
+    out_range = [dict(base, regime_score=1.4)]
+    ok &= _st_check("out-of-range value -> FAIL", _lv(out_range, None, "OUT OF RANGE"), ["FAIL"])
+    p6 = ("ok", ("A-S1D2-B1-E1", "2026-09-01", "x.log", 1, frozenset({"AAPL"}), -0.9))
+    ok &= _st_check("step +0.70 -> WARN", _lv(in_range, p6, "regime_score step"), ["WARN"])
+    p6b = ("ok", ("A-S1D2-B1-E1", "2026-09-01", "x.log", 1, frozenset({"AAPL"}), -0.1))
+    ok &= _st_check("step -0.10 -> OK", _lv(in_range, p6b, "regime_score step"), ["OK"])
+    p5 = ("ok", ("A-S1D2-B1-E1", "2026-09-01", "x.log", 1, frozenset({"AAPL"})))
+    ok &= _st_check("old 5-tuple prior -> NOCHK, no crash",
+                    _lv(in_range, p5, "regime_score step"), ["NOCHK"])
 
     print("\n{}\n".format("ALL PASS" if ok else "FAILURES PRESENT"))
     return 0 if ok else 1

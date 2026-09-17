@@ -163,10 +163,35 @@ EXTRACT_SCHEMA = 9
 WINDOW_DAYS      = 30             # 8-K and Form 4 lookback
 # DP-3C-a — bounded MD&A extract + filed date; NO separate LLM call in v1.
 MDA_MAX_CHARS    = 1200
-# DP-3C-c — Form-4 net direction plus rough size. Each Form 4 costs one fetch,
-# so the per-ticker document budget is bounded; beyond it we degrade to a
-# COUNT-ONLY read and say so in the section rather than guessing direction.
-MAX_FORM4_DOCS   = 10
+# DP-3C-c — Form-4 net direction plus rough size, under a bounded per-ticker
+# document cost.
+#
+# ANALYST NOTE (2026-09-08, DP-3C-c AMENDMENT — LIVE DEFECT ON SND): the gate
+#   this constant fed read `if len(hits) > MAX_FORM4_DOCS: return count-only`,
+#   which spent NONE of a budget named for ten documents — it refused all
+#   sixteen rather than reading ten. SND rendered "16 filing(s); direction not
+#   extracted". diag_form4.py read all sixteen for 6.2s of a 120s RUN budget
+#   and found 9 open-market SALES totalling $763,079 across the CFO, the VP of
+#   Accounting, a Director and one further officer, NONE of them under a
+#   10b5-1 plan. The gate was not bounding cost on that ticker; it was
+#   deleting the loudest insider signal in the window. Worse, it deleted it
+#   selectively: the tickers with the MOST insider filings are the ones where
+#   Form 4 breadth carries the most information, and they are precisely the
+#   ones a filing-count cap silences.
+#
+#   THE FIX: the cap now counts CACHE MISSES, not filings. Documents are
+#   immutable and cached by accession — fetch_document's own docstring says "a
+#   cache read costs no SEC request and no throttle" — so a filing already on
+#   disk is free and is ALWAYS read; only uncached documents are charged. The
+#   run-wide EDGAR_MAX_SECONDS ceiling (reset once per run in
+#   prefetch_edgar_context) still bounds the total; this cap exists for
+#   FAIRNESS, so one heavy filer cannot eat the run, and that purpose is
+#   served by bounding fetches rather than by refusing to read what is free.
+#   SND now costs 10 fetches on the first run that sees the cluster and 0 on
+#   every run after, and reads the whole window from the second run onward.
+#   A run that could not read every filing SAYS SO and labels the direction
+#   partial, rather than suppressing a direction it did compute.
+MAX_FORM4_DOCS   = 10             # uncached Form 4 fetches per ticker per run
 # 8-K bodies. ANALYST NOTE (2026-08-02, v1.1): the first build read only the
 #   `items` field from the submissions index — a COUNT and an item CODE. That
 #   is metadata, not content: an Item 2.02 beat and an Item 2.02 miss render
@@ -247,6 +272,21 @@ FORM4_FORMS = {"4", "4/A"}
 #     F  tax withholding          D  disposition to the issuer
 #   The parse is also restricted to the NON-DERIVATIVE table; the derivative
 #   table carries option grants and exercises, which are not share trades.
+#
+# ANALYST NOTE (2026-09-08): the four sets below do not partition the SEC's
+#   Table I code list. X (exercise of an in/at-the-money derivative), J (other
+#   acquisition or disposition, footnote required), K (equity swap), L (small
+#   acquisition), U (tender in a change of control), V (voluntarily early
+#   reported) and W (will or laws of descent) fall through every bucket. Before
+#   this note they were counted in `codes_seen` and classified NOWHERE, so a
+#   filing carrying only an X rendered as "non-trade entries only" with no
+#   entries named — the same shape as a filing we had genuinely read as
+#   compensation mechanics. They are now tallied as `other` and named as
+#   unclassified, which is the honest description: reported, not interpreted.
+#   Two are worth a later ruling and neither is taken here — code I is named
+#   "DISCRETIONARY transaction" in the SEC taxonomy (an intra-plan election,
+#   e.g. a 401(k) company-stock switch) yet sits in the MECH set, and J is a
+#   catch-all that can hide an economically real trade behind a footnote.
 FORM4_BUY_CODES  = {"P"}
 FORM4_SELL_CODES = {"S"}
 FORM4_AWARD_CODES = {"A"}
@@ -812,6 +852,10 @@ _TXN_SHARES_RE = re.compile(
     r"<transactionShares>\s*<value>\s*([\d.]+)\s*</value>", re.S)
 _TXN_PRICE_RE  = re.compile(
     r"<transactionPricePerShare>\s*<value>\s*([\d.]+)\s*</value>", re.S)
+# <officerTitle> values that are form instructions, not job titles.
+_ROLE_PLACEHOLDER_RE = re.compile(
+    r"^\s*(see\s+remarks?|see\s+footnotes?|see\s+below|n\s*/?\s*a|none|-+|\.+)?\s*$",
+    re.I)
 
 
 def _document_url(cik10, accession, document):
@@ -834,7 +878,8 @@ def parse_form4_xml(text):
     exactness the v1 extraction does not have.
     """
     out = {"buys": 0, "sells": 0, "buy_value": 0.0, "sell_value": 0.0,
-           "awards": 0, "mechanical": 0, "plan_10b5_1": False, "role": ""}
+           "awards": 0, "mechanical": 0, "other": 0,
+           "plan_10b5_1": False, "role": ""}
     if not text:
         return out
 
@@ -846,14 +891,33 @@ def parse_form4_xml(text):
     if re.search(r"10b5-?1", text, re.I):
         out["plan_10b5_1"] = True
 
+    # ANALYST NOTE (2026-09-08, LIVE ON SND): four of SND's sixteen filers
+    #   rendered as "SEE REMARKS" in the filers list handed to the model. That
+    #   is not a title — it is EDGAR's convention for "the real title is in the
+    #   <remarks> element" — and passing it through put a form-instruction
+    #   placeholder where a role belonged. Read the remarks; failing that, fall
+    #   through to the isDirector / isTenPercentOwner / isOfficer flags, which
+    #   are STRUCTURED and always present. Never emit the placeholder itself:
+    #   an unknown role should read as blank, not as a filing-form artifact.
     title = re.search(r"<officerTitle>\s*([^<]{1,60})\s*</officerTitle>", text)
-    if title:
-        # XML escapes ampersands; "SVP &amp; Controller" reached the prompt raw.
-        out["role"] = html.unescape(title.group(1)).strip()
-    elif re.search(r"<isDirector>\s*(1|true)\s*</isDirector>", text, re.I):
-        out["role"] = "Director"
-    elif re.search(r"<isTenPercentOwner>\s*(1|true)\s*</isTenPercentOwner>", text, re.I):
-        out["role"] = "10% owner"
+    # XML escapes ampersands; "SVP &amp; Controller" reached the prompt raw.
+    role = html.unescape(title.group(1)).strip() if title else ""
+    if _ROLE_PLACEHOLDER_RE.match(role):
+        rem = re.search(r"<remarks>\s*([^<]{1,200})\s*</remarks>", text)
+        cand = html.unescape(rem.group(1)).strip().split("\n")[0].strip() if rem else ""
+        # A remark is free text and may be a sentence rather than a title.
+        # Accept it only when it reads like one: short and not punctuated prose.
+        role = cand[:60] if cand and len(cand) <= 60 and "." not in cand[:-1] else ""
+    if not role or _ROLE_PLACEHOLDER_RE.match(role):
+        if re.search(r"<isDirector>\s*(1|true)\s*</isDirector>", text, re.I):
+            role = "Director"
+        elif re.search(r"<isTenPercentOwner>\s*(1|true)\s*</isTenPercentOwner>", text, re.I):
+            role = "10% owner"
+        elif re.search(r"<isOfficer>\s*(1|true)\s*</isOfficer>", text, re.I):
+            role = "Officer"
+        else:
+            role = ""
+    out["role"] = role
 
     # Non-derivative table only. It precedes <derivativeTable> in the schema,
     # so truncating there confines the tally to actual share transactions.
@@ -877,6 +941,10 @@ def parse_form4_xml(text):
             out["awards"] += 1
         elif code in FORM4_MECH_CODES:
             out["mechanical"] += 1
+        else:
+            # X, J, K, L, U, V, W — reported, never interpreted. See the
+            # ANALYST NOTE at FORM4_MECH_CODES.
+            out["other"] += 1
     return out
 
 
@@ -976,13 +1044,50 @@ def _fetch_form4_xml(cik10, accession, primary_document):
     return None
 
 
+def _form4_is_cached(accession, primary_document):
+    """True when this filing's raw ownership XML is already on disk.
+
+    Mirrors _fetch_form4_xml's FIRST guess — strip the xsl* directory and use
+    the bare filename — which is the path that hits for essentially every
+    filer. Deliberately does not replicate the index-discovery fallback: this
+    is a COST question, not a correctness one, and the failure modes are
+    asymmetric. A false negative costs one fetch charged against the cap. A
+    false positive cannot mislead the parse, because fetch_document validates
+    cached entries on read and re-fetches anything wrong-shaped.
+    """
+    if not accession or not primary_document:
+        return False
+    doc = (primary_document.rsplit("/", 1)[-1] if "/" in primary_document
+           else primary_document)
+    try:
+        return os.path.exists(_cache_path(accession, doc))
+    except OSError:
+        return False
+
+
 def extract_form4(rows, since, cik10, fetch=True):
     """Net insider buy/sell tally in the window.
 
-    Degrades in two stages: full direction (documents fetched) -> count only
-    (budget exceeded or fetch failed) -> nothing. The stage reached is
-    reported in the returned dict so the prompt section never implies a
-    direction it did not compute.
+    Degrades in stages, and NAMES the stage it reached in `detail` so the
+    prompt section never implies a direction it did not compute:
+
+        parsed          every filing in the window was read
+        parsed-partial  a direction was computed, but not from every filing
+                        (`read` of `filings`; `skipped` deferred to a later
+                        run once their documents are cached)
+        no open-market buy/sell transactions
+                        filings read, but nothing in them moves direction
+        transactions not extracted      documents read, no codes found
+        count-only:nofetch              caller disabled fetching
+        count-only:unresolved           no ownership XML resolved for any filing
+
+    ANALYST NOTE (2026-09-08): the pre-amendment version had a THIRD state that
+    rendered identically to the last two — a filing-count gate that returned
+    before fetching anything — and all three arrived at build_filings_section
+    as the bare string "count-only", which is why SND's suppressed selling
+    cluster read as the same "direction not extracted" as a failed download.
+    Distinguishing the causes is half the fix; the other half is not reaching
+    them. See the ANALYST NOTE at MAX_FORM4_DOCS.
     """
     hits = [r for r in rows
             if r["form"] in FORM4_FORMS and _within_window(r["filingDate"], since)]
@@ -991,6 +1096,9 @@ def extract_form4(rows, since, cik10, fetch=True):
               "buy_value": 0.0, "sell_value": 0.0, "roles": [],
               "awards": 0, "mechanical": 0,
               "plan_filings": 0, "direction": None, "detail": "count-only",
+              # Read/deferred split, so a partial direction can be labelled as
+              # one. read == filings means the whole window was seen.
+              "other": 0, "read": 0, "skipped": 0,
               # DP-3C-i (2026-08-03): the DATE of the most recent Form 4 of
               # ANY transaction code — including grants (A), option exercises
               # (M) and tax withholding (F), none of which move direction —
@@ -1000,20 +1108,54 @@ def extract_form4(rows, since, cik10, fetch=True):
               # is available even in count-only mode (no document fetch).
               "dates": sorted((r["filingDate"] for r in hits), reverse=True)}
 
-    if not hits or not fetch:
+    if not hits:
+        return result
+    if not fetch:
+        result["detail"] = "count-only:nofetch"
         return result
 
-    if len(hits) > MAX_FORM4_DOCS:
-        log.info("[EDGAR] %s Form 4s in window exceeds the %s-document budget "
-                 "— reporting count only.", len(hits), MAX_FORM4_DOCS)
-        return result
+    # DP-3C-c as amended 2026-09-08 — the cap bounds UNCACHED fetches, not
+    # filings, so anything already on disk is read for free and the window
+    # fills in across runs instead of never. Sorted newest-first so that when
+    # the cap DOES bite (a cold run over a fresh cluster) the filings it reads
+    # are the most recent ones, and so the choice is deterministic rather than
+    # whatever order the submissions index happened to return.
+    hits.sort(key=lambda r: r["filingDate"], reverse=True)
 
+    to_read, skipped, cold = [], 0, 0
+    for r in hits:
+        if not (r.get("primaryDocument") or ""):
+            skipped += 1
+            continue
+        if _form4_is_cached(r["accessionNumber"], r["primaryDocument"]):
+            to_read.append(r)                       # free — never charged
+        elif cold < MAX_FORM4_DOCS:
+            to_read.append(r)
+            cold += 1
+        else:
+            skipped += 1
+
+    if len(to_read) < len(hits):
+        log.info("[EDGAR] %s Form 4s in window: planning %s (%s uncached, cap %s), "
+                 "%s deferred — their documents cache on a later run.",
+                 len(hits), len(to_read), cold, MAX_FORM4_DOCS,
+                 len(hits) - len(to_read))
+
+    # ANALYST NOTE (2026-09-08, caught reviewing the --sweep output): `read`
+    #   MUST be counted in the loop, not assigned from len(to_read) here. The
+    #   plan is what we intended to read; it is not what we read. Two things
+    #   can cut the loop short after planning — the run-wide EDGAR_MAX_SECONDS
+    #   ceiling tripping mid-ticker (every remaining _fetch_form4_xml returns
+    #   None), and a filing whose ownership XML will not resolve. Setting
+    #   `read` up front would have labelled BOTH as a complete read and printed
+    #   a direction as though the whole window backed it, which is the exact
+    #   defect class this amendment exists to close, reintroduced one layer up.
+    #   Count what actually parsed; derive `skipped` from that.
     parsed_any = False
     codes_seen = 0
-    for r in hits:
-        doc = r.get("primaryDocument") or ""
-        if not doc:
-            continue
+    read_ok    = 0
+    for r in to_read:
+        doc = r["primaryDocument"]
 
         # ANALYST NOTE (2026-08-02, DEFECT FOUND ON THE FIRST LIVE --ticker RUN):
         #   `primaryDocument` for a Form 4 is the XSL-RENDERED HTML wrapper —
@@ -1028,6 +1170,7 @@ def extract_form4(rows, since, cik10, fetch=True):
         if not text:
             continue
         parsed_any = True
+        read_ok   += 1
         codes_seen += text.count("<transactionCode>")
         p = parse_form4_xml(text)
         result["buys"]       += p["buys"]
@@ -1036,10 +1179,27 @@ def extract_form4(rows, since, cik10, fetch=True):
         result["sell_value"] += p["sell_value"]
         result["awards"]     += p["awards"]
         result["mechanical"] += p["mechanical"]
+        result["other"]      += p["other"]
         if p["plan_10b5_1"]:
             result["plan_filings"] += 1
         if p["role"] and p["role"] not in result["roles"]:
             result["roles"].append(p["role"])
+
+    result["read"]    = read_ok
+    result["skipped"] = len(hits) - read_ok
+    # Why the shortfall, when there is one. The cap deferring cold documents is
+    # routine and self-healing; the run budget tripping mid-ticker is not, and
+    # the two must not read the same in the log.
+    if result["skipped"] and _last_fetch.get("reason") == "budget":
+        log.info("[EDGAR] Form 4: read %s of %s before the run budget tripped; "
+                 "direction is from a partial window.", read_ok, len(hits))
+
+    if not parsed_any:
+        # Documents were planned but none resolved to ownership XML. Distinct
+        # from "we chose not to fetch" and from "we read them and they were
+        # compensation mechanics"; all three used to render the same way.
+        result["detail"] = "count-only:unresolved"
+        return result
 
     if parsed_any:
         result["codes_seen"] = codes_seen
@@ -1052,7 +1212,7 @@ def extract_form4(rows, since, cik10, fetch=True):
                                 if codes_seen else "transactions not extracted")
             result["direction"] = None
         else:
-            result["detail"] = "parsed"
+            result["detail"] = "parsed-partial" if result["skipped"] else "parsed"
             if result["buys"] > result["sells"]:
                 result["direction"] = "buying"
             elif result["sells"] > result["buys"]:
@@ -2000,10 +2160,28 @@ def build_filings_section(eightk, form4, periodic, as_of=None,
                 # Aerospace"), so a comma-joined list is unreadable.
                 lines.append(f"  - filers: {'; '.join(form4['roles'][:5])}")
             plan = form4.get("plan_filings", 0)
+            read = form4.get("read", 0)
             if plan:
                 lines.append(
-                    f"  - {plan} of {form4['filings']} filed under a 10b5-1 plan "
-                    f"(pre-scheduled; weigh as weaker evidence of a view)")
+                    f"  - {plan} of {read or form4['filings']} filed under a "
+                    f"10b5-1 plan (pre-scheduled; weigh as weaker evidence of "
+                    f"a view)")
+            elif read and form4["sells"]:
+                # ANALYST NOTE (2026-09-08): the ABSENCE of a plan is the more
+                #   informative half and used to be silent. Most large insider
+                #   selling is 10b5-1 and reads as calendar, not conviction;
+                #   selling with no plan on file is discretionary and timed.
+                #   Saying nothing left the model to infer "no plan" from a
+                #   missing line, which it cannot distinguish from "not read".
+                lines.append(
+                    f"  - none of the {read} filed under a 10b5-1 plan "
+                    f"(discretionary and self-timed, not pre-scheduled)")
+            if form4.get("skipped"):
+                lines.append(
+                    f"  - computed from {read} of {form4['filings']} filings "
+                    f"read this run; {form4['skipped']} not yet fetched. "
+                    f"Direction is from a PARTIAL window and the size is "
+                    f"incomplete \u2014 do not read it as the whole picture")
         else:
             detail = form4.get("detail", "")
             if detail.startswith("no open-market"):
@@ -2013,11 +2191,17 @@ def build_filings_section(eightk, form4, periodic, as_of=None,
                 if form4.get("mechanical"):
                     bits.append(f"{form4['mechanical']} option-exercise or "
                                 f"tax-withholding")
+                if form4.get("other"):
+                    bits.append(f"{form4['other']} unclassified")
                 what = " and ".join(bits) if bits else "non-trade"
                 why = (f"no open-market purchases or sales ({what} entries only "
                        "\u2014 compensation mechanics, not a discretionary view)")
             elif detail.startswith("transactions not"):
                 why = "transaction detail could not be read"
+            elif detail == "count-only:nofetch":
+                why = "documents not fetched on this run"
+            elif detail == "count-only:unresolved":
+                why = "no ownership XML could be resolved for any filing"
             else:
                 why = "direction not extracted"
             lines.append(
@@ -2470,6 +2654,78 @@ def cmd_selftest():
     f = extract_form4(rows, since, "0000320193", fetch=False)
     check("filings in window", f["filings"], 2)
     check("direction withheld", f["direction"], None)
+    # DP-3C-c amendment (2026-09-08): the three count-only causes are now
+    # distinguishable. Before this, all three returned the bare "count-only".
+    check("no-fetch names its own cause", f["detail"], "count-only:nofetch")
+    check("nothing read, nothing deferred", (f["read"], f["skipped"]), (0, 0))
+
+    print("Form 4 document budget — caps FETCHES, not filings (DP-3C-c amended)")
+    check("uncached accession is not a cache hit",
+          _form4_is_cached("0001709934-26-000020",
+                           "xslF345X05/wf-form4_999.xml"), False)
+    check("blank primaryDocument is not a cache hit",
+          _form4_is_cached("0001709934-26-000020", ""), False)
+    # The gate that caused the SND defect was `len(hits) > MAX_FORM4_DOCS ->
+    # return`. Assert the constant is now spent, not merely compared against:
+    # a window LARGER than the cap must still plan MAX_FORM4_DOCS reads.
+    big = [{"form": "4", "filingDate": since.strftime("%Y-%m-%d"),
+            "accessionNumber": f"0000000000-26-{i:06d}",
+            "primaryDocument": f"xslF345X05/wf-form4_{i}.xml"}
+           for i in range(MAX_FORM4_DOCS + 6)]
+    fb = extract_form4(big, since, "0000320193", fetch=False)
+    check("oversized window still reports every filing",
+          fb["filings"], MAX_FORM4_DOCS + 6)
+
+    print("Form 4 — `read` counts what PARSED, not what was planned")
+    # REGRESSION (2026-09-08): the first cut of this amendment assigned
+    # read = len(to_read) at planning time. A run budget tripping mid-ticker,
+    # or an unresolvable ownership XML, then rendered as a COMPLETE read with a
+    # direction behind it — the same over-claim the amendment exists to close.
+    # Trip the budget before the loop: nothing parses, so nothing is claimed.
+    reset_budget()
+    _budget["spent"] = EDGAR_MAX_SECONDS + 1
+    starved = [{"form": "4", "filingDate": since.strftime("%Y-%m-%d"),
+                "accessionNumber": f"0000000000-26-{i:06d}",
+                "primaryDocument": f"xslF345X05/wf-form4_{i}.xml"}
+               for i in range(4)]
+    fs = extract_form4(starved, since, "0000320193")
+    check("budget-starved: every filing still counted", fs["filings"], 4)
+    check("...but none claimed as read", fs["read"], 0)
+    check("...all four reported outstanding", fs["skipped"], 4)
+    check("...and no direction asserted", fs["direction"], None)
+    check("...named as unresolved, not as a fetch we declined",
+          fs["detail"], "count-only:unresolved")
+    reset_budget()
+
+    print("Form 4 role — placeholder titles never reach the prompt")
+    check("SEE REMARKS falls through to the director flag",
+          parse_form4_xml("<officerTitle>See Remarks</officerTitle>"
+                          "<isDirector>1</isDirector>")["role"], "Director")
+    check("SEE REMARKS prefers a short remarks title",
+          parse_form4_xml("<officerTitle>See remarks</officerTitle>"
+                          "<remarks>VP of Accounting</remarks>"
+                          "<isDirector>1</isDirector>")["role"],
+          "VP of Accounting")
+    check("a prose remark is rejected, not used as a title",
+          parse_form4_xml("<officerTitle>See Remarks</officerTitle>"
+                          "<remarks>The reporting person disclaims beneficial "
+                          "ownership. This is not a title.</remarks>"
+                          "<isTenPercentOwner>1</isTenPercentOwner>")["role"],
+          "10% owner")
+    check("a real title is untouched",
+          parse_form4_xml("<officerTitle>Chief Financial "
+                          "Officer</officerTitle>")["role"],
+          "Chief Financial Officer")
+    check("no title and no flag reads blank, never a placeholder",
+          parse_form4_xml("<officerTitle>See Remarks</officerTitle>")["role"], "")
+
+    print("Form 4 unclassified codes are tallied, not silently dropped")
+    px = parse_form4_xml("<transactionCode>X</transactionCode>"
+                         "<transactionCode>J</transactionCode>")
+    check("X and J land in `other`", px["other"], 2)
+    check("and move nothing directional",
+          (px["buys"], px["sells"], px["awards"], px["mechanical"]),
+          (0, 0, 0, 0))
 
     print("Form 4 XML parse")
     xml = ("<transactionCode>P</transactionCode>"
@@ -2544,6 +2800,43 @@ def cmd_selftest():
           "Q2 revenue of $94.0B" in sec, True)
     check("10b5-1 flagged in section", "10b5-1 plan" in sec, True)
     check("insider role surfaced", "Chief Executive Officer" in sec, True)
+
+    print("section assembly — partial window is LABELLED, not suppressed (SND)")
+    # The shape the pre-amendment gate produced on SND, now rendered as a
+    # partial direction instead of "16 filing(s); direction not extracted".
+    snd = build_filings_section(
+        {"count": 0, "items": [], "dates": [], "events": [], "bodies": 0},
+        {"filings": 16, "read": 10, "skipped": 6, "buys": 0, "sells": 3,
+         "buy_value": 0.0, "sell_value": 226864.0, "direction": "selling",
+         "detail": "parsed-partial", "roles": ["Chief Financial Officer"],
+         "plan_filings": 0},
+        {"form": None, "filed": None, "mda": ""}, as_of="2026-09-08")
+    check("direction is reported, not withheld", "net direction: selling" in snd, True)
+    check("partial read is disclosed", "10 of 16 filings" in snd, True)
+    check("and the size is called incomplete", "incomplete" in snd, True)
+    check("no stale 'not extracted' on a computed direction",
+          "direction not extracted" in snd, False)
+    check("absent 10b5-1 plan is stated, not left silent",
+          "none of the 10 filed under a 10b5-1 plan" in snd, True)
+
+    print("section assembly — the three count-only causes read differently")
+    def _why(detail, **kw):
+        f4 = {"filings": 5, "buys": 0, "sells": 0, "buy_value": 0.0,
+              "sell_value": 0.0, "direction": None, "detail": detail}
+        f4.update(kw)
+        return build_filings_section(
+            {"count": 0, "items": [], "dates": [], "events": [], "bodies": 0},
+            f4, {"form": None, "filed": None, "mda": ""})
+    check("nofetch names the run choice",
+          "documents not fetched on this run" in _why("count-only:nofetch"), True)
+    check("unresolved names the missing XML",
+          "no ownership XML" in _why("count-only:unresolved"), True)
+    check("read-but-mechanical still names the mechanics",
+          "compensation mechanics" in
+          _why("no open-market buy/sell transactions", mechanical=17, awards=1), True)
+    check("unclassified codes are named as such",
+          "2 unclassified" in
+          _why("no open-market buy/sell transactions", other=2), True)
 
     print("Form 4 enrichment (10b5-1 + role)")
     p4 = parse_form4_xml(

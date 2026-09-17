@@ -88,15 +88,16 @@ REM recovered from the Signal JSON log lines) for both tracers. The RAW
 REM table read is the Lever-B verdict input. ANALYST NOTE: the corr-scan is
 REM confirmatory only at n at/past ~8-10 - the 3-A baseline slice already
 REM reads lag 1 (WS2_Deploy_Notes.md, 4b) - the TABLE read is the criterion.
-REM Only top-level logs\signals_*.log are scanned: May/June logs are boxed
-REM in subfolders and predate confidence_raw anyway.
+REM AMENDED 2026-09-16: the glob below is resolved RECURSIVELY by
+REM signal_logs.discover() (since 2026-09-08), so the month subfolders are
+REM read too; logs that predate confidence_raw simply contribute nothing.
 python h1_lag_trace.py --tracker "%TRACKER%" --ticker WMT --since %WS2_DEPLOY% --suffix _3B
 python h1_lag_trace.py --tracker "%TRACKER%" --ticker GM --since %WS2_DEPLOY% --suffix _3B
 python h1_lag_trace.py --tracker "%TRACKER%" --ticker WMT --since %WS2_DEPLOY% --raw-from-logs "logs\signals_*.log" --suffix _raw_3B
 python h1_lag_trace.py --tracker "%TRACKER%" --ticker GM --since %WS2_DEPLOY% --raw-from-logs "logs\signals_*.log" --suffix _raw_3B
 
 echo.
-echo ================== H4 - DQ watchdog (demoted) ===================
+echo ========== H4 - DQ watchdog (PROMOTED, monitoring only) ==========
 python h4_dq_threshold.py --tracker "%TRACKER%"
 
 echo.
@@ -131,23 +132,24 @@ python monitor_strip.py --tracker "%TRACKER%" --logs "logs\signals_*.log" --embe
 echo   (open %REPORT% in Excel to refresh the formula cache)
 
 echo.
+echo ========= Prospective arms - counts only (DP-3C-ah) ==========
+REM ADDED 2026-09-16. PR-1/PR-2/PR-3 read HOLD rows on signal dates after the
+REM discovery cutoff (2026-09-16). Before each arm's read date this prints
+REM n only - never an IC - so nobody looks early. PR-4 is report-only.
+python discovery_scan.py --tracker "%TRACKER%" --progress
+python shadow_damper.py --tracker "%TRACKER%" --progress
+
+echo.
 echo ============================================================
-echo   Daily review complete. STANDING QUESTIONS - read them on the
-echo   'Monitor Strip' tab or in monitor_strip.md:
-echo     WS1 / G2   DESCOPED 2026-07-31. No live acceptance bar. Reopens
-echo                only on trigger T-G2-a / T-G2-b / T-G2-c.
-echo     WS2 / G1   INSUFFICIENT TEST CONDITIONS at the 3-B close. Bar
-echo                NOT lowered; WMT 1 post-deploy episode, GM 0.
-echo     H4         DEMOTED. Bar: n at or past 12 resolved AND hit at or
-echo                past 60%%, on TWO CONSECUTIVE readings. (Corrected
-echo                2026-08-13: the n was stale at 10; the 60%% rate is
-echo                and always was the bar - it is NOT 50%%.)
-echo     KEEP-70    rejected BUYs paying under 50%% supports the gate.
-echo                BASIS UNRULED 2026-08-13 - row and episode bases
-echo                disagree; quote both or neither.
+echo   Daily review complete. Read the questions on the 'Monitor Strip'
+echo   tab or in monitor_strip.md. STANDING, read from rulings.py - the
+echo   footer is no longer hardcoded (DP-3C-al, 2026-09-16):
+python rulings.py --standing
+echo.
 echo   These are TABLE reads at their stated n. A one-session move in
 echo   any of them is noise - the strip exists to stay CURRENT, not
-echo   to be checked for drama.
-echo   Q1 guardrail, T2 and the scoreboard: RETIRED (Q1-R, 2026-07-27).
+echo   to be checked for drama. Prospective arms (DP-3C-w, PR-1..PR-3)
+echo   print counts only until their read date: python discovery_scan.py --progress
+echo   Advisory-only - no orders - not financial advice (DP-T1).
 echo ============================================================
 endlocal

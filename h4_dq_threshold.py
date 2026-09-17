@@ -2,7 +2,15 @@
 """
 h4_dq_threshold.py  —  Claude Equity Bot, Phase 3-A · H4 watchdog
 
-H4 (DQ-conditional KEEP threshold) is DEMOTED. The Phase 2 closeout: the
+STATUS (amended 2026-09-16): H4 was PROMOTED to ACTIVE by DP-3C-x (ruled
+2026-09-03, effective 2026-09-01); the live status is read from rulings.py and
+this tool emits no verdict while it is ruled. DP-3C-ak (2026-09-16): the
+promotion stands although the reading has since fallen below its bar; any
+DQ-conditional design must compare within names or frozen tiers, use the
+episode basis, and carry a DQ-channel stability read. The history below is
+kept as written.
+
+HISTORY: H4 (DQ-conditional KEEP threshold) was DEMOTED. The Phase 2 closeout: the
 HIGH-DQ near-miss split finished 2/2 (SCHD, VTI) — real but n=2, far too small;
 the same-ticker NVDA series went 2 wins / 2 losses (a coin flip); and broadly
 "DQ measures input completeness, not directional accuracy" — HIGH-DQ HOLDs
@@ -48,6 +56,14 @@ COHORT_END = dt.date(2026, 5, 29)
 # guardrail uses the certified Phase 2 cohort window (COHORT_START..COHORT_END).
 SINCE = None
 UNTIL = None
+
+
+# The consecutive-readings component of H4's bar. Named rather than inlined
+# because the record shows this bar being misquoted from memory: on 2026-08-13
+# the RATE component was reported as 50%, imported from KEEP-70, and a ruling
+# was solicited on the malformed question before being retracted the same
+# session. A bar that lives in a constant cannot be misremembered.
+REOPEN_CONSECUTIVE = 2
 
 
 def _in_window(d):
@@ -157,12 +173,25 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
             "  to refresh the cache, then re-run.\n"
             "  Refusing to print a verdict on zero evidence." % len(rows))
 
+    # The header status is READ FROM THE RULING REGISTRY, never hardcoded.
+    # It said "(DEMOTED)" on 2026-09-08, five days after DP-3C-x promoted H4.
+    try:
+        import rulings as _r
+        _status = _r.status_of("H4") or "STATUS UNREGISTERED"
+        _closed = not _r.is_open("H4")
+    except Exception:
+        _status, _closed = "STATUS UNAVAILABLE", False
+
     print("\n" + "=" * 80)
-    print(f"H4 WATCHDOG — DQ-conditional threshold (DEMOTED)   "
+    print(f"H4 WATCHDOG — DQ-conditional threshold ({_status})   "
           f"source: {os.path.basename(tracker)}")
     print("=" * 80)
-    print("H4 is on the backlog. No threshold change is made or recommended here;")
-    print("this is the monitor that reports whether the data reopens it.\n")
+    if _closed:
+        print("H4 has been RULED. No threshold change is made or recommended here,")
+        print("and no reopening verdict is emitted; this is monitoring only.\n")
+    else:
+        print("H4 is on the backlog. No threshold change is made or recommended here;")
+        print("this is the monitor that reports whether the data reopens it.\n")
 
     # ---- 1. DQ distribution ----
     from collections import Counter
@@ -240,6 +269,7 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
     print("\n" + "-" * 80)
     print("REOPENING RULE — H4 leaves the backlog ONLY if ALL hold:")
     print("-" * 80)
+    cohort_date = max((x["date"] for x in rows if x.get("date")), default=None)
     h_rate, h_n = (nm_high[2], nm_high[1]) if nm_high else (None, 0)
     hi_ov = dq_overall.get("HIGH", (None, 0))[0]
     med_ov = dq_overall.get("MEDIUM", (None, 0))[0]
@@ -253,8 +283,53 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
     print(f"   [{'PASS' if c3 else 'FAIL'}] HIGH-DQ overall accuracy ≥ MEDIUM  "
           f"(HIGH {fmt(hi_ov,1,'%')} vs MEDIUM {fmt(med_ov,1,'%')})")
     reopen = c1 and c2 and c3
-    print(f"\n   VERDICT: H4 {'REOPENS — re-scope a DQ-conditional threshold' if reopen else 'STAYS DEMOTED (backlog)'}.")
-    if not reopen:
+
+    # ANALYST NOTE (2026-09-08): record the reading BEFORE printing a verdict,
+    #   and consult the ruling registry before printing one at all.
+    #
+    #   On 2026-09-08 this tool printed "VERDICT: H4 REOPENS — re-scope a
+    #   DQ-conditional threshold" and, in its own header, "(DEMOTED)". DP-3C-x
+    #   had ruled H4 PROMOTED five days earlier, effective 2026-09-01, on three
+    #   consecutive passing readings against a bar of two. The tool was
+    #   litigating a closed question, and because it also printed DEMOTED it
+    #   left the operator believing the E4 §4 block on filings -> data_quality
+    #   coupling still stood, when the promotion had spent it.
+    #
+    #   The tool could not have known: it said so itself — "this tool does not
+    #   track prior readings and therefore does NOT assert that condition".
+    #   Both halves are now fixed rather than disclaimed. rulings.py holds the
+    #   settled decision points; the readings log makes the streak mechanical.
+    #   record_reading is idempotent per cohort date, so re-running a session
+    #   cannot manufacture consecutive passes.
+    try:
+        import rulings
+        rulings.record_reading(
+            "H4", cohort_date, reopen,
+            detail={"n": h_n, "rate": h_rate, "high": hi_ov, "med": med_ov})
+        ruled_closed = not rulings.is_open("H4")
+        streak = rulings.streak_line("H4", REOPEN_CONSECUTIVE)
+        reg_banner = rulings.banner("H4")
+    except Exception as e:                       # never break the run on this
+        ruled_closed, streak, reg_banner = False, f"   [streak] unavailable: {e}", ""
+
+    if ruled_closed:
+        print("\n   THIS QUESTION IS SETTLED — no verdict is emitted here.")
+        print(reg_banner)
+        print("\n   The readings below are MONITORING of a promoted instrument,")
+        print("   not a reopening test. Today's figures are printed above and")
+        print("   are recorded to the readings log; nothing is decided on them.")
+        print(streak)
+        if not reopen:
+            # DP-3C-ak (2026-09-16): record plainly when the reading no longer
+            # meets the bar the promotion stood on. No demotion rule was
+            # pre-registered and none is applied here.
+            print("   NOTE: today's reading does NOT meet the bar the promotion was")
+            print("   granted on. Per DP-3C-ak the promotion stands (no demotion rule")
+            print("   was pre-registered); any DQ-conditional design must cite this")
+            print("   current reading, not the promotion reading.")
+    else:
+        print(f"\n   VERDICT: H4 {'REOPENS — re-scope a DQ-conditional threshold' if reopen else 'STAYS DEMOTED (backlog)'}.")
+    if not ruled_closed and not reopen:
         # CORRECTED 2026-08-04. This block used to print a hardcoded
         # "the binding gap is sample size" regardless of which condition
         # actually failed. On 2026-07-28 n passed at 11 while the RATE failed,
@@ -274,11 +349,15 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
         elif c1 and not c2:
             print("   Sample size is NOT the constraint — the rate is. More rows")
             print("   alone will not reopen it.")
-    else:
-        print(f"   NOTE: this is ONE reading. The 2026-07-28 ruling requires the")
-        print(f"   pass to hold on TWO CONSECUTIVE readings at n ≥ {reopen_n} before")
-        print(f"   any DQ-conditional design work. This tool does not track prior")
-        print(f"   readings and therefore does NOT assert that condition.")
+    elif not ruled_closed:
+        # FIXED 2026-09-16: this was a bare `else:`, so once H4 was RULED the
+        # settled branch above printed the streak AND this branch printed it
+        # again — the duplicate [streak] line in the 2026-09-16 run.
+        print(f"   NOTE: the 2026-07-28 ruling requires the pass to hold on")
+        print(f"   {REOPEN_CONSECUTIVE} CONSECUTIVE readings at n ≥ {reopen_n} before any")
+        print(f"   DQ-conditional design work. That condition is now TRACKED —")
+        print(f"   see the streak line below, sourced from the readings log.")
+        print(streak)
 
     # ---- guardrail ----
     agg = {"40-49": [0, 0], "50-59": [0, 0], "60-69": [0, 0]}
@@ -315,10 +394,14 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
           "rates will differ from the live 6/15+ figures in the notes.")
 
     # ---- markdown ----
-    md = [f"# H4 Watchdog — DQ-conditional threshold (DEMOTED)",
+    md = [f"# H4 Watchdog — DQ-conditional threshold ({_status})",
           f"*Source: `{os.path.basename(tracker)}` · generated {dt.datetime.now():%Y-%m-%d %H:%M}.*",
-          "", "**H4 is on the backlog — no threshold change is made or recommended.** "
-          "This is the monitor for whether 3-A data reopens it.", "",
+          "",
+          ("**H4 has been RULED — no reopening verdict is emitted and no threshold "
+           "change is made or recommended. Monitoring only.**"
+           if _closed else
+           "**H4 is on the backlog — no threshold change is made or recommended.** "
+           "This is the monitor for whether 3-A data reopens it."), "",
           "## DQ-stratified +5d accuracy (all resolved)",
           "| DQ | hits/res | hit% | avg +5d ret |", "| --- | --- | --- | --- |"]
     for tier in DQ_TIERS:
@@ -331,9 +414,20 @@ def run(tracker, reopen_n, reopen_hit, out_dir):
         h, n, rate, avg = hit_stats(sub)
         if sub:
             md.append(f"| {tier} | {len(sub)} | {h}/{n} | {fmt(rate,1,'%')} |")
-    md += ["", f"## Verdict", f"H4 {'REOPENS' if reopen else 'STAYS DEMOTED (backlog)'} "
-           f"— reopening needs HIGH-DQ near-miss n ≥ {reopen_n} (now {h_n}), "
-           f"hit ≥ {reopen_hit}% (now {fmt(h_rate,1,'%')}), and HIGH ≥ MEDIUM overall."]
+    if _closed:
+        md += ["", "## Status — RULED, no verdict emitted",
+               reg_banner.replace("\n", "  \n") if reg_banner else _status,
+               "",
+               f"Today's monitoring figures: HIGH-DQ near-miss n = {h_n}, "
+               f"hit = {fmt(h_rate,1,'%')}, HIGH {fmt(hi_ov,1,'%')} vs MEDIUM "
+               f"{fmt(med_ov,1,'%')}. Recorded to the readings log; nothing is "
+               f"decided on them.", "", streak.strip()]
+    else:
+        md += ["", f"## Verdict", f"H4 {'REOPENS' if reopen else 'STAYS DEMOTED (backlog)'} "
+               f"— reopening needs HIGH-DQ near-miss n ≥ {reopen_n} (now {h_n}), "
+               f"hit ≥ {reopen_hit}% (now {fmt(h_rate,1,'%')}), HIGH ≥ MEDIUM overall, "
+               f"and the pass to hold on {REOPEN_CONSECUTIVE} consecutive readings.",
+               "", streak.strip()]
     path = os.path.join(out_dir, "h4_dq_threshold_baseline.md")
     open(path, "w", encoding="utf-8").write("\n".join(md) + "\n")
     print(f"\nWrote: {path}")

@@ -1,0 +1,41 @@
+# CI for the public repository (repo remediation R8c, 2026-09-17).
+#
+# The check that matters is the IMPORT step: CI runs on a fresh checkout, so it
+# sees exactly what a stranger cloning the repo sees. A module that is imported
+# by tracked code but was never committed is invisible on the author's machine
+# and fatal everywhere else - rulings.py and signal_logs.py were in exactly
+# that state for eight days in September 2026.
+#
+# Nothing here needs credentials, a broker, the model API, EDGAR or the master
+# workbook. Advisory-only - no orders (DP-T1).
+name: ci
+on: [push, pull_request]
+jobs:
+  compile-import-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Every module byte-compiles
+        run: python -m compileall -q .
+      - name: The committed tree imports without untracked files
+        run: >
+          python -c "import rulings, signal_logs, episodes, monitor_strip,
+          h1_lag_trace, h4_dq_threshold, build_actionable_registry,
+          build_near_miss_registry, outcome_sanity, repair_outcome_close,
+          enter_closes, discovery_scan, shadow_damper, signal_scan,
+          trail_basis_audit, log_tracker_crosscheck, band_price, risk_engine;
+          print('IMPORT OK')"
+      - name: Offline self-tests (each includes a failing case)
+        run: |
+          python episodes.py --selftest
+          python advisory_guard.py --selftest
+          python trail_basis_audit.py --selftest
+          python shadow_damper.py --selftest
+          python signal_scan.py --selftest
+          python band_price.py --selftest
+      - name: DP-T1 - no order path exists in the repository
+        run: python advisory_guard.py

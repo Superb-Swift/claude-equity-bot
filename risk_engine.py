@@ -66,7 +66,11 @@ class RiskConfig:
     # ANALYST NOTE: Daily loss limit as a percentage of portfolio value.
     # If the portfolio drops by this amount in a single day, the bot
     # stops generating new BUY signals for the rest of the day.
-    DAILY_LOSS_LIMIT_PCT: float = 0.02  # Stop buying at -2% day
+    # DP-T1 (2026-09-16): INERT BY DESIGN. CHECK 8 has never enforced this
+    # (its body is `pass`), and under the permanent advisory ruling there is
+    # no execution for a loss limit to halt; gate X6 is retired. The value is
+    # kept so the declaration is visible, and the banner labels it.
+    DAILY_LOSS_LIMIT_PCT: float = 0.02  # declared, NOT enforced (DP-T1)
 
     # --- Duplicate Position Guard ---
     # ANALYST NOTE: Prevents the bot from adding to an existing position.
@@ -76,7 +80,11 @@ class RiskConfig:
     # --- Human Approval Gate ---
     # ANALYST NOTE: When True, the bot logs the signal and recommended
     # action but does NOT execute the order. A human must review and
-    # manually approve. Set to False only after extensive paper testing.
+    # manually approve.
+    # DP-T1 (Rob, 2026-09-16): ADVISORY PERMANENTLY. This is never set to
+    # False, and no order path exists for it to unlock. Every trade is the
+    # operator's decision, taken outside this system. advisory_guard.py fails
+    # the scan if this value changes or any order-placing call appears.
     REQUIRE_HUMAN_APPROVAL: bool = True
 
     # --- Banned Tickers ---
@@ -290,7 +298,9 @@ def evaluate_signal(signal: dict, portfolio: dict,
         # ANALYST NOTE: In a full implementation, compare portfolio_value
         # to start-of-day value stored in a log file. For now we skip
         # this check if we can't calculate the daily change.
-        # TODO: Implement daily P&L tracking in Phase 4.
+        # RETIRED 2026-09-16 (DP-T1): the Phase 4 TODO that stood here is
+        # withdrawn. The bot is advisory permanently; there is no execution
+        # for a loss limit to stop. Left as a no-op and labelled on the banner.
         pass
 
     # ------------------------------------------------------------------
@@ -534,8 +544,12 @@ def print_risk_report(signal: dict, portfolio: dict,
     print(f"    Min BUY confidence  : {cfg.MIN_CONFIDENCE_BUY}%")
     print(f"    Min SELL confidence : {cfg.MIN_CONFIDENCE_SELL}%")
     print(f"    Max position size   : {cfg.MAX_POSITION_PCT*100}% of portfolio")
-    print(f"    Max open positions  : {cfg.MAX_OPEN_POSITIONS}")
-    print(f"    Human approval      : {cfg.REQUIRE_HUMAN_APPROVAL}")
+    # Banner labels amended 2026-09-16 (Phase 3-C exit review §6.1; DP-T1):
+    # a rule that is printed must say whether it is enforced.
+    print(f"    Max open positions  : {cfg.MAX_OPEN_POSITIONS} (flag only - DP-3C-o)")
+    print(f"    Daily loss limit    : {cfg.DAILY_LOSS_LIMIT_PCT:.0%} (declared, not enforced - DP-T1)")
+    print(f"    Human approval      : {cfg.REQUIRE_HUMAN_APPROVAL} "
+          f"(ALWAYS - advisory only, no order path, DP-T1)")
     print(f"    Min data quality    : {cfg.MIN_DATA_QUALITY}")
     print("-"*60 + "\n")
 

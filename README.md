@@ -12,13 +12,13 @@
 
 ## Overview
 
-Claude Equity Bot ingests live portfolio data from **Charles Schwab's Trader API**, enriches it with recent news from **Finnhub** and **SEC EDGAR filing context** (Form 4, 8-K, and the latest 10-Q/10-K with a bounded MD&A extract), and asks **Anthropic's Claude** to generate structured BUY/SELL/HOLD signals. Every signal flows through a hardcoded risk engine before being eligible for human approval — automated trading is **never** initiated without explicit consent.
+Claude Equity Bot ingests live portfolio data from **Charles Schwab's Trader API**, enriches it with recent news from **Finnhub** and **SEC EDGAR filing context** (Form 4, 8-K, and the latest 10-Q/10-K with a bounded MD&A extract), and asks **Anthropic's Claude** to generate structured BUY/SELL/HOLD signals. Every signal flows through a hardcoded risk engine and ends as advice for a human to act on or ignore. **The bot never places orders, and it never will:** advisory-only is permanent (`DP-T1`, ruled 2026-09-16), and `advisory_guard.py` fails the daily scan if an order path ever appears.
 
-**No order has ever been placed.** Every phase to date has been advisory-only, by design.
+**No order has ever been placed.** Every phase has been advisory-only, by design.
 
 The system is built around three principles:
 
-1. **Discipline over speed** — a multi-phase rollout (dry run → live advisory → paper simulation → live trading) ensures the system is proven before it touches real orders.
+1. **Discipline over speed** — a multi-phase rollout (dry run → live advisory → decision-support quality) with every bar pre-registered before it is read.
 2. **Position awareness** — signals factor in cost basis, unrealized P&L, and tax-account context (Roth vs Individual).
 3. **Transparency** — every signal carries reasoning, risk flags, a confidence score, and a full provenance tag chain the human can audit line by line.
 
@@ -58,7 +58,7 @@ The result is a research record where negative results survive. A Phase-2-certif
                               ▼
               ┌───────────────────────────────┐
               │        risk_engine.py         │
-              │  D1 confidence damping, then  │
+              │  D confidence damping, then   │
               │  CHECK 1-7 gates + human      │
               │  approval (permanent)         │
               └───────────────┬───────────────┘
@@ -99,7 +99,7 @@ Both the **raw (model-side)** and **operative (post-damping)** confidence are lo
 - **Asset-type awareness** — ETFs receive different fundamental analysis than equities
 - **Risk engine** — confidence thresholds, position-concentration enforcement, data-quality minimums, and a permanent human-approval gate
 - **Prior-signal state input (S1)** — the model receives its own last-5 signals and confidences per ticker, closing the statelessness gap behind the certified lag finding
-- **Confidence damping (D1)** — a deterministic post-model rule damps stale conviction into a material adverse trailing move; raw and operative confidence are both logged
+- **Confidence damping (D)** — a deterministic post-model rule damps stale conviction into a material adverse trailing move; raw and operative confidence are both logged. The rule is unchanged since D1; the generation is **D2** since the 2026-08-31 H1 trailing-window correction (first D2 cohort 2026-09-01)
 - **Forecast-free valuation layer** — market-vs-book anchoring and the value-driver identity run *backwards* (what ROE or growth must the market already believe?). Deliberately **off-prompt**: it produces no price target, feeds no signal, and touches no endpoint
 - **Daily ticker suggester** — proposes new research candidates from portfolio gaps, market themes, and peer analysis
 - **Audit-ready everything** — a daily cross-check reconciles the log against the master row by row at full precision; a parser audit proves every consumer tolerates the current tag format; a retired-criteria audit scans the source for rules that were retired but are still being cited
@@ -133,7 +133,7 @@ Both the **raw (model-side)** and **operative (post-damping)** confidence are lo
 | `schwab_client.py` | Data layer — Schwab auth, quotes, positions, account labeling |
 | `news_client.py` | News layer — recent headlines per ticker from Finnhub |
 | `claude_signal.py` | Signal layer — builds structured prompts (price trajectory, S1 prior-signal state, registered context sections) and parses Claude's JSON responses |
-| `risk_engine.py` | Decision layer — the `CHECK 1`–`CHECK 9` gate sequence; hosts the D1 damping rule and the `DampingConfig` / `RiskConfig` parameter stores |
+| `risk_engine.py` | Decision layer — the `CHECK 1`–`CHECK 9` gate sequence; hosts the damping rule (D2 era) and the `DampingConfig` / `RiskConfig` parameter stores |
 | `context_providers.py` | Provider registry — the extension point prompt sections register against |
 | `blend_engine.py`, `blend_providers.py`, `sector_map.py` | WS1 shadow blend (sector + regime channels) — logged and measured, **never drives the gate** |
 | `signal_state.py`, `seed_signal_state.py` | S1 state persistence and one-shot re-seed from the tracker |
@@ -159,10 +159,21 @@ Both the **raw (model-side)** and **operative (post-damping)** confidence are lo
 | File | Responsibility |
 |---|---|
 | `h1_lag_trace.py` | H1 confidence-update-lag tracer; two-channel (`--raw-from-logs` recovers the model-side confidence, `--suffix` keeps channel exhibits separate) |
-| `h4_dq_threshold.py` | H4 data-quality-conditional threshold watchdog (running monitor; currently demoted) |
+| `h4_dq_threshold.py` | H4 data-quality-conditional threshold watchdog (promoted under DP-3C-x; monitoring only, status read from `rulings.py`) |
 | `signal_scan.py` | One-day integrity read — run-integrity assertions, per-ticker channel table, channel reconciliation, cohort profile. Includes the era-change alarm (direction-aware) and the cohort-membership set-difference |
 | `log_tracker_crosscheck.py` | Reconciles a run's log against the master at full precision, both directions |
-| `outcome_sanity.py` | Resolution completeness, overdue and premature-value checks across all three horizons |
+| `outcome_sanity.py` | Guards the outcome closes: quote-vs-close, cross-horizon agreement, magnitude, dispersion, **Check G** (a close for a session that has not settled blocks the scan), and **Check F** (every cell against the machine-sourced log close) |
+| `enter_closes.py` | Enters settled closes for one session into blank outcome cells by cell-scoped XML surgery; refuses unsettled sessions, never overwrites, backs up and writes a ledger line |
+| `repair_outcome_close.py` | Repairs one close everywhere it resolves, with a backup and a one-line audit record per cell in `logs/outcome_close_repairs.log` |
+| `fetch_closes.py` | Settled Schwab closes for one date to TSV — writes nothing to the master |
+| `trading_calendar.py` | The NYSE session calendar, computed from rules and reconciled against the master's cohort dates; records pre-registered bot-absent sessions |
+| `trail_basis_audit.py` | Regression gate for the H1 trailing window — every log since the 2026-08-31 fix must span completed sessions only |
+| `rulings.py` | Settled decision-point registry (each entry cites its ruling document) plus an append-only readings log, so "N consecutive readings" is mechanical rather than recalled |
+| `signal_logs.py` | Recursive signals-log discovery across archived month folders, `Retired/` excluded and counted |
+| `episodes.py` | The one episode-coalescing rule (consecutive cohorts), the KEEP-70 episode basis and the blind DP-3C-w prospective-arm counter |
+| `discovery_scan.py` | Structural and HOLD-population discovery reads; `--progress` prints the pre-registered prospective arms as counts only until their read dates |
+| `shadow_damper.py` | Offline, never-shown-to-the-model confidence-change damper (λ fixed at 0.5) for prospective arm PR-3 |
+| `advisory_guard.py` | Fails the scan if any order-placing code appears or human approval is switched off (DP-T1) |
 | `monitor_strip.py` | Open-questions dashboard — one fixed-width strip of every live gate, its bar and its state; embeds into a generated report copy, never the master |
 | `build_near_miss_registry.py` | Rebuilds the near-miss BUY registry (the KEEP-70 evidence base) from the master |
 | `build_actionable_registry.py` | Rebuilds the gate-clearing directional ledger, with the mandatory era split |
@@ -176,7 +187,8 @@ Both the **raw (model-side)** and **operative (post-damping)** confidence are lo
 | Script | What it does |
 |---|---|
 | `run_daily.bat` | S1 state seed → `main.py` → `analyze_log.py` → tracker rows |
-| `scan.bat` | `signal_scan` → `log_tracker_crosscheck` → `outcome_sanity` — the integrity pass |
+| `scan.bat` | `trading_calendar` → `signal_scan` → `log_tracker_crosscheck` → `outcome_sanity` → `trail_basis_audit` → `advisory_guard` — the integrity pass |
+| `selftest.bat` | Every `--selftest`, each with a negative case, as one pass/fail |
 | `run_daily_review.bat` | Both lag tracers × both channels → H4 watchdog → near-miss registry → actionable registry → monitor strip embed |
 | `value.bat` | `quote_dump` → `band_price` → `value_anchor` → `implied_return` — the valuation pass, with an artifact guard that fails loudly if an exhibit was not written |
 | `monitor.bat` | Standalone monitor-strip refresh |
@@ -223,25 +235,27 @@ Emitted by `signal_scan.py` on every session. This is the artifact the daily rev
 
 ```
 ==============================================================================
-SIGNAL SCAN - 2026-08-21  (era A-S1D1-B1-E1, 26 rows)
+SIGNAL SCAN - 2026-09-16  (era A-S1D2-B1-E1, 29 rows)
 ==============================================================================
 
 RUN INTEGRITY
-  [OK  ] cohort membership UNCHANGED since 2026-08-20 (26 names; count 26 vs 26)
-  [OK  ] era stamp A-S1D1-B1-E1 - EDGAR live (3-C)
-  [OK  ] era unchanged since 2026-08-20 (A-S1D1-B1-E1, 26 rows)
-  [OK  ] EDGAR sections on 17/26 row(s); 9 dark: AG, AIQ, CBRS, NTR, QQQ,
+  [OK  ] cohort membership UNCHANGED since 2026-09-15 (29 names; count 29 vs 29)
+  [OK  ] era stamp A-S1D2-B1-E1 - EDGAR live (3-C), H1 window corrected
+  [OK  ] era unchanged since 2026-09-15 (A-S1D2-B1-E1, 29 rows)
+  [OK  ] EDGAR sections on 20/29 row(s); 9 dark: AG, AIQ, CBRS, NTR, QQQ,
          SCHD, SPY, VTI, XLU
   [OK  ] no covered name degraded (fin=degraded absent)
   [OK  ] confidence_raw present on all rows
-  [OK  ] regime_score uniform at -0.918
+  [OK  ] regime_score uniform at -0.021
+  [OK  ] regime_score within [-1, +1]
+  [OK  ] regime_score step -0.180 (0.159 -> -0.021) vs prior session 2026-09-15
   [OK  ] THETA source: risk_engine.DampingConfig.THETA
 
 CHANNEL RECONCILIATION
-  [OK  ] json.confidence == D.op                      26/26
-  [OK  ] json.confidence_raw == D.raw                 26/26
-  [OK  ] D.op == floor-aware(raw, damp)  [FLOOR=35]   26/26
-  [OK  ] HOLD never blend-adjusted                    26/26
+  [OK  ] json.confidence == D.op                              29/29
+  [OK  ] json.confidence_raw == D.raw                         29/29
+  [OK  ] D.raw == B.base                                      29/29
+  [INFO] D.op == B.blend_op  [INFO: WS1 descoped, no disposition] 27/29
 ```
 
 Three states are kept deliberately distinct throughout: **OK** (checked, passed), **FAIL** (checked, failed), and **NOCHK** (*could not be checked*). A tool that reports a pass when it could not run the check is treated as a defect class in its own right.
@@ -256,10 +270,10 @@ Three states are kept deliberately distinct throughout: **OK** (checked, passed)
 | **Phase 2** | ✅ Complete | Read-only calibration dry run (19 trading days, concluded 2026-06-12) — thresholds calibrated, no orders placed |
 | **Phase 3-A** | ✅ Complete | Live advisory run (14 sessions, concluded 2026-07-06). H1 lag verdict locked; the Phase-2-certified confidence-band guardrail failed to reproduce out-of-sample and was retired before anything relied on it; H2/H3 descoped; the A/B program terminated |
 | **Phase 3-B** | ✅ Complete | Advisory-only development — WS1 triple-blend (built, measured, **descoped**), the H1 feature-level implementation (S1 prior-signal state + D1 damping, era `A-S1D1-B1`) |
-| **Phase 3-C** | 🟢 **Current** | EDGAR filing context live 2026-08-03; first admitted measurement cohort 2026-08-13; era `A-S1D1-B1-E1`. E4 endpoints pre-registered before go-live; a forecast-free valuation layer built off-prompt. Still **no orders placed** |
-| **Phase 4** | ⏸️ Planned | Live trading with mandatory human approval. Entry gated on **X1–X7**, drafted in advance under the same pre-registration discipline as every other transition — including **X7**, a paper-execution phase producing real order objects against live signals with no capital at risk, before any live order |
+| **Phase 3-C** | 🟢 **Current** | EDGAR filing context live 2026-08-03; first admitted measurement cohort 2026-08-13; era `A-S1D1-B1-E1`, then `A-S1D2-B1-E1` from 2026-09-01 after the H1 trailing-window correction (cohorts either side are not pooled on model-side channels). E4 endpoints pre-registered before go-live; a forecast-free valuation layer built off-prompt. Still **no orders placed** |
+| **Phase 4** | ⏸️ Planned | **Decision-support quality** (re-scoped 2026-09-16 under `DP-T1`). Advice-quality gates carried over from the old execution register: every declared rule enforced or labelled, with tests shown to fail; the approval hand-off read by every parser; per-account and headline verdicts that never disagree silently; a demonstrated SELL path on held names (`DP-3C-s`); and a pre-registered skill yardstick. Execution-only gates (loss limit, kill switch, paper execution) are **retired** |
 
-**On the terminal intent, stated plainly because the record does:** the goal is a bot that executes on a research-backed design. `T1` — *"advisory-only, **pre-execution**, mandatory"* — is a phase gate, not a permanent ceiling. The advisory period is the method for earning that promotion. Nothing in the readiness register is ruled, and it gives `T1` no date.
+**On the terminal intent, stated plainly because the record now does:** `T1` — advisory-only, the human decides — is the **permanent ceiling** (`DP-T1`, ruled by the operator 2026-09-16). It was previously a phase gate on the way to execution. The record argued against that path: no price-based skill has been shown, the effective sample is small, confidence *changes* point the wrong way, and directional output is one-sided. The project's goal is now advice good enough to be worth reading. Reopening execution would need a new ruling and every retired gate reinstated in full.
 
 ---
 
@@ -275,20 +289,18 @@ MAX_POSITION_PCT       = 5.0%     # ENFORCED  — since 2026-08-11 (CHECK 6b)
 ALLOW_POSITION_ADD     = False    # ENFORCED  — no adding to existing positions
 REQUIRE_HUMAN_APPROVAL = True     # ENFORCED  — permanent, not a phase gate
 MAX_OPEN_POSITIONS     = 8        # FLAGS ONLY — non-blocking since 2026-08-11
-DAILY_LOSS_LIMIT_PCT   = 2.0%     # NOT ENFORCED — see the honest note below
+DAILY_LOSS_LIMIT_PCT   = 2.0%     # NOT ENFORCED — inert by design under DP-T1 (see below)
 ```
 
 **CHECK 6 was demoted and CHECK 6b was enforced on 2026-08-11 (`DP-3C-o`).** `MAX_OPEN_POSITIONS` is a *monitoring-burden* cap, not a risk cap — by its own configuration comment it buys monitoring convenience by accepting concentration risk, and a rule that increases the risk it is filed under should not hold a veto. It now records a non-blocking flag. In its place `MAX_POSITION_PCT` — which had been printed as an "Active Rule" on every signal while being enforced nowhere at evaluation time — is now genuinely enforced at the gate.
 
 That ruling carries a preserved finding, quoted in the source so it cannot be erased: *under the previous cap the risk engine approved **zero** directional signals across 57 cohorts.* Because the amendment makes the approval rate look better **by construction**, every reading of approval counts must date-split on 2026-08-11 rather than pool across it.
 
-> ### ⚠ Known open defect — `DAILY_LOSS_LIMIT_PCT` is advertised and not enforced
+> ### `DAILY_LOSS_LIMIT_PCT` is declared and not enforced — by design since `DP-T1`
 >
-> `CHECK 8`'s body is `if sig == "BUY": pass`. The daily loss limit is printed in the Active Rules banner on every signal and **controls nothing**. It is tracked as **D-5** in the Phase 4 Execution Readiness Register, where it is classed *latent* under advisory-only and **highest severity under execution**.
->
-> It is documented here rather than quietly fixed or quietly omitted, because "advertised but unenforced" is precisely the failure class `X1` was written to close — and a README that claims measurement discipline while hiding one is worse than no claim at all.
+> `CHECK 8`'s body is `if sig == "BUY": pass`. It was tracked as **D-5**, *latent* under advisory-only and **highest severity under execution**. Under the permanent advisory ruling there is no execution for a loss limit to stop, so D-5 and gate X6 are retired. The Active Rules banner now labels the line *declared, not enforced*, so the rule no longer advertises something it does not do — the failure class the old `X1` was written to close.
 
-### Confidence damping (D1)
+### Confidence damping (D; generation D2 since 2026-08-31)
 
 A deterministic layer applied **before** the gates (`risk_engine.apply_conf_damping`):
 
@@ -361,14 +373,11 @@ python -m venv venv
 venv\Scripts\activate        # Windows
 # source venv/bin/activate   # macOS / Linux
 
-# Runtime dependencies (the bot)
-pip install schwab-py anthropic finnhub-python python-dotenv flask cryptography
-
-# Analysis layer — openpyxl, used by every harness that reads the tracker
+# Everything: the bot runtime, the analysis tooling and the monitor-strip renderer
 pip install -r requirements.txt
 
-# Monitor-strip rendering only (PNG + Excel embed); skip if you don't need it
-pip install Pillow
+# Check the install: every self-test, each with a failing case (Windows)
+selftest.bat
 ```
 
 ### Configuration
@@ -383,9 +392,11 @@ TOKEN_PATH=token.json
 ANTHROPIC_API_KEY=sk-ant-...
 FINNHUB_API_KEY=your_finnhub_key
 SEC_USER_AGENT=Your Name your@email.com    # mandatory for any EDGAR fetch
+ROTH_ACCOUNT_NUMBER=your_roth_account_number
+INDIVIDUAL_ACCOUNT_NUMBER=your_individual_account_number
 ```
 
-Update `ACTIVE_ACCOUNTS` and `ACCOUNT_LABELS` in `schwab_client.py` with your own Schwab account numbers.
+Account numbers go in `.env` only. `schwab_client.py` reads `ROTH_ACCOUNT_NUMBER` and `INDIVIDUAL_ACCOUNT_NUMBER` through `os.getenv` and builds `ACCOUNT_LABELS` / `ACTIVE_ACCOUNTS` from them. **Never put an account number in a source file** — source files are tracked and this repository is public.
 
 **EDGAR is off by default and is turned on per-session, deliberately:**
 
@@ -443,7 +454,7 @@ A retracted conclusion stays next to its retraction. The reasoning is that the *
 
 ### Why human approval?
 
-Even at Phase 4, every signal that passes the risk engine requires a human "yes" before an order is placed. This is not a temporary safeguard — it is permanent architecture. The bot is a research assistant, not an autopilot.
+The bot never places an order. Every trade is the operator's decision, taken outside the system (`DP-T1`). This is permanent architecture, enforced by `advisory_guard.py` in the daily scan. The bot is a research assistant, not an autopilot.
 
 ### Why position-aware?
 
@@ -474,10 +485,11 @@ A 5% gain in a Roth IRA is structurally different from a 5% gain in a taxable ac
 | Cohort-membership check (retires the hardcoded cohort size) | ✅ Done (2026-08-21) |
 | E4 read-out and Phase 3-C exit review | 🟢 In progress |
 | Q3 commodity-context modules (WS3) | ⏸️ Deferred |
-| Paper execution against live signals (gate **X7**) | ⏸️ Pre-Phase 4 |
-| Enforce `DAILY_LOSS_LIMIT_PCT` + kill switch, negative-tested (**D-5**, **X6**) | ⏸️ Required before Phase 4 |
-| Email daily digest · scheduled execution | ⏸️ Backlog |
-| Live trading with approval gate | ⏸️ Phase 4 (readiness register drafted) |
+| Machine entry of outcome closes with a settlement gate (`enter_closes.py`, Check G) | ✅ Done (2026-09-16) |
+| Prospective arms PR-1…PR-4 and an offline confidence-change damper (`DP-3C-ah`) | 🟢 Collecting (from 2026-09-17) |
+| SELL path on held names (`DP-3C-s`) · checkable HOLD ranges | ⏸️ Phase 4 (decision-support quality) |
+| Email daily digest | ⏸️ Backlog |
+| ~~Paper execution (X7) · loss limit and kill switch (X6) · live trading~~ | ❌ Retired by `DP-T1` (2026-09-16) — advisory permanently |
 
 ---
 

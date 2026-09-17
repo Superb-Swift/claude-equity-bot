@@ -24,6 +24,16 @@ REM      (H1_Window_OffByOne_Defect_2026-08-26.md) and must not turn the scan
 REM      red every day for an item awaiting a ruling.
 REM  outcome_sanity now also carries Check F (log-close reconciliation), which
 REM  likewise reports without gating. No new commands to run.
+REM
+REM  AMENDED 2026-09-16 (DP-T1, DP-3C-ag, DP-3C-aj):
+REM    * advisory_guard - DP-T1 made mechanical. GATES: any order-placing code,
+REM      or REQUIRE_HUMAN_APPROVAL not True, turns the scan red.
+REM    * outcome_sanity Check G - a close entered for a session that has not
+REM      settled GATES (80 such cells passed silently on 2026-09-16).
+REM    * trail_basis_audit now GATES. The window fix was applied 2026-08-31;
+REM      D1 logs are history, and a D2 log on the shifted window is a regression.
+REM    * Enter outcome closes with enter_closes.py BEFORE this scan (see the
+REM      daily workflow v8.0). It refuses unsettled sessions.
 REM ============================================================================
 setlocal
 
@@ -82,15 +92,24 @@ if errorlevel 2 (
 )
 
 echo.
-echo ### H1 trailing-window audit - REPORTING ONLY, does not gate this scan
+echo ### H1 trailing-window audit - regression gate since the 2026-08-31 fix
 python trail_basis_audit.py --tracker "%MASTER%" >nul 2>&1
-if errorlevel 1 (
-    echo   The H1 window defect is still present and still UNRULED.
-    echo   Detail: python trail_basis_audit.py
-    echo   Decide:  H1_Window_OffByOne_Defect_2026-08-26.md
+if errorlevel 2 (
+    echo   NOTE: trail_basis_audit could not run. Detail: python trail_basis_audit.py
+    set "RC=2"
+) else if errorlevel 1 (
+    echo   REGRESSION: a D2 log spans the shifted window, or its alignment could
+    echo   not be determined. Detail: python trail_basis_audit.py
+    echo   Diagnosis: H1_Window_OffByOne_Defect_2026-08-26.md
+    set "RC=1"
 ) else (
-    echo   Window spans the sessions its label claims. Nothing owed.
+    echo   Every D2 log spans the window its label claims. D1 logs are history.
 )
+
+echo.
+echo ### advisory guard - DP-T1: this system never places an order
+python advisory_guard.py --quiet
+if errorlevel 1 set "RC=1"
 
 echo.
 echo ============================================================================

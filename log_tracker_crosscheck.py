@@ -109,6 +109,35 @@ def load_master(path, target):
     return rows, dupes
 
 
+def previous_cohort_size(path, target):
+    """Row count of the most recent cohort BEFORE `target`, or None.
+
+    ADDED 2026-09-08 to replace the hardcoded --expect 24. The live universe is
+    whatever the last session actually ran; comparing today against that answers
+    "did the cohort change?", which is the question, and cannot go stale in a
+    source file the way a copied constant does.
+    """
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb["Signals"]
+        counts = {}
+        for r in ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
+            d = r[COLS["date"]]
+            if d is None:
+                continue
+            d = d.date() if isinstance(d, datetime) else d
+            if d < target:
+                counts[d] = counts.get(d, 0) + 1
+        wb.close()
+        if not counts:
+            return None, None
+        prev = max(counts)
+        return counts[prev], prev
+    except Exception:
+        return None, None
+
+
 def decimals(value):
     try:
         exp = Decimal(str(value)).as_tuple().exponent
@@ -167,7 +196,23 @@ def main():
     ap.add_argument("--date", help="override the cohort date (YYYY-MM-DD)")
     ap.add_argument("--conf-tol", type=float, default=0.05,
                     help="confidence tolerance in percentage points (default 0.05)")
-    ap.add_argument("--expect", type=int, default=24, help="expected row count (default 24)")
+    # ANALYST NOTE (2026-09-08): this default was a hardcoded 24 -- a hand-copied
+    #   snapshot of a watchlist that moves. The live cohort has been 28 since at
+    #   least 2026-09-04, so every run printed "rows: log 28 / master 28
+    #   (expected 24)" plus a [COUNT] line reporting a mismatch that was not one.
+    #   Harmless at 0 findings, but it is a SECOND SOURCE OF TRUTH for the
+    #   universe -- the exact defect DP-3C-d unfroze at the EDGAR boundary,
+    #   where the same 24-name constant survives only as a documented fallback
+    #   with "CONFIRM it still matches the live watchlist" attached to it.
+    #
+    #   None now means DERIVE: the expectation becomes the PREVIOUS cohort's
+    #   row count in the master, so the check answers the question actually
+    #   worth asking -- did the universe change since the last session? -- and
+    #   cannot go stale in a source file. An explicit --expect still pins it.
+    ap.add_argument("--expect", type=int, default=None,
+                    help="expected row count. Default: DERIVED from the "
+                         "previous cohort in the master, so the check tracks "
+                         "the live universe rather than a frozen constant.")
     ap.add_argument("--quiet", action="store_true", help="suppress stdout; exit 1 on findings")
     args = ap.parse_args()
 
@@ -193,14 +238,23 @@ def main():
     master_rows, dupes = load_master(tracker, target)
     findings = compare(log_rows, master_rows, args.conf_tol)
 
+    expect, expect_src = args.expect, "given on the command line"
+    if expect is None:
+        expect, prev_date = previous_cohort_size(tracker, target)
+        expect_src = (f"derived from the previous cohort {prev_date}"
+                      if expect is not None else None)
+    if expect is None:
+        expect_src = "no prior cohort in the master -- count not checked"
+
     out = []
     out.append("=" * 78)
     out.append("LOG <-> MASTER CROSS-CHECK - {}".format(target))
     out.append("=" * 78)
     out.append("  log     : {}".format(Path(args.log).resolve()))
     out.append("  master  : {}".format(tracker.resolve()))
-    out.append("  rows    : log {} / master {} (expected {})".format(
-        len(log_rows), len(master_rows), args.expect))
+    out.append("  rows    : log {} / master {} (expected {} - {})".format(
+        len(log_rows), len(master_rows),
+        expect if expect is not None else "n/a", expect_src))
     out.append("  phase   : {}".format(", ".join(phases) if phases else
                                        "NONE MATCHED - no signal line parsed"))
     if shadowed:
@@ -208,22 +262,38 @@ def main():
     for t, row in dupes:
         out.append("  [FAIL] duplicate master row for {} at excel row {}".format(t, row))
     out.append("")
-    if not findings and not dupes and len(log_rows) == len(master_rows) == args.expect:
+    # FIXED 2026-09-16 (DP-3C-ae (ii), finishing the 2026-09-08 change). The
+    # clean test and the exit code still compared against args.expect, which
+    # is None whenever the expectation is DERIVED -- so every default run
+    # printed "RESULT: 0 finding(s)" and exited 1, and the exit code carried no
+    # signal again. Now: a log/master row-count mismatch for the same date is
+    # a FAIL (the reconciliation this tool exists for); a change against the
+    # previous cohort is a WARN (watchlist churn) and never sets the exit code.
+    count_fail = len(log_rows) != len(master_rows)
+    if not findings and not dupes and not count_fail:
         out.append("  RESULT: {}/{} CLEAN - signal, confidence, DQ and price all reconcile."
-                   .format(len(log_rows), args.expect))
+                   .format(len(log_rows), len(master_rows)))
+        if expect is not None and len(log_rows) != expect:
+            out.append("  [WARN     ] log has {} rows, {} had {} - the universe "
+                       "CHANGED (informational; does not set the exit code)"
+                       .format(len(log_rows), expect_src, expect))
     else:
         out.append("  RESULT: {} finding(s)".format(len(findings) + len(dupes)))
         for kind, t, row, detail in findings:
             out.append("  [{:<9}] {:<6} excel row {:<6} {}".format(kind, t, row, detail))
-        if len(log_rows) != args.expect:
-            out.append("  [COUNT    ] log has {} rows, expected {} (429 skips log and are inert)"
-                       .format(len(log_rows), args.expect))
+        if count_fail:
+            out.append("  [COUNT    ] log has {} rows, master has {} for the same date"
+                       .format(len(log_rows), len(master_rows)))
+        if expect is not None and len(log_rows) != expect:
+            out.append("  [WARN     ] log has {} rows, {} had {} - the universe "
+                       "CHANGED (429 skips log and are inert; informational)"
+                       .format(len(log_rows), expect_src, expect))
     out.append("")
     out.append("Advisory-only - no orders - not financial advice.")
 
     if not args.quiet:
         print("\n".join(out))
-    return 1 if (findings or dupes or len(log_rows) != args.expect) else 0
+    return 1 if (findings or dupes or count_fail) else 0
 
 
 if __name__ == "__main__":

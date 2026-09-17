@@ -72,6 +72,23 @@ CONVENTIONS (Phase 2 locked)
     Directional rightness is the SIGN TEST: BUY right if r > 0, SELL if r < 0.
     The +/-3% HOLD band does not apply -- no HOLD row is ever admitted here.
 
+2026-09-16 ADDITIONS (DP-3C-u, DP-3C-af, DP-3C-w / DP-3C-ah)
+    * EXECUTABILITY (DP-3C-u): EXECUTABLE / PARTIAL / BLOCKED, read from each
+      row's log line -- the PER-ACCOUNT field where the log carries one, the
+      top-level Risk verdict before that field existed. A REPORTED ATTRIBUTE,
+      NEVER A FILTER: no figure in this tool is computed on a subset selected
+      by it. The ruling's revisit condition (PARTIAL > 25% of post-era rows)
+      is checked and printed.
+    * CHANNELMARGIN (DP-3C-af): the ledger admits on D.op, the confidence
+      CHECK 5 actually gated on. Where the descoped blend channel disagrees,
+      the row is marked; ERASED means blend_op < gate <= D.op (MSFT 2026-08-27
+      and 2026-09-08). Nothing is read from the blend.
+    * DP-3C-w PROSPECTIVE ARM: counted here with episodes.dp3cw_arm(), blind
+      until 10 episodes resolve; the first qualifying reading is recorded to
+      logs/instrument_readings.json and printed thereafter as recorded.
+    The registry reads logs with signal_logs.discover() (recursive). A row
+    whose log is not on disk shows "no log".
+
 USAGE
     python build_actionable_registry.py --tracker logs\\claude_equity_bot_tracker.xlsx
     python build_actionable_registry.py --tracker logs\\claude_equity_bot_tracker.xlsx --emit-into-copy
@@ -199,6 +216,8 @@ class Actionable:
     era: str
     episode_id: str = field(default="")
     episode_open: bool = field(default=False)   # True on the episode's first row
+    executability: str = field(default="")      # DP-3C-u
+    channel_margin: str = field(default="")     # DP-3C-af
 
     def hit5(self):
         if self.r5 is None:
@@ -269,6 +288,146 @@ def load_actionable(tracker_path: str) -> tuple[list[Actionable], list[dt.date]]
     wb.close()
     rows.sort(key=lambda x: (x.date, x.ticker))
     return rows, sorted(all_dates)
+
+
+# --------------------------------------------------------------------------- #
+# Log fields: Executability (DP-3C-u) and ChannelMargin (DP-3C-af)
+# --------------------------------------------------------------------------- #
+import re as _re
+
+_LINE_RE = _re.compile(r'Signal JSON: \{"ticker": "(?P<tk>[A-Z.\-]+)"')
+_RISK_RE = _re.compile(r"\|\s*Risk:\s*(?P<risk>APPROVED|REJECTED)\b")
+_PER_RE = _re.compile(r"PER-ACCOUNT:\s*(?P<per>[^.|]*)\.")
+_OP_RE = _re.compile(r"D\[raw=\d+;\s*op=(?P<op>\d+);")
+_BOP_RE = _re.compile(r"blend_op=(?P<bop>\d+)\]")
+
+
+def load_log_fields(pattern):
+    """{(date, ticker): dict(exec, src, op, blend_op)} from every signals log."""
+    out = {}
+    try:
+        import signal_logs
+        paths, _info = signal_logs.discover(pattern)
+    except Exception:                                   # noqa: BLE001
+        import glob
+        paths = sorted(glob.glob(pattern))
+    for fp in paths:
+        m = _re.search(r"signals_(\d{4}-\d{2}-\d{2})\.log$", os.path.basename(fp))
+        if not m:
+            continue
+        d = dt.date.fromisoformat(m.group(1))
+        with open(fp, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                lm = _LINE_RE.search(line)
+                if not lm:
+                    continue
+                tail = line[lm.end():]
+                risk = _RISK_RE.search(tail)
+                per = _PER_RE.search(tail)
+                ex, src = "", ""
+                if per:
+                    verdicts = [v.split("=", 1)[1].strip().upper()
+                                for v in per.group("per").split(";") if "=" in v]
+                    if verdicts:
+                        n_ok = sum(1 for v in verdicts if v == "APPROVED")
+                        ex = ("EXECUTABLE" if n_ok == len(verdicts) else
+                              "BLOCKED" if n_ok == 0 else "PARTIAL")
+                        src = "per-account"
+                if not ex and risk:
+                    ex = "EXECUTABLE" if risk.group("risk") == "APPROVED" else "BLOCKED"
+                    src = "top-level (pre per-account logging)"
+                op = _OP_RE.search(tail)
+                bop = _BOP_RE.search(tail)
+                out.setdefault((d, lm.group("tk")), dict(
+                    exec=ex, src=src,
+                    per=(per.group("per").strip() if per else ""),
+                    op=int(op.group("op")) if op else None,
+                    blend_op=int(bop.group("bop")) if bop else None))
+    return out
+
+
+def attach_log_fields(rows, fields):
+    for x in rows:
+        f = fields.get((x.date, x.ticker))
+        if not f:
+            x.executability, x.channel_margin = "no log", "no log"
+            continue
+        x.executability = f["exec"] or "unparsed"
+        if x.executability == "PARTIAL" and f.get("per"):
+            # DP-3C-u's revisit condition was met on 2026-09-16 (PARTIAL above
+            # 25% of post-era rows). The per-account verdicts are therefore
+            # carried verbatim, so any future per-account pre-registration has
+            # its inputs on the row. Still an attribute, never a filter.
+            x.executability += " (" + f["per"] + ")"
+        op, bop = f["op"], f["blend_op"]
+        if op is None or bop is None:
+            x.channel_margin = "n/a (no D/B tag)"
+        elif op == bop:
+            x.channel_margin = ""
+        else:
+            erased = bop < x.gate <= op if x.signal == "BUY" else False
+            x.channel_margin = ("ERASED: " if erased else "") + \
+                f"D.op {op} / blend_op {bop} ({bop - op:+d})"
+
+
+def load_master_rows(tracker_path):
+    """Every master row as a light dict for the DP-3C-w arm (price-derived
+    +5d return, so the formula cache cannot affect it)."""
+    wb = openpyxl.load_workbook(tracker_path, data_only=True, read_only=True)
+    ws = wb[SIGNALS_SHEET]
+    out, blank = [], 0
+    for vals in ws.iter_rows(min_row=FIRST_DATA_ROW, max_row=LAST_DATA_ROW_CAP,
+                             min_col=1, max_col=COL["p5"], values_only=True):
+        d = as_date(vals[0])
+        if d is None:
+            blank += 1
+            if blank >= 25:
+                break
+            continue
+        blank = 0
+        conf = vals[COL["conf"] - 1]
+        p0, p5 = vals[COL["p0"] - 1], vals[COL["p5"] - 1]
+        ok = isinstance(p0, (int, float)) and isinstance(p5, (int, float)) and p0
+        out.append(dict(
+            date=d, ticker=str(vals[1] or "").strip().upper(),
+            signal=str(vals[COL["signal"] - 1] or "").strip().upper(),
+            conf=(conf * 100 if isinstance(conf, (int, float)) and conf <= 1 else conf),
+            ret5=((p5 - p0) / p0) if ok else None))
+    wb.close()
+    return out
+
+
+def dp3cw_block(master_rows, cohort_dates, as_of, record=True):
+    """Print the DP-3C-w arm. Records the FIRST read and prints it thereafter."""
+    import episodes
+    arm = episodes.dp3cw_arm(master_rows, cohort_dates)
+    lines = ["DP-3C-w PROSPECTIVE ARM (episodes opening on/after 2026-09-03)",
+             f"  episodes opened {arm['n_open']}   resolved +5d {arm['n_resolved']} of "
+             f"{episodes.DP3CW_MIN_N} needed   tickers {len(arm['tickers'])} "
+             f"({', '.join(arm['tickers']) or 'none'}) of {episodes.DP3CW_MIN_TICKERS} needed"]
+    try:
+        import rulings
+        prior = rulings.readings("DP-3C-w")
+    except Exception:                                   # noqa: BLE001
+        rulings, prior = None, []
+    if prior:
+        e = prior[0]
+        lines.append(f"  READ on {e['date']} (recorded, not recomputed): "
+                     f"{e['detail'].get('verdict')}  rho {e['detail'].get('rho')}  "
+                     f"n {e['detail'].get('n')}")
+    elif arm["read_ready"]:
+        rho = arm["rho"]
+        lines.append(f"  READ DATE REACHED: rho = {rho:+.3f}  -> {arm['verdict']}"
+                     if rho is not None else f"  READ DATE REACHED -> {arm['verdict']}")
+        if record and rulings is not None:
+            rulings.record_reading(
+                "DP-3C-w", as_of, arm["verdict"].startswith("POSITIVE"),
+                detail=dict(verdict=arm["verdict"], rho=rho, n=arm["n_resolved"],
+                            tickers=arm["tickers_resolved"], episodes=arm["episodes"]))
+            lines.append("  reading recorded to the readings log; later runs print it as recorded.")
+    else:
+        lines.append(f"  {arm['verdict']}")
+    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -349,9 +508,11 @@ def summarize_episodes(eps: list[dict]) -> dict:
 STANDARD_TEXT = (
     "INSUFFICIENT TEST CONDITIONS. DP-3C-l's reading standard is NONE and this "
     "tool does not change it. No disposition is read from this registry at any n "
-    "until DP-3C-l is amended by a dated ruling. The ROW and EPISODE bases are "
-    "both shown because the correct basis is UNRULED (2026-08-13); a figure "
-    "quoted from one basis alone is incomplete."
+    "until DP-3C-l is amended by a dated ruling. The EPISODE basis (DP-3C-m, "
+    "opening row) is primary, as DP-3C-y ruled for KEEP-70; the ROW basis is "
+    "shown beside it as descriptive. Executability and ChannelMargin are "
+    "reported attributes and are never used to select a subset (DP-3C-u, "
+    "DP-3C-af)."
 )
 
 ERA_TEXT = (
@@ -371,12 +532,13 @@ ERA_TEXT = (
 HEADERS = ["Signal Date", "Ticker", "Account", "Signal", "Conf %", "CHECK 5 Gate",
            "Margin (pts)", "Data Quality", "Price at Signal", "+5d Date",
            "+10d Date", "Price +5d", "Price +10d", "Return +5d", "Return +10d",
-           "Hit (5d)", "Hit (10d)", "Episode", "Opens Episode", "Risk Era", "Notes"]
+           "Hit (5d)", "Hit (10d)", "Episode", "Opens Episode", "Risk Era",
+           "Executability", "ChannelMargin", "Notes"]
 
 A = {n: get_column_letter(i + 1) for i, n in enumerate(
     ["sigdate", "ticker", "acct", "sig", "conf", "gate", "margin", "dq", "p0",
      "d5", "d10", "p5", "p10", "r5", "r10", "hit5", "hit10", "epi", "epiopen",
-     "era", "notes"])}
+     "era", "exec", "chan", "notes"])}
 
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -453,7 +615,11 @@ def write_xlsx(rows, eps, out_path, tracker_path):
         cell(r, 18, x.episode_id, fill=fill, align="center", size=9)
         cell(r, 19, "OPEN" if x.episode_open else "", fill=fill, align="center", size=9)
         cell(r, 20, x.era, fill=fill, align="center", size=9)
-        cell(r, 21, x.notes, fill=fill, size=9)
+        cell(r, 21, x.executability, fill=fill, align="center", size=9)
+        cell(r, 22, x.channel_margin,
+             fill=(WARN_FILL if x.channel_margin.startswith("ERASED") else fill), size=9,
+             bold=x.channel_margin.startswith("ERASED"))
+        cell(r, 23, x.notes, fill=fill, size=9)
         r += 1
     data_start, data_end = FIRST_DATA_ROW, r - 1
 
@@ -501,7 +667,7 @@ def write_xlsx(rows, eps, out_path, tracker_path):
     # ---- Episode basis ----
     es = summarize_episodes(eps)
     rsum = summarize_rows(rows)
-    cell(rr, 1, "BOTH BASES — the correct one is UNRULED", bold=True,
+    cell(rr, 1, "BOTH BASES — EPISODE primary, ROW descriptive", bold=True,
          fill=LABEL_FILL, size=10)
     rr += 1
     for name, val, fmt in [
@@ -548,7 +714,8 @@ def write_markdown(rows, eps, md_path, tracker_path):
         return "—" if v is None else ("YES" if v else "NO")
 
     tbl = [mdrow(["Date", "Tkr", "Sig", "Conf", "Gate", "Margin", "DQ", "Price",
-                  "+5d Ret", "Hit 5d", "Episode", "Era"]), mdrow(["---"] * 12)]
+                  "+5d Ret", "Hit 5d", "Episode", "Era", "Exec", "ChannelMargin"]),
+           mdrow(["---"] * 14)]
     for x in rows:
         tbl.append(mdrow([
             f"{x.date:%Y-%m-%d}", x.ticker, x.signal, pct(x.conf),
@@ -556,7 +723,9 @@ def write_markdown(rows, eps, md_path, tracker_path):
             x.dq, usd(x.p0),
             pct(x.r5, plus=True) if x.r5 is not None else "pending",
             hit_str(x.hit5()), x.episode_id + (" *(open)*" if x.episode_open else ""),
-            x.era,
+            x.era, x.executability,
+            (f"**{x.channel_margin}**" if x.channel_margin.startswith("ERASED")
+             else x.channel_margin or "—"),
         ]))
 
     etbl = [mdrow(["Episode", "Sig", "Opened", "Last", "Sessions", "Open conf",
@@ -637,6 +806,20 @@ def console_digest(rows, eps, cohort_dates):
         s = summarize_rows(sub)
         print(f"  {era:14s} rows {s['n']:3d}  resolved {s['comp5']:3d}  "
               f"hit {s['hit5']}/{s['comp5']} = {pct(s['rate5'])}")
+    post = [x for x in rows if x.era == ERA_POST]
+    from collections import Counter as _C
+    ec = _C(x.executability.split(" (")[0] for x in post)
+    print(f"Executability, post-era rows (DP-3C-u; attribute, never a filter): "
+          + ", ".join(f"{k} {v}" for k, v in sorted(ec.items())))
+    if post:
+        share = ec.get("PARTIAL", 0) / len(post)
+        flag = ("  ** REVISIT CONDITION MET: per-account scoring must be "
+                "pre-registered before the next read" if share > 0.25 else "")
+        print(f"  PARTIAL share {share*100:.1f}% of {len(post)} (revisit above 25%){flag}")
+    erased = [x for x in rows if x.channel_margin.startswith("ERASED")]
+    if erased:
+        print(f"ChannelMargin ERASED (DP-3C-af; admitted on D.op, blend would not clear): "
+              + ", ".join(f"{x.ticker} {x.date:%m-%d}" for x in erased))
     print("\nNO VERDICT IS EMITTED. " + STANDARD_TEXT.split(".")[0] + ".")
 
     print("\n" + "-" * 66)
@@ -667,6 +850,8 @@ def console_digest(rows, eps, cohort_dates):
           all((x.era == ERA_PRE) == (x.date < ERA_SPLIT) for x in rows))
     check("no row is in BOTH this registry and the near-miss band [60,70)",
           not any(x.signal == "BUY" and 60.0 <= x.conf * 100 < 70.0 for x in rows))
+    check("every row carries an Executability value (from its log)",
+          all(x.executability for x in rows))
     if not ok:
         print("\n  !! One or more checks WARNed — inspect before trusting the run.")
     else:
@@ -690,6 +875,10 @@ def main(argv=None):
                          "--emit-master-copy, which rebuilds that file.")
     ap.add_argument("--copy", default="tracker_with_registry.xlsx",
                     help="report copy to embed into (default: %(default)s)")
+    ap.add_argument("--logs", default=os.path.join("logs", "signals_*.log"),
+                    help="signals logs, searched recursively (Executability, ChannelMargin)")
+    ap.add_argument("--no-record", action="store_true",
+                    help="do not write the DP-3C-w reading to the readings log")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.tracker):
@@ -705,6 +894,7 @@ def main(argv=None):
               "rather than exiting — an empty population is a real and reportable "
               "state for this instrument, unlike the near-miss registry.")
     assign_episodes(rows, cohort_dates)
+    attach_log_fields(rows, load_log_fields(args.logs))
     eps = episode_view(rows)
 
     xlsx_path = os.path.join(args.out_dir, "actionable_registry.xlsx")
@@ -712,6 +902,11 @@ def main(argv=None):
     write_xlsx(rows, eps, xlsx_path, args.tracker)
     write_markdown(rows, eps, md_path, args.tracker)
     ok = console_digest(rows, eps, cohort_dates)
+    print()
+    for line in dp3cw_block(load_master_rows(args.tracker), cohort_dates,
+                            cohort_dates[-1] if cohort_dates else dt.date.today(),
+                            record=not args.no_record):
+        print(line)
     print(f"\nWrote: {xlsx_path}\nWrote: {md_path}")
 
     if args.emit_into_copy:

@@ -116,7 +116,42 @@ SHARES_MAX = 5e10
 # the block is flagged. Assets - Liabilities - Equity should equal exactly the
 # noncontrolling interest, which is small for most filers and legitimately
 # large for a few. FLAGS, does not reject.
+#
+# ANALYST NOTE (2026-09-08): the flag is a PERCENTAGE OF ASSETS, but the
+#   quantity it tests is an absolute balance-sheet line. PM tripped it on
+#   2026-06-30 at 2.82% -- $1.93B of residual against a $68.27B asset base --
+#   while GM ($1.64B) and RTX ($1.77B) carry residuals of the same ORDER and
+#   pass, purely because their asset bases are two to four times larger. PM is
+#   also the one name in the covered set with NEGATIVE book equity, which
+#   shrinks the denominator further. A filer that consolidates majority-owned
+#   subsidiaries will trip this on arithmetic before it trips on error.
+#
+#   The identity's own docstring already says what the residual SHOULD equal:
+#   noncontrolling interest. Where the filer tags that concept, comparing
+#   against it turns a magnitude heuristic into the identity check this is
+#   described as. BS_NCI_TOL is the tolerance for that comparison, as a
+#   fraction of assets; the percentage flag below is retained only as the
+#   fallback for filers that tag no NCI at all.
 BS_RESIDUAL_FLAG = 0.02
+BS_NCI_TOL = 0.005
+
+# Fund-like instruments: passive funds and commodity trusts, which have no
+# earnings in the corporate sense and whose market-to-book is ~1.0 BY
+# CONSTRUCTION because the trust IS its net asset value. Excluded from the
+# VALUATION LAYER ONLY (DP-3C-k) -- untouched in the signal pipeline, the
+# accuracy series, KEEP-70, H4 and E4.
+#
+# Membership is EVIDENCED, never inferred from a name looking fund-shaped.
+# Each entry carries the observation that puts it here.
+FUND_LIKE = {
+    "CORN": ("Teucrium Corn Fund -- commodity trust; periodic filed for the "
+             "Teucrium trust and cached under a `tags*` document name "
+             "(tags20260630_10q.htm). Quote payload flags [ETF], no eps."),
+    "GLD":  ("SPDR Gold Trust -- grantor trust holding bullion. Quote payload "
+             "flags [ETF]; no Diluted EPS in the filing."),
+    "USO":  ("United States Oil Fund -- commodity pool. Quote payload flags "
+             "[ETF]; no Diluted EPS in the filing."),
+}
 
 
 # =============================================================================
@@ -340,6 +375,34 @@ def bs_residual(fin):
     return r, (r / a if a else None)
 
 
+def bs_nci(fin):
+    """The filer's own tagged noncontrolling interest, when it tagged one.
+
+    ANALYST NOTE (2026-09-08): bs_residual's docstring says the residual
+    "should equal noncontrolling interest", and then the caller tests it
+    against a percentage of ASSETS instead -- which is a magnitude heuristic,
+    not the identity. The two disagree exactly where it matters. PM's residual
+    is $1.93B against $68.27B of assets (2.82%, FLAGGED) while GM's is $1.64B
+    (0.58%, passes) and RTX's $1.77B (1.02%, passes). The three are the same
+    order of magnitude; only the denominators differ. PM additionally carries
+    NEGATIVE book equity, so its asset base is the smallest of the three
+    relative to what it consolidates.
+
+    Where the filer tags NCI, compare against it and the check becomes the
+    identity it claims to be. Where it does not, the caller falls back to the
+    percentage flag -- unchanged, and now correctly labelled as a fallback.
+
+    Returns (value, label) or (None, None). Never guesses a concept: an
+    untagged NCI reads as absent, not as zero, because zero is a claim.
+    """
+    lm = line_map(fin)
+    for key in ("Noncontrolling interest", "Minority interest",
+                "MinorityInterest", "Noncontrolling interests"):
+        if key in lm and lm[key].get("value") is not None:
+            return lm[key]["value"], key
+    return None, None
+
+
 def vq_string(fin):
     """Input completeness, reported per name. Proposed as DP-V4's `vq=` field:
     descriptive only, and DELIBERATELY NOT coupled to `data_quality`, which
@@ -482,6 +545,39 @@ def report(tracker, cache_dir, log_path, md_path=None):
         findings.append(f"{len(fn_ambig)} accessions match more than one ticker")
     missing = [t for t in watchlist if t not in verified and t in tags
                and not tags[t]["degraded"] and tags[t]["fin_lines"] is not None]
+    # ANALYST NOTE (2026-09-08): CORN has been reported here as an unjoined
+    #   cache file since at least 2026-08-27 -- a recurring FINDING implying an
+    #   unfixed data defect. It is not one. CORN is the Teucrium Corn Fund, a
+    #   commodity trust; its periodic is filed for the trust and cached under a
+    #   `tags*` document name (edgar_cache holds tags20260630_10q.htm and
+    #   tags20260831_8k.htm), which is exactly the cause the message below
+    #   guesses at. But FIXING the join would be the wrong repair: it would
+    #   produce a book-value figure for an object that section 6(a) of the
+    #   exclusion table already says has none -- "a passive fund or trust has no
+    #   earnings in the corporate sense and its market-to-book is ~1.0 BY
+    #   CONSTRUCTION". CORN is the same object as GLD and USO and belongs beside
+    #   them, not in a defect queue that can never be cleared.
+    #
+    #   MEMBERSHIP IS EVIDENCED, NOT GUESSED. Each name below is carried with
+    #   the observation that puts it here, and the test is the same one already
+    #   used for GLD and USO: the instrument is fund-like and reports no EPS.
+    #   quote_dump independently flags all three [ETF] with no eps.
+    #
+    #   SCOPE, per the DP-3C-k precedent stated in section 6(a): this exclusion
+    #   binds THE VALUATION LAYER ONLY. CORN stays in the watchlist, the signal
+    #   pipeline, the accuracy series, KEEP-70, H4 and E4 with its denominator
+    #   untouched. An exclusion scoped to one endpoint must not silently move
+    #   another criterion's.
+    struct_missing = [t for t in missing if t in FUND_LIKE]
+    missing = [t for t in missing if t not in FUND_LIKE]
+    if struct_missing:
+        out(f"  STRUCTURALLY EXCLUDED, not a join defect: {struct_missing}")
+        for t in struct_missing:
+            out(f"     {t:>6}  {FUND_LIKE[t]}")
+        out("     A passive fund or trust has no earnings in the corporate sense and its")
+        out("     market-to-book is ~1.0 BY CONSTRUCTION. Joining the cache file would")
+        out("     produce a number, not a valuation. VALUATION LAYER ONLY (DP-3C-k):")
+        out("     these names are untouched in the signal pipeline and every criterion.")
     if missing:
         out(f"  covered in the log but NOT joined to a cache file: {missing}")
         out("     Most likely cause: the periodic is filed under a trust or parent whose")
@@ -590,12 +686,35 @@ def report(tracker, cache_dir, log_path, md_path=None):
                 f"{'':>9}  needs assets, liabilities and equity")
             continue
         note = ""
-        if frac is not None and abs(frac) > BS_RESIDUAL_FLAG:
-            note = f"** residual {frac*100:.1f}% of assets -- inspect"
+        nci, nci_label = bs_nci(c["fin"])
+        if nci is not None:
+            # The identity check proper: does the residual match the filer's
+            # OWN noncontrolling interest? Scale is irrelevant here.
+            gap = abs(r - nci)
+            a_val = lm[L_ASSETS]["value"] or 0
+            if a_val and gap / a_val > BS_NCI_TOL:
+                note = (f"** residual {money(r)} vs tagged {nci_label} "
+                        f"{money(nci)} -- gap {gap/a_val*100:.1f}% of assets, inspect")
+                n_flag += 1
+            else:
+                note = f"= tagged {nci_label} {money(nci)}"
+        elif frac is not None and abs(frac) > BS_RESIDUAL_FLAG:
+            # FALLBACK ONLY, and now labelled as one. The filer tagged no NCI,
+            # so the residual cannot be checked against what it should equal
+            # and only its size is available. Size is a weak proxy: see the
+            # ANALYST NOTE on bs_nci for the PM / GM / RTX comparison that
+            # shows this flag firing on the asset base rather than on an error.
+            note = (f"** residual {frac*100:.1f}% of assets, no NCI tagged -- "
+                    f"size-only check, inspect")
             n_flag += 1
         out(f"{c['tk']:>6} {money(lm[L_ASSETS]['value']):>12} "
             f"{money(lm[L_LIABS]['value']):>12} {money(lm[L_EQUITY]['value']):>12} "
             f"{money(r):>12} {frac*100:8.2f}%  {note}")
+    out("  Where the filer TAGS noncontrolling interest the residual is checked")
+    out("  against it -- the identity this block claims to test. Where it does not,")
+    out("  the size-only fallback applies and says so; size alone flags on the")
+    out("  asset base as readily as on an error (PM 2.82% vs GM 0.58% on residuals")
+    out("  of the same order), which is why the tagged comparison is preferred.")
     if n_flag:
         findings.append(f"{n_flag} name{'s' if n_flag != 1 else ''} "
                         f"{'carry' if n_flag != 1 else 'carries'} a balance-sheet "

@@ -191,32 +191,52 @@ def market_settled(on_date):
                    "session ends 16:00" % now_et.strftime("%H:%M"))
 
 
-def fetch_close(ticker, on_date):
-    """Daily close from the Schwab feed. Uses schwab_client.get_client() so the
-    auth path is identical to every other broker call in the project."""
+def fetch_daily_closes(ticker, quiet=False):
+    """{date: close} for every daily candle the Schwab feed returns (~1 year),
+    INCLUDING the current session's candle. The caller must gate on
+    market_settled() before trusting the newest one. Returns {} on failure.
+
+    Split out of fetch_close() on 2026-09-16 so enter_closes.py and
+    fetch_closes.py share one fetch and one dating rule.
+    schwab_client.get_price_history() cannot be used for this: it drops
+    today's candle by design (the H1 prompt window), which makes an evening
+    entry of today's close impossible."""
     try:
         import schwab_client
     except ImportError:
         print("ERROR: schwab_client.py not importable. Run from the repo root.", file=sys.stderr)
-        return None
+        return {}
     try:
         client = schwab_client.get_client()
         resp = client.get_price_history_every_day(ticker)
         candles = resp.json().get("candles", [])
     except Exception as e:                                    # noqa: BLE001
         print("  [schwab] fetch failed for %s: %s" % (ticker, e))
-        return None
-    if not candles:
-        print("  [schwab] no candles returned for %s" % ticker)
-        return None
-
+        return {}
     seen = {}
     for c in candles:
         ts, close = c.get("datetime"), c.get("close")
         if ts is None or close is None:
             continue
-        seen[datetime.datetime.fromtimestamp(ts / 1000).date()] = float(close)
+        # FIXED 2026-09-16: was datetime.fromtimestamp(ts / 1000), i.e. the
+        # MACHINE'S local zone. Schwab stamps a daily candle at midnight
+        # US/Central, which is 05:00-06:00 UTC of the same date, so UTC dating
+        # is correct everywhere; local dating is correct only west of UTC and
+        # silently shifts every candle one day back anywhere east of it. Same
+        # rule as schwab_client.get_price_history().
+        seen[datetime.datetime.fromtimestamp(
+            ts / 1000, tz=datetime.timezone.utc).date()] = float(close)
+    if not seen and not quiet:
+        print("  [schwab] no candles returned for %s" % ticker)
+    return seen
 
+
+def fetch_close(ticker, on_date):
+    """Daily close from the Schwab feed. Uses schwab_client.get_client() so the
+    auth path is identical to every other broker call in the project."""
+    seen = fetch_daily_closes(ticker)
+    if not seen:
+        return None
     lo, hi = min(seen), max(seen)
     print("  [schwab] %d daily candles for %s, %s -> %s" % (len(seen), ticker, lo, hi))
     if on_date not in seen:
@@ -274,17 +294,88 @@ def cell_span(xml, ref):
     return start, end
 
 
+def _col_num(letters):
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _split_ref(ref):
+    m = re.fullmatch(r"([A-Z]+)(\d+)", ref)
+    if not m:
+        raise AssertionError("bad cell reference %r" % ref)
+    return m.group(1), int(m.group(2))
+
+
+def insert_cell(xml, ref):
+    """Create an EMPTY <c> for `ref` if the sheet has none, and return the xml.
+
+    ADDED 2026-09-16 for enter_closes.py. Rows 2001-2032 of the master carry no
+    H/I/J elements at all (the template stopped at row 2000 and the 09-16
+    cleanup added only K-N), so a close could not be ENTERED there by surgery,
+    only repaired where a cell already existed.
+
+    The new cell copies its style (s=) from the same column in the nearest row
+    above that has one, so an entered close looks like a typed one. It is
+    placed in column order inside its <row>; a missing <row> is refused rather
+    than invented, because row creation changes the sheet's shape.
+    """
+    if cell_span(xml, ref) is not None:
+        return xml
+    col, rownum = _split_ref(ref)
+    m = re.search(r'<row r="%d"(?=[ >])[^>]*?(/?)>' % rownum, xml)
+    if not m:
+        raise AssertionError("row %d absent from the sheet XML - refusing to create it"
+                             % rownum)
+    style = ""
+    for back in range(1, 400):
+        sp = cell_span(xml, "%s%d" % (col, rownum - back)) if rownum - back > 0 else None
+        if sp:
+            sm = re.search(r'\ss="(\d+)"', xml[sp[0]:xml.index(">", sp[0])])
+            if sm:
+                style = ' s="%s"' % sm.group(1)
+            break
+    new_cell = '<c r="%s"%s/>' % (ref, style)
+    if m.group(1) == "/":                                  # <row .../> -> open it
+        row_open = m.group(0)[:-2] + ">"
+        return xml[:m.start()] + row_open + new_cell + "</row>" + xml[m.end():]
+    row_end = xml.index("</row>", m.end())
+    body = xml[m.end():row_end]
+    want = _col_num(col)
+    pos = len(body)
+    for cm in re.finditer(r'<c r="([A-Z]+)%d"' % rownum, body):
+        if _col_num(cm.group(1)) > want:
+            pos = cm.start()
+            break
+    body = body[:pos] + new_cell + body[pos:]
+    return xml[:m.end()] + body + xml[row_end:]
+
+
 def set_cached(xml, ref, new_text, numeric=True):
-    """Replace the cached <v> of a cell, leaving any <f> untouched. If the cell
-    currently caches an empty string (a formula that evaluated to "") the type
-    marker is cleared so the numeric result is not read back as text."""
+    """Replace the cached <v> of a cell, leaving any <f> untouched.
+
+    FIXED 2026-09-16, two defects:
+      * the type marker was only cleared when t="str" came IMMEDIATELY after
+        r=, but the master writes s= first (<c r="K2032" s="26" t="str">), so a
+        numeric return written into a template cell stayed typed as TEXT;
+      * a self-closing cell (<c r="I1749" s="16"/>, the shape a cleared close
+        leaves) fell through to `frag[:-4] + ...`, which cut into the opening
+        tag and produced malformed XML.
+    A text result now always carries t="str"."""
     span = cell_span(xml, ref)
     if span is None:
         raise AssertionError("cell %s absent from the sheet XML" % ref)
     s, e = span
     frag = xml[s:e]
-    if numeric:
-        frag = re.sub(r'(<c r="%s")\s+t="str"' % re.escape(ref), r"\1", frag)
+    if frag.endswith("/>"):                                # self-closing
+        frag = frag[:-2].rstrip() + "></c>"
+    gt = frag.index(">")
+    head, rest = frag[:gt], frag[gt:]
+    head = re.sub(r'\s+t="[^"]*"', "", head)
+    if not numeric:
+        head += ' t="str"'
+    frag = head + rest
     if re.search(r"<v\s*/>", frag):
         frag = re.sub(r"<v\s*/>", "<v>%s</v>" % new_text, frag)
     elif re.search(r"<v>[^<]*</v>", frag):
@@ -292,6 +383,89 @@ def set_cached(xml, ref, new_text, numeric=True):
     else:
         frag = frag[:-4] + "<v>%s</v></c>" % new_text
     return xml[:s] + frag + xml[e:]
+
+
+def write_edits(tracker, edits, audit, tkr_of, src, target_of):
+    """Back up, apply cell-scoped edits to the Signals part, set fullCalcOnLoad,
+    and append one ledger line per edited price cell. Shared by this module
+    and enter_closes.py so there is ONE writer for the master's outcome cells.
+
+    edits : list of (row_dict, price_col, return_col, price, return_fraction)
+    audit : parallel list of dicts (cell, label, old, new, old_ret, new_ret, flip)
+    tkr_of / target_of : callables giving the ledger's ticker and resolution
+    date for audit entry i.
+    Returns (backup_path, ledger_path_or_None)."""
+    # REFUSE WHILE THE WORKBOOK IS OPEN (added 2026-09-16). Excel holds the
+    # file and leaves an owner file beside it; the final os.replace would fail
+    # after the backup was taken, or Excel would later save its stale copy over
+    # this edit. Checked before anything is written.
+    d, b = os.path.split(os.path.abspath(tracker))
+    for owner in ("~$" + b, "~$" + b[2:]):
+        if os.path.exists(os.path.join(d, owner)):
+            raise AssertionError("the master is open in Excel (%s exists) - close it "
+                                 "and re-run; nothing was written" % owner)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    backup = "%s_backup_%s.xlsx" % (os.path.splitext(tracker)[0], stamp)
+    shutil.copy2(tracker, backup)
+
+    zin = zipfile.ZipFile(tracker)
+    part = signals_part(zin)
+    xml = zin.read(part).decode("utf-8")
+    n_before = len(re.findall(r"<c ", xml))
+    n_inserted = 0
+    for r, pcol, rcol, px, ret in edits:
+        pref = "%s%d" % (pcol, r["row"])
+        if cell_span(xml, pref) is None:
+            xml = insert_cell(xml, pref)
+            n_inserted += 1
+        xml = set_cached(xml, pref, repr(float(px)))
+        xml = set_cached(xml, "%s%d" % (rcol, r["row"]), repr(ret))
+        if pcol == "H":                                    # N keys off K only
+            xml = set_cached(xml, "N%d" % r["row"], band_flag(r["sig"], ret), numeric=False)
+    if len(re.findall(r"<c ", xml)) != n_before + n_inserted:
+        zin.close()
+        raise AssertionError("cell count changed unexpectedly - refusing to write")
+    # Well-formedness is checked before anything is replaced.
+    import xml.dom.minidom as _md
+    _md.parseString(xml.encode("utf-8"))
+
+    wbx = zin.read("xl/workbook.xml").decode("utf-8")
+    if "fullCalcOnLoad" not in wbx:
+        wbx = re.sub(r"(<calcPr\b[^>]*?)\s*/>", r'\1 fullCalcOnLoad="1"/>', wbx, count=1)
+
+    tmp = tracker + ".tmp"
+    zout = zipfile.ZipFile(tmp, "w")
+    for it in zin.infolist():
+        data = zin.read(it.filename)
+        if it.filename == part:
+            data = xml.encode("utf-8")
+        elif it.filename == "xl/workbook.xml":
+            data = wbx.encode("utf-8")
+        zout.writestr(it, data, zipfile.ZIP_DEFLATED)
+    zout.close()
+    zin.close()
+    try:
+        os.replace(tmp, tracker)
+    except OSError as e:
+        raise AssertionError("could not replace the master (%s) - is it open? The "
+                             "edited copy is at %s; the original is untouched" % (e, tmp))
+
+    ledger = os.path.join(os.path.dirname(os.path.abspath(tracker)), "outcome_close_repairs.log")
+    try:
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(ledger, "a", encoding="utf-8") as fh:
+            for i, a in enumerate(audit):
+                fh.write("%s\t%s\t%s\t%s\t%s\told=%s\tnew=%.4f\t"
+                         "ret %+.2f%% -> %+.2f%%\t%s\t%s\tbackup=%s\n"
+                         % (now, tkr_of(i), target_of(i), a["cell"], a["label"],
+                            ("%.4f" % a["old"]) if num(a["old"]) else "blank",
+                            float(a["new"]), a["old_ret"], a["new_ret"],
+                            a["flip"] or "-", src, os.path.basename(backup)))
+    except OSError as e:
+        print("  [WARN] audit ledger NOT written (%s). The edit IS applied; "
+              "record it by hand." % e)
+        ledger = None
+    return backup, ledger, part
 
 
 def band_flag(sig, k):
@@ -456,6 +630,7 @@ def main():
     print("  EFFECT ON RETURNS")
     print("-" * 78)
     edits = []
+    audit = []          # parallel record for the repair ledger; see the write step
     for r, label, pcol, rcol in targets:
         g = r["g"]
         old_v = r[pcol]
@@ -467,8 +642,23 @@ def main():
                 flip = "  SIGN FLIP"
             if r["sig"] == "HOLD" and (abs(old_ret) < 3.0) != (abs(new_ret) < 3.0):
                 flip += "  BAND CROSSING"
+        if num(old_v) and abs(float(old_v) - close) < 1e-9:
+            # ADDED 2026-09-16: a cell already holding the close is reported,
+            # not rewritten, so the ledger records only real changes.
+            print("    %s%-5d %-5s  already %.4f - unchanged" % (pcol, r["row"], label, close))
+            continue
         print("    %s%-5d %-5s  %+7.2f%% -> %+7.2f%%%s" % (pcol, r["row"], label, old_ret, new_ret, flip))
         edits.append((r, pcol, rcol, close, new_ret / 100.0))
+        audit.append(dict(row=r["row"], cell="%s%d" % (pcol, r["row"]),
+                          label=label, old=old_v, new=close,
+                          old_ret=old_ret, new_ret=new_ret,
+                          flip=flip.strip()))
+
+    if not edits:
+        print("-" * 78)
+        print("  Nothing to change: every cell already holds %.4f." % close)
+        print("=" * 78)
+        return 0
 
     if not args.apply:
         print("-" * 78)
@@ -477,43 +667,31 @@ def main():
         return 0
 
     # ---- write --------------------------------------------------------------
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    backup = "%s_backup_%s.xlsx" % (os.path.splitext(args.tracker)[0], stamp)
-    shutil.copy2(args.tracker, backup)
+    # The backup, surgery, fullCalcOnLoad and ledger now live in write_edits(),
+    # shared with enter_closes.py (2026-09-16).
+    #
+    # ANALYST NOTE (2026-09-08): on 2026-09-08 `scan.bat` was run twice. The
+    #   first run reported five findings; the second reported CLEAN. The master
+    #   had been corrected between them, but THE RUN RECORD CONTAINED NO
+    #   STATEMENT OF WHAT CHANGED. One append-only ledger line per repair
+    #   (logs/outcome_close_repairs.log) closes that. Failure to write the
+    #   ledger is reported but never blocks the repair.
+    #   2026-09-16: the ledger now sits beside the tracker it describes rather
+    #   than at a cwd-relative logs/ path.
+    src = ("manual --price" if args.price is not None else "broker feed") \
+        + (" FORCED" if args.force else "")
+    try:
+        backup, ledger, part = write_edits(
+            args.tracker, edits, audit, lambda i: tkr, src,
+            lambda i: target)
+    except AssertionError as e:
+        print("  ERROR: %s" % e, file=sys.stderr)
+        return 1
     print("-" * 78)
     print("  backup : %s" % backup)
-
-    zin = zipfile.ZipFile(args.tracker)
-    part = signals_part(zin)
     print("  sheet  : Signals -> %s" % part)
-    xml = zin.read(part).decode("utf-8")
-    before = xml
-    for r, pcol, rcol, px, ret in edits:
-        xml = set_cached(xml, "%s%d" % (pcol, r["row"]), repr(float(px)))
-        xml = set_cached(xml, "%s%d" % (rcol, r["row"]), repr(ret))
-        if pcol == "H":                                    # N keys off K only
-            xml = set_cached(xml, "N%d" % r["row"], band_flag(r["sig"], ret), numeric=False)
-    changed = len(re.findall(r"<c ", before)) == len(re.findall(r"<c ", xml))
-    if not changed:
-        print("  ERROR: cell count changed - refusing to write.", file=sys.stderr)
-        return 1
-
-    wbx = zin.read("xl/workbook.xml").decode("utf-8")
-    if "fullCalcOnLoad" not in wbx:
-        wbx = re.sub(r"(<calcPr\b[^>]*?)\s*/>", r'\1 fullCalcOnLoad="1"/>', wbx, count=1)
-
-    tmp = args.tracker + ".tmp"
-    zout = zipfile.ZipFile(tmp, "w")
-    for it in zin.infolist():
-        data = zin.read(it.filename)
-        if it.filename == part:
-            data = xml.encode("utf-8")
-        elif it.filename == "xl/workbook.xml":
-            data = wbx.encode("utf-8")
-        zout.writestr(it, data, zipfile.ZIP_DEFLATED)
-    zout.close()
-    zin.close()
-    os.replace(tmp, args.tracker)
+    if ledger:
+        print("  audit  : %s  (%d line(s) appended)" % (ledger, len(audit)))
 
     print("  WROTE  : %s  (%d price cell(s) + cached returns; fullCalcOnLoad set)"
           % (args.tracker, len(edits)))

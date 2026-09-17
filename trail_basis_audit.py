@@ -63,6 +63,19 @@ DISCIPLINE
     contract). Exit 1 = at least one log spans a different window than its
     label claims.
 
+STATUS SINCE 2026-08-31 (amended 2026-09-16, DP-3C-ae (i) / DP-3C-aj)
+    The remedy was APPLIED on 2026-08-31 (era D2 from the 2026-09-01 cohort).
+    This tool is now a REGRESSION GATE:
+      * a D2 log (>= 2026-09-01) whose window includes the in-progress
+        session, or whose alignment cannot be determined, is a finding (exit 1);
+      * D1 logs (< 2026-09-01) are listed as history and never set the exit code;
+      * the label check compares POINTS with the label, not intervals: five
+        daily closes span four changes and "5-day trailing move" is standard
+        usage (DP-3C-ae (i)). The old intervals check fired on every D2 log, so
+        the gate could never go green and its exit code carried no signal;
+      * `--selftest` shows the gate FAILING on a synthetic shifted window and
+        passing on a correct one. A gate never shown to fail is not a gate.
+
 Advisory-only - no orders - not financial advice.
 """
 
@@ -90,6 +103,11 @@ except ImportError:                                            # pragma: no cove
 
 H1_RE = re.compile(r"H1\[trail(\d+)d=([-+0-9.]+)%;\s*closes=([0-9.>]+)\]")
 LOG_DATE_RE = re.compile(r"signals_(\d{4}-\d{2}-\d{2})\.log$")
+
+# The window fix was applied 2026-08-31 (H1-WINDOW, ruled 2026-08-27); the
+# first D2 cohort is 2026-09-01. A log before this date is D1 by definition
+# and its shifted window is HISTORY, not a finding (DP-3C-aj, 2026-09-16).
+D2_START = dt.date(2026, 9, 1)
 
 # A close printed to 2dp against a manual entry carried at full precision.
 MATCH_TOL_PCT = 0.03
@@ -222,7 +240,11 @@ def main():
                     help="glob for session logs")
     ap.add_argument("--tracker", default=os.path.join("logs", "claude_equity_bot_tracker.xlsx"))
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--selftest", action="store_true",
+                    help="show the gate failing on a synthetic shifted window")
     a = ap.parse_args()
+    if a.selftest:
+        return selftest()
 
     if not os.path.exists(a.tracker):
         print("ERROR: not found: %s" % a.tracker, file=sys.stderr)
@@ -255,25 +277,18 @@ def main():
                  "trail%dd" % r["labelled"], r["alignment"],
                  r["hits"], r["hits"] + r["misses"], r["near_quote"], r["n_tickers"]))
 
-    findings = []
-    for r in results:
-        if r["alignment"] == "INCLUDES_IN_PROGRESS":
-            k = r["points"]
-            findings.append(
-                "[H1] %s: window is SHIFTED ONE SESSION FORWARD. Contract is the "
-                "close %d sessions back -> the close 1 session back (%d completed "
-                "closes). Actual is the close %d sessions back -> an IN-PROGRESS "
-                "candle for the run date itself (%d/%d newest elements sit within "
-                "0.5%% of that session's own Px@signal). Interval count is "
-                "unchanged at %d; both EDGES move."
-                % (r["date"], k, k, k - 1, r["near_quote"], r["n_tickers"],
-                   r["intervals"]))
-        elif r["alignment"] == "UNDETERMINED":
-            findings.append("[H1] %s: alignment undetermined - too few settled "
-                            "references in the master to decide." % r["date"])
-        elif r["intervals"] != r["labelled"]:
-            findings.append("[H1] %s: label says trail%dd, window spans %d "
-                            "completed intervals." % (r["date"], r["labelled"], r["intervals"]))
+    findings, history = findings_for(results)
+    if history:
+        print("-" * 84)
+        print("  D1 HISTORY - %d log(s) before %s. The window defect was live then and"
+              % (len(history), D2_START))
+        print("  was fixed on 2026-08-31; these are the record, not findings.")
+        kinds = {}
+        for h in history:
+            d, _, what = h.partition("  ")
+            kinds.setdefault(what, []).append(d)
+        for what, ds in kinds.items():
+            print("    %-44s %3d log(s), %s .. %s" % (what, len(ds), ds[0], ds[-1]))
 
     print("-" * 84)
     if findings:
@@ -283,18 +298,98 @@ def main():
         print("-" * 84)
         print("  CONSEQUENCE, stated plainly: risk_engine.compute_trail_pct()")
         print("  reads this same list, so THETA damping runs on it and sets the")
-        print("  operative confidence. This is NOT confined to reporting.")
-        print("  Diagnosis and the UNAPPLIED remedy:")
-        print("    H1_Window_OffByOne_Defect_2026-08-26.md")
-        print("    propose_h1_window_fix.py   (dry-run by default; --apply is a")
-        print("                                deliberate, endpoint-moving act)")
+        print("  operative confidence. A D2 log on the shifted window means the")
+        print("  2026-08-31 fix has REGRESSED (schwab_client.get_price_history).")
+        print("  Diagnosis: H1_Window_OffByOne_Defect_2026-08-26.md")
         print("=" * 84)
         return 1
 
-    print("  RESULT: CLEAN - every log spans the window its label claims,")
+    print("  RESULT: CLEAN - every D2 log spans the window its label claims,")
     print("  over completed sessions only.")
     print("=" * 84)
     return 0
+
+
+def findings_for(results):
+    """(findings, history). Findings set the exit code; history does not."""
+    findings, history = [], []
+    for r in results:
+        d1 = r["date"] < D2_START
+        if r["alignment"] == "INCLUDES_IN_PROGRESS":
+            k = r["points"]
+            msg = ("[H1] %s: window is SHIFTED ONE SESSION FORWARD. Contract is the "
+                   "close %d sessions back -> the close 1 session back (%d completed "
+                   "closes). Actual is the close %d sessions back -> an IN-PROGRESS "
+                   "candle for the run date itself (%d/%d newest elements sit within "
+                   "0.5%% of that session's own Px@signal)."
+                   % (r["date"], k, k, k - 1, r["near_quote"], r["n_tickers"]))
+            if d1:
+                history.append("%s  D1 shifted window (the known defect)" % r["date"])
+            else:
+                findings.append(msg + " REGRESSION: this is a D2 log.")
+        elif r["alignment"] == "UNDETERMINED":
+            if d1:
+                history.append("%s  alignment undetermined" % r["date"])
+            else:
+                findings.append("[H1] %s: alignment undetermined - too few settled "
+                                "references in the master to decide." % r["date"])
+        elif r["points"] != r["labelled"]:
+            # DP-3C-ae (i): POINTS, not intervals. trail5d = 5 closes.
+            (history if d1 else findings).append(
+                "[H1] %s: label says trail%dd, window carries %d closes."
+                % (r["date"], r["labelled"], r["points"]))
+    return findings, history
+
+
+def selftest():
+    """Negative and positive test of the gate on synthetic data (no files)."""
+    import tempfile
+    ok = True
+
+    def chk(name, cond):
+        nonlocal ok
+        ok &= bool(cond)
+        print("  [%s] %s" % ("PASS" if cond else "FAIL", name))
+
+    run = dt.date(2026, 9, 10)
+    tickers = ["AAA", "BBB", "CCC", "DDD"]
+    closes_ref, pxsig = {}, {}
+    for i, t in enumerate(tickers):
+        for back in range(0, 12):
+            closes_ref[(t, shift_sessions(run, -back))] = 100.0 + i * 10 + back
+        pxsig[(t, run)] = 100.0 + i * 10 + 0.01
+
+    def write_log(shifted):
+        lines = []
+        for t in tickers:
+            if shifted:        # D1 defect: D-4 .. D (live print)
+                cl = [closes_ref[(t, shift_sessions(run, -b))] for b in (4, 3, 2, 1)]
+                cl.append(pxsig[(t, run)])
+            else:              # contract: D-5 .. D-1
+                cl = [closes_ref[(t, shift_sessions(run, -b))] for b in (5, 4, 3, 2, 1)]
+            lines.append("x | Signal JSON: %s | H1[trail5d=+1.00%%; closes=%s]\n"
+                         % (json.dumps({"ticker": t}),
+                            ">".join("%.2f" % c for c in cl)))
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "signals_%s.log" % run)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.writelines(lines)
+        return p
+
+    good = audit_log(write_log(False), closes_ref, pxsig)
+    bad = audit_log(write_log(True), closes_ref, pxsig)
+    chk("contract window reads COMPLETED_ONLY", good["alignment"] == "COMPLETED_ONLY")
+    chk("contract window -> no finding (points == label)", findings_for([good])[0] == [])
+    chk("shifted window reads INCLUDES_IN_PROGRESS", bad["alignment"] == "INCLUDES_IN_PROGRESS")
+    chk("shifted D2 window -> a REGRESSION finding (gate fails)",
+        len(findings_for([bad])[0]) == 1)
+    old = dict(bad, date=dt.date(2026, 8, 20))
+    f, h = findings_for([old])
+    chk("shifted D1 window -> history, not a finding", f == [] and len(h) == 1)
+    four = dict(good, points=4)
+    chk("a 4-close window labelled trail5d -> finding", len(findings_for([four])[0]) == 1)
+    print("  RESULT:", "ALL PASS" if ok else "FAILURES")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

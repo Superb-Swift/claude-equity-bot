@@ -221,10 +221,37 @@ def load_raw_conf_map(patterns):
     """
     tick_re = re.compile(r'"ticker":\s*"([A-Za-z.\-]+)"')
     raw_re = re.compile(r'"confidence_raw":\s*(\d+)')
-    files = []
-    for p in patterns:
-        hits = sorted(glob.glob(p))
-        files.extend(hits if hits else ([p] if os.path.exists(p) else []))
+    # ANALYST NOTE (2026-09-08): glob.glob is NON-RECURSIVE, and the logs have
+    #   since been tidied into month subfolders ("05 May signals",
+    #   "06 June signals", "07 July Signals", "08 August Signals"). The loose
+    #   set in logs/ is now five files — 2026-09-01 onward — so this loader
+    #   reported "parsed 5 file(s)" and every raw-channel exhibit narrowed to
+    #   the current month WITHOUT SAYING SO. Nothing was deleted; the pattern
+    #   simply stopped reaching four months of history.
+    #
+    #   The damage here is milder than in monitor_strip — whose WS1 ledger is
+    #   CUMULATIVE and lost three quarters of its rows — because this loader
+    #   only OVERRIDES tracker values where it finds a raw entry and leaves the
+    #   rest alone, so the exhibits still rendered full series. But "5 of 43
+    #   rows use log RAW confidence" invites the reading "only 5 post-deploy
+    #   rows exist", when the true reason was that the other logs were out of
+    #   view. signal_logs.discover walks the archive; the span is printed below
+    #   so the exhibit states what it was actually built from.
+    files, spans = [], []
+    try:
+        import signal_logs
+        for p in patterns:
+            found, info = signal_logs.discover(p)
+            files.extend(found)
+            if info.get("n"):
+                spans.append(info)
+    except Exception:
+        pass
+    if not files:
+        for p in patterns:
+            hits = sorted(glob.glob(p))
+            files.extend(hits if hits else ([p] if os.path.exists(p) else []))
+    files = sorted(dict.fromkeys(files))
     m = {}
     for fp in files:
         stem = os.path.splitext(os.path.basename(fp))[0]
@@ -242,8 +269,12 @@ def load_raw_conf_map(patterns):
                     key = (d, tm.group(1).upper())
                     if key not in m:  # FIRST occurrence wins - AM canonical
                         m[key] = float(rm.group(1))
-    print(f"   [raw-from-logs] parsed {len(files)} file(s), "
-          f"{len(m)} raw-confidence entrie(s)")
+    dates = sorted({d for d, _t in m})
+    span = f", {dates[0]} .. {dates[-1]}" if dates else ""
+    arch = sum(s.get("n_archived", 0) for s in spans)
+    print(f"   [raw-from-logs] parsed {len(files)} file(s){span}, "
+          f"{len(m)} raw-confidence entrie(s)"
+          + (f" ({arch} log(s) from archive subfolder(s))" if arch else ""))
     return m
 
 
@@ -395,11 +426,33 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
     print(f"   • corr(conf, trailing move) rises (confidence reacts to the recent")
     print(f"     move; this run: {r_now:+.3f})." if r_now is not None
           else "     move).")
+    # DP-3C-aj (2026-09-16; review 2026-09-08 §6; Discovery D2). Tracking the
+    # trailing move is NOT success on its own: in a universe that mean-reverts
+    # at 10-20 sessions, a confidence that follows the trailing move more
+    # closely is MORE anti-predictive. This block used to print the trailing
+    # correlation as a pass criterion two lines below a negative forward
+    # correlation and say nothing about it. The forward sign now travels with
+    # it, and a non-positive forward correlation is named. No bar moves: G1 is
+    # the episode-response table, not this block.
+    if r_fwd is None:
+        print("   • corr(conf, forward +5d) = n/a - the trailing figure above cannot")
+        print("     be read as success without its forward sign.")
+    else:
+        print(f"   • corr(conf, forward +5d) must NOT be negative for the above to")
+        print(f"     count as success. This run: {r_fwd:+.3f}"
+              + ("  <-- NEGATIVE: tracking the trailing move is not helping the"
+                 if r_fwd < 0 else "  (non-negative)"))
+        if r_fwd < 0:
+            print("     forward read here. Directional diagnostic only (small n,")
+            print("     overlapping windows); see DP-3C-w and Discovery 2026-09-16 §7.")
     print(f"   • (Retired criterion, shown for continuity only: the 50-59 band "
           f"{'leads' if ok_cal else 'does not lead'} in this window.)")
     print(f"   • {ticker}-type names no longer hold high confidence through a")
     print(f"     multi-session adverse move.")
-    print("\n   NOTE: per-ticker n is small (~19 cohorts) — read the trace table as")
+    # FIXED 2026-09-16: said "~19 cohorts", a Phase 2 figure, on a series that
+    # now runs to 80+ rows. The count is the rows this run actually traced.
+    print(f"\n   NOTE: per-ticker n is small ({len(rows)} rows, overlapping 5-session")
+    print("   windows) — read the trace table as")
     print("   the primary evidence and the correlations as directional diagnostics.")
 
     return dict(best_L=best_L, r_now=r_now, r_fwd=r_fwd, ok_cal=ok_cal,

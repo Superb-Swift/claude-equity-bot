@@ -4,7 +4,8 @@
 # WHAT THIS IS:
 #   The non-negotiable gate that comes BEFORE 3-C go-live (Phase3C_EDGAR_
 #   Scope_Spec.md §5). It synthesises a full 24-row Phase 3-C log — new phase
-#   token, new era stamp `A-S1D1-B1-E1`, and the new trailing E[...] tag — and
+#   token, the live era stamp (read from main.py; `A-S1D2-B1-E1` since the
+#   2026-08-31 H1 fix), and the trailing E[...] tag — and
 #   runs the REAL parsers against it. Not a re-implementation of their regexes:
 #   it imports analyze_log.parse_log and parse_log_to_tracker.parse_log_file
 #   and asserts on what they actually return.
@@ -28,7 +29,7 @@
 #   4. Base operative confidence is UNCHANGED by the E[...] tag: a control
 #      log without the tag and a treatment log with it must yield identical
 #      confidences, signals, DQ and prices, ticker by ticker
-#   5. The era label A-S1D1-B1-E1 does NOT trip the variant-"B" skip
+#   5. The live era label does NOT trip the variant-"B" skip
 #   6. The E[...] tag does not leak into any parsed FIELD other than the
 #      reason text (where H1/S1/D/B already land by the same mechanism)
 #   7. signal_scan.parse_log — the THIRD consumer of the E[...] tag, added
@@ -93,13 +94,46 @@ TICKERS = ["AAPL", "AG", "AIQ", "CBRS", "CORN", "DOW", "FTI", "GLD",
 
 # Accounts mirror the live mix: held names carry real account labels, scouts
 # carry the em-dash that normalize_account maps to "Scout".
+# NOTE (2026-09-17): TICKERS/HELD are a FIXED SYNTHETIC FIXTURE, not a copy of
+# the live watchlist. The audit tests how the four parsers read a log line, and
+# its row-count assertions are written against this fixture. The live cohort
+# size is checked where it belongs: signal_scan's membership check and
+# log_tracker_crosscheck's derived count.
 HELD = {"AAPL", "AG", "CBRS", "DOW", "FTI", "GM", "JPM", "MSFT", "NKE",
         "NTR", "NVDA", "PM", "PWR", "RTX", "SND", "WMT"}
 ACCOUNTS = ["Roth IRA", "Individual", "Roth IRA,Individual"]
 
 PHASE = "3-C"
-ERA_CONTROL   = "A-S1D1-B1"
-ERA_TREATMENT = "A-S1D1-B1-E1"
+
+
+def _live_eras():
+    """(control, treatment) era labels, READ from main.py's source.
+
+    2026-09-17 (repo remediation R7a): these were pinned at A-S1D1-B1 /
+    A-S1D1-B1-E1 and went stale when the H1 window fix moved the generator to
+    D2 (applied 2026-08-31, first D2 cohort 2026-09-01). The audit was then
+    proving the parsers tolerate an era the generator no longer emits. Same
+    defect class as the hardcoded `expected 24`, same fix: derive, don't
+    restate. The source is parsed as text rather than imported, so the audit
+    carries no import side effects (main.py pulls in the broker and model
+    clients, and EDGAR when EQUITY_EDGAR=1).
+    """
+    import os
+    import re
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            m = re.search(r'^PROMPT_VARIANT\s*=\s*"([^"]+)"\s+if\s+EDGAR_ENABLED\s+'
+                          r'else\s+"([^"]+)"', fh.read(), re.M)
+        if m:
+            return m.group(2), m.group(1)
+    except OSError:
+        pass
+    raise SystemExit("edgar_parser_audit: could not read PROMPT_VARIANT from main.py "
+                     "- refusing to audit against a guessed era label (exit 2)")
+
+
+ERA_CONTROL, ERA_TREATMENT = _live_eras()     # e.g. A-S1D2-B1, A-S1D2-B1-E1
 
 # Names that receive an EDGAR section. CBRS is excluded by DP-3; the ETFs and
 # commodity trusts are left to render "E[no filings]" so the audit also covers
@@ -370,7 +404,7 @@ def main():
             conf_of(al_c), conf_of(al_t))
 
     # --- 5. Era label does not trip the variant-B skip ----------------------
-    print("[5] era label A-S1D1-B1-E1 vs the variant-'B' skip")
+    print(f"[5] era label {ERA_TREATMENT} vs the variant-'B' skip")
     a.check("treatment rows survive the skip", len(p2t_t), n)
     a.check("a bare 'B' would still be skipped",
             len(p2t.parse_log_file(
@@ -571,7 +605,7 @@ def main():
     print("  E3 PARSER AUDIT: PASSED")
     print("  All four parsers (analyze_log, parse_log_to_tracker, signal_scan,")
     print("  log_tracker_crosscheck) tolerate the 3-C phase token, the")
-    print("  A-S1D1-B1-E1 era label and the")
+    print(f"  {ERA_TREATMENT} era label (read from main.py) and the")
     print("  amended (DP-3C-i/j) trailing E[...] tag, and none perturbs a")
     print("  single parsed field. This criterion no longer blocks go-live.")
     print("  STILL REQUIRED: the coverage run (SEC fetch path) and E4")

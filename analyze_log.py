@@ -371,7 +371,8 @@ def build_summary(signals: list, tokens: dict, log_path: str) -> str:
     # =========================================================================
     # ANALYST NOTE:
     #   Two tiers replace the old "Top 5 Highest Confidence" block:
-    #     1. Actionable — would execute in Phase 4
+    #     1. Actionable — cleared the risk engine; advice for the operator
+    #        (never executed by the bot: DP-T1, advisory permanently)
     #     2. Near-Miss  — critical Phase 2 calibration data
     #
     #   Signals below the near-miss band aren't surfaced here because

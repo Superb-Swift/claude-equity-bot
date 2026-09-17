@@ -71,7 +71,58 @@ def watchlist():
         return sorted(json.load(fh))
 
 
+def session_check():
+    """Refuse-by-default on a non-session day, unless the operator insists.
+
+    ANALYST NOTE (2026-09-08): a dump was captured on 2026-09-07 at 09:41 and
+    preserved as quote_dump_20260907_094139.json. 2026-09-07 was LABOR DAY, and
+    the same day's scan.bat asserted -- correctly, in this same toolchain --
+    "[PASS] Labor Day 2026-09-07 is NOT a session".
+
+    The guard in value.bat asks "does a dump exist for today's DATE"; it never
+    asks whether that date is a trading session. On a holiday the API returns
+    the PREVIOUS session's marks, which are then written under today's stamp
+    and used as the drift reference in implied_return section 1. A stale mark
+    presented as a current one is precisely the class of defect the
+    price-provenance note in value_anchor exists to bound, arriving through a
+    door nothing was watching.
+
+    The project HAS a rigorous trading_calendar module; the quote path simply
+    never consulted it. This does not block the operator -- one flag overrides
+    it -- it stops a holiday capture happening SILENTLY.
+    """
+    try:
+        import trading_calendar as tc
+    except Exception as e:
+        print(f"[calendar] unavailable ({e}) -- session not verified")
+        return True
+    today = datetime.now().date()
+    for fn in ("is_session", "is_trading_day", "is_market_open", "is_trading_session"):
+        f = getattr(tc, fn, None)
+        if not callable(f):
+            continue
+        try:
+            ok = bool(f(today))
+        except Exception:
+            continue
+        if ok:
+            return True
+        print(f"REFUSED: {today} is NOT a trading session (trading_calendar.{fn}).")
+        print("  Quotes captured on a non-session carry the PREVIOUS session's")
+        print("  marks and would be stamped as today's -- which is what happened")
+        print("  on Labor Day 2026-09-07 (quote_dump_20260907_094139.json).")
+        print("  Re-run with --allow-non-session if that is intended.")
+        return False
+    print("[calendar] no session predicate found -- session not verified")
+    return True
+
+
 def main():
+    if "--allow-non-session" in sys.argv:
+        print("[calendar] non-session capture explicitly allowed by flag")
+    elif not session_check():
+        return 2
+
     if os.path.exists(OUT):
         # Do not clobber silently. An older snapshot may be the one that was
         # analysed; overwriting it without a word is how provenance is lost.

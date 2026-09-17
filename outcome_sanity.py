@@ -57,6 +57,15 @@ CHECKS
      cells -- the shape that produced the AG defect, where B is unanimous and
      wrong and A is inside tolerance. Reports; does not gate (see
      CHECK_F_GATES_EXIT).
+     AMENDED 2026-09-16 (DP-3C-ag): F now compares EVERY filled cell against
+     the log close, including dates where the cells disagree with each other
+     (previously skipped as "Check B's problem"), and its tolerance is the
+     log's print precision (2dp -> 0.0051), not 0.05%. The 0.05% tolerance let
+     a known-wrong MSFT cell (497.12 vs 496.914, 0.04%) pass both B and F.
+  G  UNSETTLED / FUTURE CELLS (added 2026-09-16, DP-3C-ag). A filled cell whose
+     resolution session has not settled yet cannot hold a close. GATES. Before
+     this check such cells were skipped without a word: on 2026-09-16 the
+     master held 80 closes for 2026-09-17/18 and the run reported CLEAN.
 
 Advisory-only - no orders - not financial advice.
 """
@@ -90,7 +99,12 @@ except ImportError:                                    # pragma: no cover
 # (manual-entry error vs corporate-action-adjusted close). Flip to True once
 # that is settled; a known-open item should not turn the gate red daily.
 CHECK_F_GATES_EXIT = False
-CHECK_F_TOL_PCT = 0.05      # a 2dp log print against a full-precision cell
+CHECK_F_TOL_PCT = 0.05      # retained for the %-gap column only (see CHECK_F_TOL_ABS)
+# AMENDED 2026-09-16 (DP-3C-ag). The log prints closes to 2dp, so a cell that
+# holds the same close can differ from it by at most half a cent. Anything
+# beyond that is a different number. The old 0.05% tolerance was 25 cents on a
+# $500 stock and passed MSFT 497.12 against 496.914.
+CHECK_F_TOL_ABS = 0.0051
 
 # ---------------------------------------------------------------- thresholds
 QUOTE_CLOSE_PCT = 10.0   # Check A: quote-to-close gap that warrants a look
@@ -215,6 +229,33 @@ def _digit_signature(master, log_val):
         if len(diff) == 1:
             i = diff[0]
             return True, "SINGLE-DIGIT %s->%s at place %d of %s" % (a[i], b[i], i + 1, a)
+        # TRANSPOSITION, added 2026-09-08. Two positions differ and each holds
+        # the other's digit -- the second most common keying error after a
+        # single mis-key, and previously invisible to this classifier.
+        #
+        # THE CASE THAT FOUND IT: WMT row 1337 held 180.4200 for 2026-09-03
+        # while rows 1583 and 1711 held 108.4200 for the same date. 1-0-8 keyed
+        # as 1-8-0. It surfaced through Check A (a +67.5% quote-to-close gap)
+        # and Check B (cross-cohort disagreement) -- both MAGNITUDE channels --
+        # and through nothing that looks at the SHAPE of the error.
+        #
+        # That ordering is luck, not design. A transposition of adjacent
+        # low-order digits produces a SMALL percentage gap: it would clear
+        # Check A's 10% tolerance, and would then need the other two cohorts to
+        # hold a different value to surface at all. Keyed consistently across
+        # all three cells, it would be invisible to every check in this module.
+        # The same argument that justifies the single-digit axis justifies this
+        # one -- a corporate-action adjustment is proportional and cannot
+        # transpose two digits either.
+        #
+        # Adjacent swaps are labelled as such because they are the common form;
+        # a non-adjacent swap is still a swap and is still reported.
+        if len(diff) == 2:
+            i, j = diff
+            if a[i] == b[j] and a[j] == b[i]:
+                kind = "ADJACENT " if j == i + 1 else ""
+                return True, ("%sTRANSPOSITION %s%s->%s%s at places %d-%d of %s"
+                              % (kind, a[i], a[j], b[i], b[j], i + 1, j + 1, a))
     return False, ""
 
 
@@ -294,6 +335,44 @@ def main():
 
     findings = []
     checked_a = skipped_a = 0
+    after_cohort = 0          # filled cells resolving after the newest cohort
+
+    # ---- Check G: a filled cell must resolve on a SETTLED session -----------
+    # ADDED 2026-09-16 (DP-3C-ag). See the header. `settled_through` is the
+    # last session whose regular close is final on this machine's clock; the
+    # 16:15 ET rule is repair_outcome_close.market_settled(), one rule for the
+    # project. If that module is unavailable the newest cohort date is used,
+    # which is stricter (it refuses an evening entry for a session the bot did
+    # not run) and never looser.
+    findings_g = []
+    settled_through = last_cohort
+    settled_src = "newest cohort date (settlement clock unavailable)"
+    try:
+        from repair_outcome_close import market_settled as _ms
+        if _cal is not None:
+            t = datetime.date.today()
+            if _cal.is_trading_day(t) and _ms(t)[0]:
+                settled_through = t
+            else:
+                settled_through = _cal.prior_session(t)
+            settled_src = "16:15 ET settlement clock"
+    except Exception:                                   # pragma: no cover
+        pass
+    for r in rows:
+        for label, col, n in HORIZONS:
+            v = r[{8: "h", 9: "i", 10: "j"}[col]]
+            if not num(v):
+                continue
+            rdate = resolve(r["date"], n)
+            if rdate is None:
+                findings_g.append("[G] %-5s row %-5d %s %s holds %.4f but its "
+                                  "resolution date cannot be computed"
+                                  % (r["tkr"], r["row"], r["date"], label, v))
+            elif rdate > settled_through:
+                findings_g.append("[G] %-5s row %-5d %s %s holds %.4f for %s, "
+                                  "which has NOT SETTLED (settled through %s)"
+                                  % (r["tkr"], r["row"], r["date"], label, v,
+                                     rdate, settled_through))
 
     # ---- Check A: quote-vs-close, and Check B: cross-horizon agreement ------
     resolved_at = {}   # (resolution_date, ticker) -> list of (label, row, price)
@@ -304,7 +383,11 @@ def main():
                 continue
             rdate = resolve(r["date"], n)
             if rdate is None or rdate > last_cohort:
-                continue                                # not yet resolvable
+                # No same-day Px@signal exists yet, so A cannot run. This used
+                # to be a SILENT skip; the count is now printed, and a cell
+                # whose session has not settled is a Check G finding above.
+                after_cohort += 1
+                continue
             resolved_at.setdefault((rdate, r["tkr"]), []).append((label, r["row"], v, r["date"]))
 
             ref = pxsig.get((rdate, r["tkr"]))
@@ -319,11 +402,22 @@ def main():
                     "-> %+.1f%% quote-to-close gap"
                     % (r["tkr"], r["row"], r["date"], label, v, ref, rdate, gap))
 
+    info_b = []      # sub-tolerance disagreements: reported, never gating
     for (rdate, tkr), entries in sorted(resolved_at.items()):
         vals = [e[2] for e in entries]
-        if vals and (max(vals) - min(vals)) / max(abs(min(vals)), 1e-9) * 100.0 > AGREE_PCT:
-            detail = "; ".join("%s from %s (row %d) = %.4f" % (e[0], e[3], e[1], e[2]) for e in entries)
+        if not vals:
+            continue
+        detail = "; ".join("%s from %s (row %d) = %.4f" % (e[0], e[3], e[1], e[2]) for e in entries)
+        spread_pct = (max(vals) - min(vals)) / max(abs(min(vals)), 1e-9) * 100.0
+        if spread_pct > AGREE_PCT:
             findings.append("[B] %-5s disagreeing closes for %s -> %s" % (tkr, rdate, detail))
+        elif max(vals) - min(vals) > 1e-6:
+            # ADDED 2026-09-16 (DP-3C-ag). Two cells for the same close that
+            # differ at all are not both right. Below AGREE_PCT this is not a
+            # finding (the tolerance is unchanged) but it is no longer silent:
+            # MSFT 2026-09-15 (497.12 vs 496.914, 0.04%) sat here unreported.
+            info_b.append("[b] %-5s %s differs by %.3f%% -> %s"
+                          % (tkr, rdate, spread_pct, detail))
 
     # ---- Check C: magnitude backstop ---------------------------------------
     suppressed = []          # allowlisted [C] hits, reported but not gating
@@ -367,6 +461,7 @@ def main():
     # A disagreement confirmed by four independent Schwab fetches is a different
     # claim from one seen once, and the two are NOT reported as if they were.
     findings_f = []
+    findings_f_prec = []     # below 0.05% but beyond the log's print precision
     checked_f = 0
     if _tba is not None:
         try:
@@ -413,32 +508,54 @@ def main():
                 cells = closes_ref.get((tkr, sess))
                 if not cells:
                     continue
-                vals = [c[0] for c in cells]
-                if max(vals) - min(vals) > abs(max(vals)) * CHECK_F_TOL_PCT / 100.0:
-                    continue                # disagreeing cells are Check B's problem
-                ref = vals[0]
-                if not ref:
-                    continue
-                checked_f += 1
                 # The log price corroborated by the most runs is the challenger.
                 price, runs = max(byprice.items(), key=lambda kv: len(kv[1]))
-                gap = (price - ref) / ref * 100.0
-                if abs(gap) <= CHECK_F_TOL_PCT:
-                    continue
-                where = "/".join("row %d %s" % (c[1], c[2]) for c in cells)
                 spread = ("" if len(byprice) == 1 else
                           "  [logs disagree: also %s]"
                           % ", ".join("%.4f x%d" % (p, len(d))
                                       for p, d in sorted(byprice.items()) if p != price))
-                is_digit, sig = _digit_signature(ref, price)
-                findings_f.append((
-                    0 if is_digit else 1, -len(runs), -abs(gap),
-                    "[F] %-5s %s  master %.4f vs log %.4f  %+.3f%%  %d log(s)  "
-                    "cells %s  %s%s"
-                    % (tkr, sess, ref, price, gap, len(runs), where,
-                       sig if is_digit else "no digit signature", spread)))
+                # AMENDED 2026-09-16 (DP-3C-ag): EVERY cell is compared. Dates
+                # whose cells disagree with each other used to be skipped as
+                # "Check B's problem", so a wrong cell with a slightly different
+                # sibling passed both checks. Now each cell is judged against
+                # the log, and when the cells disagree the line says which one
+                # the log sides with -- the adjudication hint.
+                bad, good = [], []
+                for v, row, label in cells:
+                    checked_f += 1
+                    (bad if abs(v - price) > CHECK_F_TOL_ABS else good).append((v, row, label))
+                if not bad:
+                    continue
+                # One line per (ticker, session). Cells holding the same wrong
+                # value are listed together; cells holding different wrong
+                # values each get a line.
+                by_val = {}
+                for v, row, label in bad:
+                    by_val.setdefault(round(v, 6), []).append((row, label))
+                for v, where_l in sorted(by_val.items()):
+                    gap = (price - v) / v * 100.0 if v else float("nan")
+                    material = abs(gap) >= CHECK_F_TOL_PCT
+                    is_digit, sig = _digit_signature(v, price)
+                    if not material:
+                        # A last-place difference always "looks" like a
+                        # single mis-keyed digit; the signature carries no
+                        # information at this size and is not printed.
+                        is_digit, sig = False, "precision tier"
+                    hint = ""
+                    if good:
+                        hint = "  ADJUDICATION: log agrees with %s" % "/".join(
+                            "row %d %s (%.4f)" % (g[1], g[2], g[0]) for g in good)
+                    where = "/".join("row %d %s" % w for w in where_l)
+                    findings_f.append((
+                        0 if material else 1, 0 if is_digit else 1, -len(runs), -abs(gap),
+                        "[F] %-5s %s  master %.4f vs log %.4f  %+.3f%%  %d log(s)  "
+                        "cells %s  %s%s%s"
+                        % (tkr, sess, v, price, gap, len(runs), where,
+                           sig if is_digit else ("no digit signature" if material else sig),
+                           spread, hint)))
             findings_f.sort()
-            findings_f = [f[-1] for f in findings_f]
+            findings_f_prec = [f[-1] for f in findings_f if f[0] == 1]
+            findings_f = [f[-1] for f in findings_f if f[0] == 0]
         except Exception as e:                                 # pragma: no cover
             findings_f.append("[F] reconciliation unavailable: %s" % e)
     else:                                                      # pragma: no cover
@@ -523,6 +640,57 @@ def main():
               % BAND_PCT)
         print("    DEFINITIONAL restatement of the breach rate, not evidence.")
 
+    # ---- COHORT COMPLETENESS -- which NAME went missing, and when -----------
+    # ADDED 2026-09-08. The shape table above has been printing the evidence
+    # for this since 2026-08-13 and nothing read it: cohort 2026-08-18 shows
+    # n = 25 while every neighbouring cohort shows 26. The missing name is GM,
+    # confirmed independently by h1_lag_trace, whose GM trace jumps 2026-08-17
+    # -> 2026-08-19 while WMT carries an 08-18 row.
+    #
+    # GM IS ONE OF THE TWO PRE-REGISTERED WS2 TRACERS. Its episode clock reads
+    # "0 post-deploy episode(s) in 42 session(s)" against WMT's 43 -- the gap
+    # silently absorbed into a denominator. If the missing row carried a
+    # trailing move, an episode could have been missed outright.
+    #
+    # WHY NOTHING CAUGHT IT. The calendar reconciliation checks SESSIONS ("no
+    # unexplained missing sessions vs master", "no cohort rows on non-sessions")
+    # and signal_scan checks membership against THE PREVIOUS LOG at run time.
+    # Neither asks whether a cohort already in the master is short a name. A
+    # per-ticker gap inside an otherwise-present cohort is invisible to every
+    # gate in the chain.
+    #
+    # This reports and does not gate: a name legitimately leaves the watchlist,
+    # and turning that into a failure would be wrong. What it must not do is
+    # stay silent, which is what it did for three weeks.
+    if not args.quiet and len(dates) >= 2:
+        by_date = {}
+        for r in rows:
+            # FIXED 2026-09-16: this read r.get("ticker"), a key load() never
+            # sets (it is "tkr"), so every cohort was the set {None} and the
+            # detector added on 2026-09-08 could never fire. GM 2026-08-18 was
+            # never reported by it.
+            by_date.setdefault(r["date"], set()).add(r.get("tkr"))
+        gaps = []
+        ordered = sorted(by_date)
+        for i in range(1, len(ordered) - 1):
+            prev_s, cur_s, next_s = (by_date[ordered[i - 1]], by_date[ordered[i]],
+                                     by_date[ordered[i + 1]])
+            # Present either side, absent in the middle: a GAP, not a departure.
+            missing = sorted((prev_s & next_s) - cur_s)
+            if missing:
+                gaps.append((ordered[i], missing, len(cur_s), len(prev_s)))
+        if gaps:
+            print("-" * 78)
+            print("  COHORT COMPLETENESS - %d cohort(s) missing a name that is present"
+                  % len(gaps))
+            print("  on BOTH neighbours. Reported, NOT a gate: a name may legitimately")
+            print("  leave the watchlist, but a name that returns the next session did")
+            print("  not leave -- it was dropped, and any per-ticker denominator built")
+            print("  over that window is one short without saying so.")
+            for d, missing, n_cur, n_prev in gaps:
+                print("    %-12s n=%d (neighbours %d)  MISSING: %s"
+                      % (d, n_cur, n_prev, ", ".join(missing)))
+
     # ---- report -------------------------------------------------------------
     if not args.quiet:
         print("=" * 78)
@@ -536,6 +704,10 @@ def main():
                  args.mag_scale, args.sd_pct))
         print("  [A] quote-vs-close comparisons made: %d (skipped %d - no same-day reference)"
               % (checked_a, skipped_a))
+        print("  [A/B] %d filled cell(s) resolve after the newest cohort (%s) - no"
+              % (after_cohort, last_cohort))
+        print("        same-day reference yet; each is checked by [G] below")
+        print("  [G] settled through %s (%s)" % (settled_through, settled_src))
         print("  [C] allowlist: %d verified-real-move entry(ies)%s"
               % (len(VERIFIED_REAL_MOVES),
                  " - DISABLED (--no-allowlist)" if args.no_allowlist else ""))
@@ -573,18 +745,36 @@ def main():
         print("      shift any resolution date. Recorded so the gap stays visible.")
         print("-" * 78)
 
+    if info_b and not args.quiet:
+        print("  %d SUB-TOLERANCE [b] disagreement(s) - two cells for one close that"
+              % len(info_b))
+        print("  differ by less than %.2f%%. INFO, not a finding; one of them is"
+              % AGREE_PCT)
+        print("  still wrong. Check F below says which, where a log carries it.")
+        for line in info_b:
+            print("    " + line)
+        print("-" * 78)
+
     if not args.quiet:
-        print("  [F] log-close comparisons made: %d" % checked_f)
+        print("  [F] log-close comparisons made: %d cell(s), tolerance %.4f "
+              "(the log's 2dp print)" % (checked_f, CHECK_F_TOL_ABS))
     if findings_f:
         print("  %d CHECK F FINDING(S) - independent price source disagrees "
               "with a manual cell%s:"
               % (len(findings_f), "" if CHECK_F_GATES_EXIT else " (REPORTING ONLY)"))
         n_digit = sum(1 for f in findings_f if "SINGLE-DIGIT" in f)
+        n_trans = sum(1 for f in findings_f if "TRANSPOSITION" in f)
         if n_digit:
             print("    %d with a SINGLE MIS-KEYED DIGIT - a corporate-action adjustment"
                   % n_digit)
             print("    is proportional and cannot produce this, so these are the")
             print("    typo-class queue. Size does NOT rank them; the signature does.")
+        if n_trans:
+            print("    %d with a TRANSPOSITION (two digits swapped) - same argument:"
+                  % n_trans)
+            print("    an adjustment cannot swap two digits either. ADDED 2026-09-08")
+            print("    after WMT 180.4200/108.4200 surfaced through magnitude checks")
+            print("    alone; a low-order swap would have cleared all of them.")
         for f in findings_f:
             print("    " + f)
         print("    Resolve with the settled close (repair_outcome_close.py --price)")
@@ -593,8 +783,31 @@ def main():
         print("    manual-entry error and would mean the two channels are not")
         print("    interchangeable.")
         print("-" * 78)
+    if findings_f_prec and not args.quiet:
+        print("  %d CHECK F PRECISION-TIER item(s) - the cell differs from the log's"
+              % len(findings_f_prec))
+        print("  2dp close by more than half a cent but by less than 0.05%. Not")
+        print("  a typo queue: most are a different price source (a quote or a")
+        print("  consolidated last trade) typed as the close. ADDED 2026-09-16")
+        print("  (DP-3C-ag) because MSFT 2026-09-15 sat in exactly this band.")
+        for f in findings_f_prec:
+            print("    " + f)
+        print("-" * 78)
 
-    findings = findings_cal + findings + (findings_f if CHECK_F_GATES_EXIT else [])
+    if findings_g:
+        print("  %d CHECK G FINDING(S) - a close for a session that has not settled:"
+              % len(findings_g))
+        for f in findings_g[:40]:
+            print("    " + f)
+        if len(findings_g) > 40:
+            print("    ... and %d more" % (len(findings_g) - 40))
+        print("    Clear these cells. A close cannot exist before its session ends;")
+        print("    enter closes with enter_closes.py, which refuses unsettled sessions.")
+        print("-" * 78)
+
+    g_summary = (["[G] %d cell(s) hold a close for an unsettled session - listed above"
+                  % len(findings_g)] if findings_g else [])
+    findings = findings_cal + g_summary + findings + (findings_f if CHECK_F_GATES_EXIT else [])
 
     if findings:
         print("  %d FINDING(S) - VERIFY BEFORE READING ANY RESOLUTION:" % len(findings))

@@ -115,11 +115,13 @@ REFUSED_INPUTS = ("tracker_with_registry.xlsx", "actionable_registry.xlsx",
 DEFAULT_TRACKER = os.path.join("logs", "claude_equity_bot_tracker.xlsx")
 
 # Residual beyond which a name's observed breach rate is called out as not
-# matching the one-parameter model. 5.0pt is chosen as roughly 1 standard
-# error of a breach-rate estimate at n≈58 (sqrt(.5*.5/58) = 6.6pt), i.e.
+# matching the one-parameter model. 5.0pt was chosen (at n≈58 per name) as
+# inside 1 standard error of a breach-rate estimate (sqrt(.5*.5/58) = 6.6pt), i.e.
 # deliberately INSIDE one SE so the tool over-reports rather than under-
 # reports candidates. It is a REPORTING trigger, not an acceptance bar, and
-# nothing is ruled on it.
+# nothing is ruled on it. AMENDED 2026-09-16: n per name is now ~75+, where
+# one SE is ~5.8pt; the trigger is unchanged and the report prints the live n
+# rather than the n it was set at.
 MODEL_RESIDUAL_FLAG_PT = 5.0
 
 
@@ -348,6 +350,39 @@ def binomial_z(observed_count, n, p0):
     return z, 2 * (1 - _phi(abs(z)))
 
 
+def design_effect(rows, horizon=5):
+    """Approximate effective n for a pooled breach rate (ADDED 2026-09-16).
+
+    §4's z treats every resolved row as an independent draw. They are not:
+    names on one date move together (clustering) and consecutive +5d windows
+    share four of five days (overlap). Discovery 2026-09-16 §1 measured the
+    combined effect at roughly n_eff = 125 of 1,883 at +5d. This is the same
+    rough bound: n_eff = n / (1 + (m - 1) * ICC) / h, with ICC the one-way
+    ANOVA intraclass correlation of the breach indicator by date, m the mean
+    names per date and h the horizon in sessions. A sizing aid, not a test.
+    Returns dict(n, n_eff, icc, m) or None."""
+    by = defaultdict(list)
+    for r in rows:
+        v = r.ret(horizon)
+        if v is not None:
+            by[r.date].append(1.0 if abs(v) >= BAND else 0.0)
+    groups = [g for g in by.values() if len(g) >= 2]
+    n = sum(len(g) for g in groups)
+    k = len(groups)
+    if k < 3 or n <= k:
+        return None
+    grand = sum(sum(g) for g in groups) / n
+    ssb = sum(len(g) * (st.mean(g) - grand) ** 2 for g in groups)
+    ssw = sum(sum((x - st.mean(g)) ** 2 for x in g) for g in groups)
+    msb, msw = ssb / (k - 1), ssw / (n - k)
+    k0 = (n - sum(len(g) ** 2 for g in groups) / n) / (k - 1)
+    denom = msb + (k0 - 1) * msw
+    icc = max(0.0, (msb - msw) / denom) if denom > 0 else 0.0
+    m = n / k
+    n_eff = n / (1 + (m - 1) * icc) / horizon
+    return dict(n=n, n_eff=n_eff, icc=icc, m=m)
+
+
 def horizon_gradient(rows):
     """Does median |move| scale as sqrt(t)? Packet p.1072: d2 = d1 - sigma*sqrt(t)."""
     out = {}
@@ -362,10 +397,14 @@ def horizon_gradient(rows):
             continue
         holds = [abs(x) for x in (r.ret(h) for r in rows if r.sig == "HOLD")
                  if x is not None]
+        band_h = BAND * math.sqrt(h / 5)     # ADDED 2026-09-16: sqrt(t) band
         out[h] = dict(n=len(v), median=st.median(v),
                       hold_n=len(holds),
                       hold_breach=(sum(1 for x in holds if x >= BAND) / len(holds)
-                                   if holds else float("nan")))
+                                   if holds else float("nan")),
+                      band_h=band_h,
+                      hold_breach_scaled=(sum(1 for x in holds if x >= band_h) / len(holds)
+                                          if holds else float("nan")))
     if 5 in out:
         anchor = out[5]["median"]
         for h in out:
@@ -507,19 +546,37 @@ def report(rows, md_path=None):
         out("  A positive residual means moves CLUSTER rather than distributing about zero:")
         out("  fat tails or trending. This residual is the only part of the band's output")
         out("  that is not dispersion, so it is the only part that could carry information.")
-        out("  NOTHING IS RULED ON IT. It is a reporting trigger at n≈58 per name.")
+        ns = sorted(s["n"] for _, s in cov_rows)
+        out(f"  NOTHING IS RULED ON IT. It is a reporting trigger (n = {ns[0]}-{ns[-1]} per name;")
+        out(f"  one SE of a rate near 50% is ~{50/math.sqrt(ns[0]):.1f}pt at the smallest n).")
+        out("  AMENDED 2026-09-16: a residual is only as good as the closes under it. Names")
+        out("  with MATERIAL Check F items in outcome_sanity (manual close vs log close) have")
+        out("  contested inputs; read their residual only after that queue is cleared.")
     out()
 
     # ---- pooled, with the dark-name contamination made explicit
     out("-" * 100)
     out("3. POOLED BREACH RATE -- BOTH DENOMINATORS, because mixing them is invalid")
     out("-" * 100)
+    # AMENDED 2026-09-16 (DP-3C-al). These pools are ALL resolved rows -- BUY,
+    # SELL and blank-signal rows included -- which is right for a DISPERSION
+    # read and wrong for an accuracy label: "accuracy-equivalent = 1 - breach"
+    # is true only for HOLD rows, which the band scores. outcome_sanity's
+    # cohort table counts HOLD rows only, so the label now follows it.
     pa = pooled(rows, lambda r: True)
     pc = pooled(rows, lambda r: r.tk in covered)
     pd_ = pooled(rows, lambda r: r.tk not in covered)
+    out("  ALL SIGNALS (dispersion only - no accuracy reading):")
     for label, p in (("ALL names", pa), ("COVERED 15", pc), ("not covered", pd_)):
         if p:
-            out(f"  {label:<14} breach {p['breach']:>5}/{p['n']:<5} = {p['rate']*100:6.2f}%"
+            out(f"    {label:<14} |move| >= 3%  {p['breach']:>5}/{p['n']:<5} = {p['rate']*100:6.2f}%")
+    ha = pooled(rows, lambda r: r.sig == "HOLD")
+    hc = pooled(rows, lambda r: r.sig == "HOLD" and r.tk in covered)
+    hd = pooled(rows, lambda r: r.sig == "HOLD" and r.tk not in covered)
+    out("  HOLD ROWS ONLY (the band's own population):")
+    for label, p in (("ALL names", ha), ("COVERED 15", hc), ("not covered", hd)):
+        if p:
+            out(f"    {label:<14} breach        {p['breach']:>5}/{p['n']:<5} = {p['rate']*100:6.2f}%"
                 f"   accuracy-equivalent {(1-p['rate'])*100:6.2f}%")
     if pa and pc and pd_:
         gap = (pc["rate"] - pd_["rate"]) * 100
@@ -544,6 +601,16 @@ def report(rows, md_path=None):
             out("  => NOT DISTINGUISHABLE from a zero-skill dispersion baseline at this n.")
         else:
             out("  => DISTINGUISHABLE at the 5% level. Read the SIGN before reading anything else.")
+        # ADDED 2026-09-16: the rows are not independent. Same-date clustering
+        # and 5-day window overlap shrink the effective n; the z above is the
+        # naive one and overstates any evidence.
+        de = design_effect([r for r in rows if r.tk in covered], 5)
+        if de and z is not None:
+            z_adj = z * math.sqrt(de["n_eff"] / de["n"])
+            p_adj = 2 * (1 - _phi(abs(z_adj)))
+            out(f"  cluster + overlap adjusted (approximate): n_eff ~ {de['n_eff']:.0f} of {de['n']}"
+                f"  (date ICC {de['icc']:.3f}, {de['m']:.1f} names/date, 5-session overlap)")
+            out(f"    z_adj = {z_adj:+.3f}   p_adj = {p_adj:.3f}   -- a sizing aid, not a test")
         out()
         out("  READ THIS CAREFULLY. It does NOT say the signal generator is worthless. It says")
         out("  the +/-3% band cannot see whether it is, because the band's output is dominated")
@@ -558,15 +625,20 @@ def report(rows, md_path=None):
         out("5. HORIZON GRADIENT -- does median |move| scale as sqrt(t)?  (packet p.1072)")
         out("-" * 100)
         out(f"{'horizon':>8} {'n':>6} {'median|move|':>13} {'sqrt(t) pred':>13} "
-            f"{'error pp':>9} {'HOLD breach':>12} {'HOLD n':>7}")
+            f"{'error pp':>9} {'HOLD breach':>12} {'sqrt(t) band':>13} {'breach':>8} {'HOLD n':>7}")
         for h in sorted(hg):
             g = hg[h]
             err = (g.get("sqrt_t_pred", float('nan')) - g["median"]) * 100
             out(f"{'+'+str(h)+'d':>8} {g['n']:>6} {g['median']*100:12.4f}% "
                 f"{g.get('sqrt_t_pred',float('nan'))*100:12.4f}% {err:+9.4f} "
-                f"{g['hold_breach']*100:11.2f}% {g['hold_n']:>7}")
+                f"{g['hold_breach']*100:11.2f}% {'+/-'+format(g['band_h']*100,'.2f')+'%':>13} "
+                f"{g['hold_breach_scaled']*100:7.2f}% {g['hold_n']:>7}")
         out("  A close fit at +10d with an overshoot at +20d is the signature of mild")
         out("  mean-reversion at longer horizons. Reported, not fitted away.")
+        out("  ADDED 2026-09-16: the fixed +/-3% HOLD breach rises with horizon by")
+        out("  construction. The sqrt(t) band (3% x sqrt(h/5)) holds the band's width in")
+        out("  sigma constant, so its breach column is the horizon-comparable one. Reporting")
+        out("  only; the +/-3% band is not re-baselined. +20d spans ~4 independent windows.")
         out()
 
     # ---- tier drift

@@ -1,0 +1,98 @@
+{
+  "H4": [
+    {
+      "date": "2026-08-31",
+      "detail": {
+        "backfilled": true,
+        "hit": 18,
+        "n": 30,
+        "rate": 60.0,
+        "source": "DP-3C-x, claude/Phase3C_Rulings_2026-09-03.md"
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-01",
+      "detail": {
+        "backfilled": true,
+        "hit": 19,
+        "n": 31,
+        "rate": 61.3,
+        "source": "DP-3C-x, claude/Phase3C_Rulings_2026-09-03.md"
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-02",
+      "detail": {
+        "backfilled": true,
+        "hit": 20,
+        "n": 32,
+        "rate": 62.5,
+        "source": "DP-3C-x, claude/Phase3C_Rulings_2026-09-03.md"
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-08",
+      "detail": {
+        "backfilled": false,
+        "hit": 21,
+        "n": 34,
+        "rate": 61.8,
+        "source": "run 2026-09-08"
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-09",
+      "detail": {
+        "high": 61.78937558247903,
+        "med": 45.68452380952381,
+        "n": 34,
+        "rate": 61.76470588235294
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-11",
+      "detail": {
+        "high": 61.89608021877848,
+        "med": 45.710059171597635,
+        "n": 35,
+        "rate": 62.857142857142854
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-14",
+      "detail": {
+        "high": 61.751563896336016,
+        "med": 45.74780058651026,
+        "n": 35,
+        "rate": 62.857142857142854
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-15",
+      "detail": {
+        "high": 61.646234676007005,
+        "med": 45.56040756914119,
+        "n": 36,
+        "rate": 61.111111111111114
+      },
+      "pass": true
+    },
+    {
+      "date": "2026-09-16",
+      "detail": {
+        "high": 61.45922746781116,
+        "med": 45.45454545454545,
+        "n": 39,
+        "rate": 56.41025641025641
+      },
+      "pass": false
+    }
+  ]
+}

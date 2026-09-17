@@ -478,8 +478,12 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
     out("  XBRL (FY2025 - H1 2025 + H1 2026 = 3.27 - 5.29 + 4.25) is 2.23, giving ROE")
     out("  3.33% against Morningstar's independently published 3.28%. So GM reads 4.88%")
     out("  in this table against a true TTM near 3.33% -- a 1.5x OVERSTATEMENT, and every")
-    out("  figure downstream of ROE inherits it. Rebuilding TTM needs four quarters of")
-    out("  filings; the cache holds one accession per filer, so it is labelled not fixed.")
+    out("  figure downstream of ROE inherits it.")
+    out("  AMENDED 2026-09-16: the old blocker ('the cache holds one accession per filer')")
+    out("  does not hold -- financials come from companyfacts, which carries the full period")
+    out("  history (review 2026-09-08 §10.1). The TTM rebuild is DEFERRED, not blocked: it")
+    out("  changes every cached extract (EXTRACT_SCHEMA bump) and lands on its own, with a")
+    out("  GM before/after. Until then this overstatement stands and is labelled.")
     out()
 
     # ---- 1b. DuPont: how much of ROE is operating return and how much is leverage
@@ -491,10 +495,14 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
     out("  and 4b is an implied LEVERED return. This decomposition says how much of each")
     out("  name's ROE is operating performance and how much is simply borrowing.")
     out()
-    out(f"{'tk':>6} {'ROE':>9} {'=':>2} {'ROA':>9} {'x':>2} {'A/E':>7}   {'leverage share of ROE':>22}")
+    # RELABELLED 2026-09-16 (DP-3C-al). The column was headed "leverage share of
+    # ROE", but 1 - 1/(A/E) = 1 - E/A is simply liabilities (incl. NCI) over
+    # assets -- the debt ratio -- and "share of ROE" means nothing for a name
+    # with negative ROE. Same number, honest name.
+    out(f"{'tk':>6} {'ROE':>9} {'=':>2} {'ROA':>9} {'x':>2} {'A/E':>7}   {'liabilities/assets':>22}")
     dup = [r for r in recs if r["roa"] is not None]
     for r in sorted(dup, key=lambda x: -x["lev"]):
-        share = (1.0 - 1.0 / r["lev"]) * 100      # fraction of ROE attributable to gearing
+        share = (1.0 - 1.0 / r["lev"]) * 100      # 1 - E/A: the debt ratio
         out(f"{r['tk']:>6} {r['roe']*100:8.2f}% {'=':>2} {r['roa']*100:8.2f}% {'x':>2} "
             f"{r['lev']:7.2f}   {share:21.1f}%")
     if dup:
@@ -503,6 +511,7 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
         out(f"  Leverage multiplier spans {lo['lev']:.2f}x ({lo['tk']}) to "
             f"{hi['lev']:.2f}x ({hi['tk']}) -- a {hi['lev']/lo['lev']:.1f}x range.")
         out("  The identity ROE/ROA == A/E is exact, so this is a decomposition, not a model.")
+        out("  'liabilities/assets' is 1 - E/A (the debt ratio). It is NOT a share of ROE.")
         out("  READ SECTIONS 3-4b THROUGH IT: an implied ROE of 18% at 13x leverage and one")
         out("  at 1.3x are not the same claim about a business.")
     out()
@@ -600,7 +609,13 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
     out("  DIVIDEND ROUTE is the packet's p.1072 expected return, r_s = D0(1+g)/P0 + g.")
     out("  IT IS EXPECTED TO UNDERSTATE, AND SYSTEMATICALLY: it assumes dividends are")
     out("  the only distribution. A firm returning capital mainly through buybacks")
-    out("  reads low by construction -- AAPL at a 0.35% yield is the clear case. The")
+    # FIXED 2026-09-16: the yield was hardcoded (0.35%) and had gone stale
+    # against the table above it (0.32%). It is read from the same record now.
+    _aapl = next((r for r in recs if r["tk"] == "AAPL" and r.get("dy")), None)
+    # divYield is a PERCENT as schwab_client returns it (see r_s_dividend).
+    _aapl_txt = (f"AAPL at a {_aapl['dy']:.2f}% yield" if _aapl
+                 else "a low-yield buyback name")
+    out(f"  reads low by construction -- {_aapl_txt} is the clear case. The")
     out("  gap column is therefore a buyback-intensity signal as much as a")
     out("  disagreement, and it is NOT evidence that either route is wrong.")
     amb_div = [r["tk"] for r in recs if r["dy"] in (0, None)]
@@ -782,13 +797,15 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
         out("      the model receives, mid-E4. THE TIMING IS A RULING, NOT A BUILD CHOICE.")
         out("      Flagged rather than fixed here for exactly that reason.")
     out()
-    out("  (c) SCOPE, UNRULED -- genuine operating companies excluded by the filing set.")
+    out("  (c) SCOPE -- genuine operating companies excluded by the filing set.")
+    out("      RULED 2026-09-16 (DP-3C-ai): no change to the filing set through the")
+    out("      Phase 3-C exit; changing it mid-E4 would change what the treatment arm sees.")
     covered_now = set(verified) | {t for t, _ in blocked}
     foreign = [t for t in ("AG", "NTR") if t in watchlist and t not in covered_now]
     for tk in foreign:
         out(f"        {tk}  40-F/6-K foreign private issuer, outside the 3-C filing set")
     if foreign:
-        out("      DP-3C-f proposed 'no change in v1' and is still unruled. Its cost-benefit")
+        out("      DP-3C-f is ruled 'no change' through the exit (DP-3C-ai). Its cost-benefit")
         out(f"      moves now that a valuation layer exists: these are {len(foreign)} operating")
         out(f"      companies against a valuation base of {len(recs)}, so extending the filing")
         out(f"      set would widen it by roughly {100*len(foreign)/max(len(recs),1):.0f}%. Recorded, not argued for.")

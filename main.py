@@ -119,19 +119,21 @@ WATCHLIST_SCOUT = [
     "SPY",
     "QQQ",
     "VTI",
-    "NVDA",
+    "SNOW",
     "GLD",
-    "SPCX",
     "GM",
     "NTR",
     "USO",
-    # CORN — added 2026-08-14 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
-    # GM — added 2026-08-18 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
-    # NTR — added 2026-08-25 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
-    # USO — added 2026-08-25 (RW) to PREVENT AN E4 SUPPLY SHORTFALL.
+    "CORN",
+    "BBWI",
+    # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
+    # GM   — added 2026-08-18 to PREVENT AN E4 SUPPLY SHORTFALL.
+    # NTR  — added 2026-08-25 to PREVENT AN E4 SUPPLY SHORTFALL.
+    # USO  — added 2026-08-25 to PREVENT AN E4 SUPPLY SHORTFALL.
+    # BBWI — added 2026-09-09, one-off candidate, outside the E4 population.
     #
     # ANALYST NOTE:
-    #   CORN was sold out of the Individual account on 2026-08-14 and would
+    #   CORN left the held set on 2026-08-14 and would
     #   otherwise have dropped out of the run entirely. It is a T-A covered
     #   name inside E4's denominator, which was FROZEN at its 2026-08-13
     #   membership by the ruling of 2026-08-14. Losing its rows would take
@@ -152,7 +154,6 @@ WATCHLIST_SCOUT = [
     #   within-ticker CORN read — E4-2 §3.2 in particular — must segment on
     #   2026-08-17 or state explicitly that it pools two prompt regimes. The
     #   same caveat will apply to any future held -> scout transition.
-    "CORN",
 ]
 
 MONITOR_HOLDINGS = True
