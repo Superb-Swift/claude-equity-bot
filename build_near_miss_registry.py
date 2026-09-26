@@ -226,7 +226,16 @@ def live_keep70(tracker_path):
             conf=(conf * 100 if isinstance(conf, (int, float)) and conf <= 1 else conf),
             ret5=((p5 - p0) / p0) if ok else None))
     wb.close()
-    return episodes.keep70(rows, sorted(dates))
+    # DP-3C-ar (RULED 2026-09-25): run-fault dropouts bridge, never split --
+    # the same set the actionable registry and the strip use.
+    try:
+        import signal_logs
+        paths, _info = signal_logs.discover(os.path.join("logs", "signals_*.log"))
+        drops = episodes.dropouts_from_logs(
+            paths, present={(r["ticker"], r["date"]) for r in rows})
+    except Exception:                                   # noqa: BLE001
+        drops = None
+    return episodes.keep70(rows, sorted(dates), dropouts=drops)
 
 
 def load_near_misses(tracker_path: str, lock_cutoff: dt.date) -> list[NearMiss]:
@@ -485,7 +494,10 @@ def write_xlsx(rows, locked, extended, out_path, tracker_path, lock_cutoff):
             ("EPISODE basis — rejected BUYs that paid",
              f"{k70['ep_hit']}/{k70['ep_n']} = {k70['ep_rate']:.2f}%" if k70["ep_n"] else "—"),
             ("Bar", "≤ 50.0% supports keeping 70"),
-            ("State", k70["verdict"] + " (does not move the gate)"),
+            ("State", k70["verdict"] + (f" — margin {k70['margin_pt']:+.2f}pt"
+                                        if k70.get("margin_pt") is not None else "")
+             + (" — KNIFE-EDGE" if k70.get("knife_edge") else "")
+             + " (neither state moves or certifies the gate — DP-3C-y, DP-3C-au)"),
             ("ROW basis (descriptive, never the verdict)",
              f"{k70['row_hit']}/{k70['row_n']} = {k70['row_rate']:.2f}%" if k70["row_n"] else "—"),
         ]:
@@ -564,11 +576,16 @@ def write_markdown(rows, locked, extended, md_path, tracker_path, lock_cutoff):
         live_md = (
             "## LIVE KEEP-70 — DP-3C-y ruled basis\n\n"
             f"- **EPISODE basis (opening row): {k70['ep_hit']}/{k70['ep_n']} = "
-            f"{k70['ep_rate']:.2f}% → {k70['verdict']}** against `≤ 50.0% supports keeping 70`\n"
+            f"{k70['ep_rate']:.2f}% → {k70['verdict']}** against `≤ 50.0% supports keeping 70`"
+            + (f" — margin **{k70['margin_pt']:+.2f}pt**" if k70.get("margin_pt") is not None else "")
+            + (f"; next paying episode → {k70['after_hit']}, next miss → {k70['after_miss']}"
+               if k70.get("after_hit") else "")
+            + (" — **KNIFE-EDGE**" if k70.get("knife_edge") else "") + "\n"
             f"- ROW basis (descriptive, never the verdict): {k70['row_hit']}/{k70['row_n']} = "
             f"{k70['row_rate']:.2f}%\n"
             f"- {k70['episodes']} episodes from {k70['rows']} rows (DP-3C-m over consecutive cohorts, DP-3C-ab)\n"
-            "- A NOT SUPPORTED reading does not move the gate.\n\n")
+            "- A NOT SUPPORTED reading does not move the gate, and a SUPPORTED reading does "
+            "not certify it (DP-3C-y; symmetry ruled DP-3C-au, 2026-09-25).\n\n")
     flagged = [x for x in rows if x.flag]
     era_md = ("*H1 era (DP-3C-v): D1 rows before 2026-09-01, D2 from it. Flagged: "
               + (", ".join(f"{x.ticker} {x.date} `{x.flag}`" for x in flagged) or "none")
@@ -673,12 +690,15 @@ def console_digest(rows, locked, extended, expect_locked):
         print("\nLIVE KEEP-70 (DP-3C-y: EPISODE basis, opening row; bar <= 50.0%):")
         line("episode basis +5d", f"{k70['ep_hit']}/{k70['ep_n']} = "
              + (f"{k70['ep_rate']:.2f}%" if k70["ep_n"] else "n/a")
-             + f"  -> {k70['verdict']}")
+             + f"  -> {k70['verdict']}"
+             + (f"  margin {k70['margin_pt']:+.2f}pt" if k70.get("margin_pt") is not None else "")
+             + ("  KNIFE-EDGE" if k70.get("knife_edge") else ""))
         line("row basis (descriptive)", f"{k70['row_hit']}/{k70['row_n']} = "
              + (f"{k70['row_rate']:.2f}%" if k70["row_n"] else "n/a"))
         line("episodes / rows", f"{k70['episodes']} / {k70['rows']}")
         print("  A NOT SUPPORTED reading is a fact about the gate's rejections; it is")
-        print("  not a reason to move the gate (DP-3C-y).")
+        print("  not a reason to move the gate (DP-3C-y), and a SUPPORTED reading is not")
+        print("  a reason to keep it (DP-3C-au, 2026-09-25).")
     d1 = sum(1 for x in rows if x.era == "D1")
     print(f"\nH1 era (DP-3C-v): D1 {d1} rows, D2 {len(rows) - d1} rows; flagged: "
           + (", ".join(f"{x.ticker} {x.date} {x.flag}" for x in rows if x.flag) or "none")

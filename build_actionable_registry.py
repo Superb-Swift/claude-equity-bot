@@ -218,6 +218,8 @@ class Actionable:
     episode_open: bool = field(default=False)   # True on the episode's first row
     executability: str = field(default="")      # DP-3C-u
     channel_margin: str = field(default="")     # DP-3C-af
+    per_account: dict = field(default_factory=dict)   # DP-3C-av, verbatim from the log
+    bridged: list = field(default_factory=list)       # DP-3C-ar, on the OPEN row only
 
     def hit5(self):
         if self.r5 is None:
@@ -353,6 +355,9 @@ def attach_log_fields(rows, fields):
             x.executability, x.channel_margin = "no log", "no log"
             continue
         x.executability = f["exec"] or "unparsed"
+        x.per_account = {k.strip(): v.strip().upper()
+                         for k, v in (seg.split("=", 1) for seg in (f.get("per") or "").split(";")
+                                      if "=" in seg)}
         if x.executability == "PARTIAL" and f.get("per"):
             # DP-3C-u's revisit condition was met on 2026-09-16 (PARTIAL above
             # 25% of post-era rows). The per-account verdicts are therefore
@@ -365,7 +370,15 @@ def attach_log_fields(rows, fields):
         elif op == bop:
             x.channel_margin = ""
         else:
-            erased = bop < x.gate <= op if x.signal == "BUY" else False
+            # DP-3C-as (RULED 2026-09-25): ERASED is SIGNAL-AWARE. The guard
+            # `if x.signal == "BUY" else False` stood here from 2026-09-16 and
+            # made the SELL branch unreachable, contradicting this module's own
+            # definition ("blend_op < gate <= D.op") and signal_scan's
+            # _would_lose_gate(), which mirrors both gates. It was latent until
+            # the first post-era SELLs (USO 2026-09-23, TWST 2026-09-24/25) and
+            # hid three rows signal_scan FAILed. x.gate already carries 65 for
+            # a SELL, so the comparison needs no other change.
+            erased = bop < x.gate <= op
             x.channel_margin = ("ERASED: " if erased else "") + \
                 f"D.op {op} / blend_op {bop} ({bop - op:+d})"
 
@@ -397,14 +410,32 @@ def load_master_rows(tracker_path):
     return out
 
 
-def dp3cw_block(master_rows, cohort_dates, as_of, record=True):
-    """Print the DP-3C-w arm. Records the FIRST read and prints it thereafter."""
+def load_dropouts(pattern, master_rows):
+    """DP-3C-ar (2026-09-25): run-fault dropouts from the logs, vetoed by any
+    master row for the same (ticker, date)."""
     import episodes
-    arm = episodes.dp3cw_arm(master_rows, cohort_dates)
+    try:
+        import signal_logs
+        paths, _info = signal_logs.discover(pattern)
+    except Exception:                                   # noqa: BLE001
+        import glob
+        paths = sorted(glob.glob(pattern))
+    return episodes.dropouts_from_logs(
+        paths, present={(r["ticker"], r["date"]) for r in master_rows})
+
+
+def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None):
+    """Print the DP-3C-w arm. Records the FIRST read and prints it thereafter.
+    dropouts: DP-3C-ar run-fault set (2026-09-25), bridged not split."""
+    import episodes
+    arm = episodes.dp3cw_arm(master_rows, cohort_dates, dropouts=dropouts)
     lines = ["DP-3C-w PROSPECTIVE ARM (episodes opening on/after 2026-09-03)",
              f"  episodes opened {arm['n_open']}   resolved +5d {arm['n_resolved']} of "
              f"{episodes.DP3CW_MIN_N} needed   tickers {len(arm['tickers'])} "
              f"({', '.join(arm['tickers']) or 'none'}) of {episodes.DP3CW_MIN_TICKERS} needed"]
+    if arm.get("bridged"):
+        lines.append("  DP-3C-ar bridged (run-fault dropout, not a split): "
+                     + ", ".join(f"{t} {d:%Y-%m-%d}" for t, d in arm["bridged"]))
     try:
         import rulings
         prior = rulings.readings("DP-3C-w")
@@ -434,28 +465,28 @@ def dp3cw_block(master_rows, cohort_dates, as_of, record=True):
 # DP-3C-m episode coalescing
 # --------------------------------------------------------------------------- #
 
-def assign_episodes(rows: list[Actionable], cohort_dates: list[dt.date]) -> None:
+def assign_episodes(rows: list[Actionable], cohort_dates: list[dt.date],
+                    dropouts=None) -> None:
     """DP-3C-m: consecutive gate-clearing COHORT SESSIONS on one ticker are ONE
     episode. Adjacency is measured against the cohort calendar derived from the
     master itself -- never a holiday table and never a second source of truth,
     so a skipped session (holiday, 429, no run) cannot silently split an episode.
+
+    AMENDED 2026-09-25 (DP-3C-ar): this function now CALLS episodes.coalesce()
+    instead of carrying its own copy of the rule. Until today the registry kept
+    a private implementation while KEEP-70 and DP-3C-w used the shared one --
+    the exact two-definitions hazard episodes.py was written to remove. With
+    dropouts=None the output is verified identical to the old code on the live
+    master (16 episodes, same ids, same opening rows). With the DP-3C-ar
+    dropout set, a run-fault gap for one ticker is bridged, not split.
     """
-    idx = {d: i for i, d in enumerate(cohort_dates)}
-    by_ticker: dict[str, list[Actionable]] = {}
-    for x in rows:
-        by_ticker.setdefault(x.ticker, []).append(x)
-    for tk, xs in by_ticker.items():
-        xs.sort(key=lambda x: x.date)
-        prev = None
-        eid = None
-        for x in xs:
-            contiguous = (prev is not None
-                          and idx.get(x.date, -99) == idx.get(prev.date, -100) + 1)
-            if not contiguous:
-                eid = f"{tk}-{x.date:%Y%m%d}"
-                x.episode_open = True
-            x.episode_id = eid
-            prev = x
+    import episodes
+    for e in episodes.coalesce(rows, cohort_dates, ticker=lambda x: x.ticker,
+                               date=lambda x: x.date, dropouts=dropouts):
+        for x in e["rows"]:
+            x.episode_id = e["id"]
+            x.episode_open = x is e["open_row"]
+        e["open_row"].bridged = list(e.get("bridged", []))
 
 
 def episode_view(rows: list[Actionable]) -> list[dict]:
@@ -472,7 +503,7 @@ def episode_view(rows: list[Actionable]) -> list[dict]:
             episode_id=eid, ticker=head.ticker, signal=head.signal,
             opened=head.date, last=xs[-1].date, sessions=len(xs),
             open_conf=head.conf, open_margin=head.margin, era=head.era,
-            hit5=head.hit5(), r5=head.r5,
+            hit5=head.hit5(), r5=head.r5, bridged=list(head.bridged),
         ))
     out.sort(key=lambda e: e["opened"])
     return out
@@ -707,6 +738,42 @@ def write_xlsx(rows, eps, out_path, tracker_path):
 # Markdown writer
 # --------------------------------------------------------------------------- #
 
+def per_account_block(rows, eps):
+    """DP-3C-av (pre-registered 2026-09-25). The per-account arm DP-3C-u's
+    revisit condition required once PARTIAL passed 25% of post-era rows.
+
+    POPULATION  post-era (>= 2026-08-11) admitted rows, EPISODE basis, scored on
+                the opening row; one sub-population per account = episodes whose
+                OPENING row was APPROVED in that account (verbatim PER-ACCOUNT
+                field at signal time, never revised).
+    READ        ONCE, at the Phase 3-C exit review, and only for an account with
+                >= 10 resolved episodes. Below that: 'not readable'.
+    STANDARD    DESCRIPTIVE. DP-3C-l's reading standard is NONE; this arm adds
+                no bar and moves no gate. It is never pooled across accounts.
+    BLIND       Until the exit read this block prints COUNTS ONLY -- no hit rate
+                on any account subset, so no subset is chosen with outcomes in
+                view (DP-3C-u's reason for forbidding executability filters).
+    """
+    post_eps = [e for e in eps if e["era"] == ERA_POST]
+    heads = {x.episode_id: x for x in rows if x.episode_open}
+    accts = sorted({a for x in rows if x.era == ERA_POST for a in x.per_account})
+    out = ["| Account | post-era rows APPROVED | episodes opened APPROVED | of which resolved +5d | readable at exit (>= 10) |",
+           "|---|---|---|---|---|"]
+    for a in accts:
+        nrow = sum(1 for x in rows if x.era == ERA_POST and x.per_account.get(a) == "APPROVED")
+        opened = [e for e in post_eps if heads[e["episode_id"]].per_account.get(a) == "APPROVED"]
+        res = [e for e in opened if e["hit5"] is not None]
+        out.append(f"| {a} | {nrow} | {len(opened)} | {len(res)} | "
+                   f"{'yes' if len(res) >= 10 else 'no'} |")
+    nofield = sum(1 for e in post_eps if not heads[e["episode_id"]].per_account)
+    out.append("")
+    out.append(f"Post-era episodes whose opening row carries NO per-account field "
+               f"(top-level verdict only, e.g. a SELL on an unheld name): {nofield} of "
+               f"{len(post_eps)}. No hit rate is printed on any account subset before "
+               f"the exit read (blind).")
+    return out
+
+
 def write_markdown(rows, eps, md_path, tracker_path):
     rsum, es = summarize_rows(rows), summarize_episodes(eps)
 
@@ -729,14 +796,16 @@ def write_markdown(rows, eps, md_path, tracker_path):
         ]))
 
     etbl = [mdrow(["Episode", "Sig", "Opened", "Last", "Sessions", "Open conf",
-                   "Open margin", "Hit 5d", "Era"]), mdrow(["---"] * 9)]
+                   "Open margin", "Hit 5d", "Era", "Bridged (DP-3C-ar)"]), mdrow(["---"] * 10)]
     for e in eps:
         etbl.append(mdrow([
             e["episode_id"], e["signal"], f"{e['opened']:%Y-%m-%d}",
             f"{e['last']:%Y-%m-%d}", str(e["sessions"]), pct(e["open_conf"]),
             f"{e['open_margin']:+.0f}" if e["open_margin"] else "**0**",
             hit_str(e["hit5"]), e["era"],
+            ", ".join(f"{d:%Y-%m-%d}" for d in e.get("bridged", [])) or "—",
         ]))
+    pa_lines = per_account_block(rows, eps)
 
     md = f"""# Actionable Directional Registry — auto-generated
 
@@ -780,6 +849,10 @@ never risk-engine approval. +Nd = trading days. Advisory-only · no orders.*
 ## Episodes
 
 {chr(10).join(etbl)}
+
+## Per-account executability — DP-3C-av (pre-registered 2026-09-25; COUNTS ONLY until the exit read)
+
+{chr(10).join(pa_lines)}
 """
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md)
@@ -813,9 +886,14 @@ def console_digest(rows, eps, cohort_dates):
           + ", ".join(f"{k} {v}" for k, v in sorted(ec.items())))
     if post:
         share = ec.get("PARTIAL", 0) / len(post)
-        flag = ("  ** REVISIT CONDITION MET: per-account scoring must be "
-                "pre-registered before the next read" if share > 0.25 else "")
+        flag = ("  ** REVISIT CONDITION MET -- per-account scoring PRE-REGISTERED "
+                "2026-09-25 (DP-3C-av): counts only until the exit read" if share > 0.25 else "")
         print(f"  PARTIAL share {share*100:.1f}% of {len(post)} (revisit above 25%){flag}")
+    for line in per_account_block(rows, eps):
+        if line.startswith("| ") and not line.startswith("| Account"):
+            c = [x.strip() for x in line.strip("|").split("|")]
+            print(f"  DP-3C-av {c[0]:<12} rows APPROVED {c[1]:>3}   episodes opened "
+                  f"APPROVED {c[2]:>3}   resolved {c[3]:>3}   readable at exit: {c[4]}")
     erased = [x for x in rows if x.channel_margin.startswith("ERASED")]
     if erased:
         print(f"ChannelMargin ERASED (DP-3C-af; admitted on D.op, blend would not clear): "
@@ -893,7 +971,9 @@ def main(argv=None):
         print("No actionable directional signals found. Writing an EMPTY registry "
               "rather than exiting — an empty population is a real and reportable "
               "state for this instrument, unlike the near-miss registry.")
-    assign_episodes(rows, cohort_dates)
+    master_rows = load_master_rows(args.tracker)
+    dropouts = load_dropouts(args.logs, master_rows)
+    assign_episodes(rows, cohort_dates, dropouts=dropouts)
     attach_log_fields(rows, load_log_fields(args.logs))
     eps = episode_view(rows)
 
@@ -903,9 +983,12 @@ def main(argv=None):
     write_markdown(rows, eps, md_path, args.tracker)
     ok = console_digest(rows, eps, cohort_dates)
     print()
-    for line in dp3cw_block(load_master_rows(args.tracker), cohort_dates,
+    if dropouts:
+        print("DP-3C-ar run-fault dropouts (bridged, never split): "
+              + ", ".join(f"{t} {d:%Y-%m-%d}" for t, d in sorted(dropouts, key=lambda z: (z[1], z[0]))))
+    for line in dp3cw_block(master_rows, cohort_dates,
                             cohort_dates[-1] if cohort_dates else dt.date.today(),
-                            record=not args.no_record):
+                            record=not args.no_record, dropouts=dropouts):
         print(line)
     print(f"\nWrote: {xlsx_path}\nWrote: {md_path}")
 

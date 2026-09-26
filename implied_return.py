@@ -118,6 +118,7 @@ Advisory-only - no orders - not financial advice.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import sys
@@ -248,6 +249,28 @@ def roe_from_edgar(fin):
     if fp == "FY":
         return period_roe, "EDGAR annual (10-K)", 1.0
     return period_roe * 4.0, f"EDGAR quarterly x4{' [' + note + ']' if note else ''}", 4.0
+
+
+def _q(v):
+    return "--" if v is None else f"{v:.1f}Q"
+
+
+def roe_vintage(r, run_date):
+    """DP-3C-aq (RULED 2026-09-25): (anchor_age_q, numerator_age_q) in quarters.
+
+    Reporting only -- zero new concepts, no schema bump, no figure changes.
+    The fiscal-period offset is read from the fin cache's own `fp` field; an
+    unknown fp returns None for the numerator rather than a guessed age."""
+    try:
+        anc = dt.date.fromisoformat(str(r.get("anchor"))[:10])
+        rd = run_date if isinstance(run_date, dt.date) else dt.date.fromisoformat(str(run_date)[:10])
+    except (TypeError, ValueError):
+        return None, None
+    a_age = (rd - anc).days / 91.3125
+    if r.get("basis") == "Schwab last-FY":
+        off = {"FY": 0, "Q4": 0, "Q1": 1, "Q2": 2, "Q3": 3}.get(str(r.get("fp") or "").upper())
+        return a_age, (None if off is None else a_age + off)
+    return a_age, a_age
 
 
 def eps_is_reliable(q, price):
@@ -406,12 +429,21 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
     out("1. INPUTS -- ROE is trailing eps over book value per share")
     out("-" * 100)
     out(f"{'tk':>6} {'anchor':>11} {'BVPS':>9} {'px(master)':>11} {'drift':>7} "
-        f"{'ROE':>8} {'M/B':>7} {'divY%':>6}  ROE basis")
+        f"{'ROE':>8} {'M/B':>7} {'divY%':>6}  {'anc.age':>7} {'num.age':>7}  ROE basis")
     for r in recs:
         drift = (r["qpx"] / r["px"] - 1) * 100 if r["qpx"] and r["px"] else float("nan")
+        a_age, n_age = roe_vintage(r, cohort_date)
         out(f"{r['tk']:>6} {str(r['anchor']):>11} {r['bvps']:9,.2f} {r['px']:11,.2f} "
             f"{drift:+6.2f}% {r['roe']*100:7.2f}% {r['mb']:7.2f} "
-            f"{(r['dy'] if r['dy'] is not None else float('nan')):6.2f}  {r['basis']}")
+            f"{(r['dy'] if r['dy'] is not None else float('nan')):6.2f}  "
+            f"{_q(a_age):>7} {_q(n_age):>7}  {r['basis']}")
+    out()
+    out("  BASIS VINTAGE (DP-3C-aq, RULED 2026-09-25) -- ages in QUARTERS at the run date.")
+    out("  anc.age: the balance-sheet anchor (BVPS). num.age: the END of the period the")
+    out("  ROE NUMERATOR covers -- the last fiscal year for 'Schwab last-FY' (fp Q1/Q2/Q3")
+    out("  puts that FY end 1/2/3 quarters before the anchor), the anchor quarter itself for")
+    out("  'EDGAR quarterly x4'. A true TTM numerator would read num.age == anc.age; the gap")
+    out("  is the staleness the deferred TTM rebuild removes. No figure above changes.")
     fb = [r for r in recs if r["basis"] != "Schwab last-FY"]
     if fb:
         out()

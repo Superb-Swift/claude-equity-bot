@@ -23,6 +23,15 @@ VALIDATION
     `python episodes.py --selftest` checks the rule on synthetic data,
     including the bot-absent gap.
 
+2026-09-25 (DP-3C-ar, DP-3C-au)
+    coalesce() takes an optional `dropouts` set: a run-fault gap (the run was
+    asked about a ticker and wrote no row) is removed from THAT ticker's
+    calendar, so it bridges rather than splits. dropouts_from_logs() is the one
+    definition of a dropout. keep70() now returns its margin to the bar and a
+    KNIFE-EDGE flag. build_actionable_registry.assign_episodes() now calls
+    coalesce() instead of keeping a private copy of the rule (verified
+    identical on the live master with dropouts=None: 16 episodes, same ids).
+
 WHAT THIS MODULE IS NOT
     It filters nothing. The caller chooses the population (the band, the
     signal type, the era); this module only groups what it is handed. The
@@ -31,6 +40,8 @@ WHAT THIS MODULE IS NOT
 """
 
 import datetime as dt
+import os
+import re
 import sys
 
 
@@ -39,12 +50,75 @@ def cohort_index(cohort_dates):
     return {d: i for i, d in enumerate(sorted(set(cohort_dates)))}
 
 
+# --------------------------------------------------------------------------- #
+# DP-3C-ar (RULED 2026-09-25) — a ticker the run was ASKED about but never wrote.
+#
+#   DP-3C-ab bridges sessions on which the bot did not run. It said nothing
+#   about a session on which the bot ran, was asked about a ticker, and failed
+#   to write that ticker's row (a transport fault, logged as
+#   "No quote data for X — skipping."). Until this ruling such a gap SPLIT the
+#   episode, so a Schwab timeout could manufacture an episode: MSFT 2026-09-23
+#   split MSFT-20260903 and opened MSFT-20260924, which became DP-3C-w's 10th
+#   opened episode two sessions before its read.
+#
+#   RULE: that cohort is ABSENT FOR THAT TICKER ONLY. It neither splits nor
+#   extends an episode; the episode bridges it exactly as DP-3C-ab bridges a
+#   bot-absent day, and the bridged date is recorded on the episode.
+#   EVIDENCE GATE (mechanical, never judged): the skip line must be in the
+#   session's own log, the same log must carry no Signal JSON row for the
+#   ticker, and the master must carry no row for (ticker, date). Anything else
+#   is not a dropout and keeps its old behaviour.
+#   COST, DISCLOSED: the bridged session's value is unknown; the row might not
+#   have qualified. DP-3C-ab accepted the same assumption for bot-absent days.
+# --------------------------------------------------------------------------- #
+# Two run-fault lines exist in main.py.process_ticker(): the quote skip, and the
+# catch-all "Error processing X: ..." (never yet seen in the archive, same
+# class). Either one, WITH NO ROW WRITTEN for X in that log, is a dropout.
+DROPOUT_RE = re.compile(r"(?:WARNING \| No quote data for (?P<tk>[A-Z][A-Z.\-]*) \u2014 skipping\."
+                        r"|ERROR \| Error processing (?P<tk2>[A-Z][A-Z.\-]*):)")
+_SIGNAL_TK_RE = re.compile(r'Signal JSON: \{"ticker": "(?P<tk>[A-Z][A-Z.\-]*)"')
+_LOG_DATE_RE = re.compile(r"signals_(\d{4}-\d{2}-\d{2})")
+
+
+def dropouts_from_logs(paths, present=None):
+    """{(ticker, date)} run-fault dropouts under DP-3C-ar.
+
+    paths    signals logs (use signal_logs.discover() so the archive is read)
+    present  optional iterable of (ticker, date) pairs that DO have a master
+             row; any such pair is never a dropout, whatever a log says.
+    """
+    present = set(present or ())
+    skipped, written = {}, {}
+    for p in paths:
+        m = _LOG_DATE_RE.search(os.path.basename(p))
+        if not m:
+            continue
+        d = dt.date.fromisoformat(m.group(1))
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        skipped.setdefault(d, set()).update(x.group("tk") or x.group("tk2")
+                                            for x in DROPOUT_RE.finditer(text))
+        written.setdefault(d, set()).update(x.group("tk") for x in _SIGNAL_TK_RE.finditer(text))
+    out = set()
+    for d, tks in skipped.items():
+        for tk in tks - written.get(d, set()):
+            if (tk, d) not in present:
+                out.add((tk, d))
+    return out
+
+
 def coalesce(rows, cohort_dates, *, ticker=lambda r: r["ticker"],
-             date=lambda r: r["date"]):
-    """Group qualifying rows into DP-3C-m/ab episodes.
+             date=lambda r: r["date"], dropouts=None):
+    """Group qualifying rows into DP-3C-m/ab/ar episodes.
 
     rows          iterable of row objects (dicts by default)
     cohort_dates  every date on which the bot ran (the master's own calendar)
+    dropouts      optional {(ticker, date)} from dropouts_from_logs(): those
+                  cohorts are removed from THAT ticker's calendar only
+                  (DP-3C-ar), so they neither split nor extend an episode.
 
     Returns a list of episodes, oldest first. Each episode is a dict:
         id       "<TICKER>-<YYYYMMDD of opening row>"
@@ -53,15 +127,21 @@ def coalesce(rows, cohort_dates, *, ticker=lambda r: r["ticker"],
         closed   date of the last row
         rows     the rows, oldest first
         open_row the opening row (the one DP-3C-y scores)
+        bridged  dropout dates inside the episode (DP-3C-ar), oldest first
     Two rows on the same ticker and date (e.g. one per account) belong to the
     same episode; the first one seen is the opening row.
     """
-    idx = cohort_index(cohort_dates)
+    all_dates = sorted(set(cohort_dates))
+    drop_by_tk = {}
+    for tk, d in (dropouts or ()):
+        drop_by_tk.setdefault(tk, set()).add(d)
     by_tk = {}
     for r in rows:
         by_tk.setdefault(ticker(r), []).append(r)
     out = []
     for tk, rs in by_tk.items():
+        gone = drop_by_tk.get(tk, set())
+        idx = {d: i for i, d in enumerate(d for d in all_dates if d not in gone)}
         rs = sorted(rs, key=date)
         cur = None
         prev_i = None
@@ -77,9 +157,13 @@ def coalesce(rows, cohort_dates, *, ticker=lambda r: r["ticker"],
                 cur["closed"] = date(r)
             else:
                 cur = dict(id=f"{tk}-{date(r):%Y%m%d}", ticker=tk,
-                           opened=date(r), closed=date(r), rows=[r], open_row=r)
+                           opened=date(r), closed=date(r), rows=[r], open_row=r,
+                           bridged=[])
                 out.append(cur)
             prev_i = i
+        for e in out:
+            if e["ticker"] == tk and gone:
+                e["bridged"] = sorted(d for d in gone if e["opened"] < d < e["closed"])
     out.sort(key=lambda e: (e["opened"], e["ticker"]))
     return out
 
@@ -133,7 +217,7 @@ def spearman(xs, ys):
     return sxy / (sxx * syy) ** 0.5
 
 
-def dp3cw_arm(rows, cohort_dates):
+def dp3cw_arm(rows, cohort_dates, dropouts=None):
     """The DP-3C-w prospective arm, counted blind.
 
     rows: dicts with date, ticker, signal ("BUY"...), conf (PERCENT), ret5
@@ -152,7 +236,8 @@ def dp3cw_arm(rows, cohort_dates):
     pop = [r for r in rows
            if r["date"] >= DP3CW_ERA_START and r.get("signal") == "BUY"
            and isinstance(r.get("conf"), (int, float)) and r["conf"] >= 60]
-    eps = [e for e in coalesce(pop, cohort_dates) if e["opened"] >= DP3CW_OPENED]
+    eps = [e for e in coalesce(pop, cohort_dates, dropouts=dropouts)
+           if e["opened"] >= DP3CW_OPENED]
     opened = [e["open_row"] for e in eps]
     resolved = [r for r in opened if r.get("ret5") is not None]
     tickers_all = sorted({r["ticker"] for r in opened})
@@ -160,6 +245,7 @@ def dp3cw_arm(rows, cohort_dates):
     out = dict(n_open=len(opened), n_resolved=len(resolved),
                tickers=tickers_all, tickers_resolved=tickers_res,
                episodes=[e["id"] for e in eps],
+               bridged=[(e["ticker"], d) for e in eps for d in e.get("bridged", [])],
                read_ready=len(resolved) >= DP3CW_MIN_N,
                rho=None, verdict="COLLECTING — counts only, no rho before n = %d"
                % DP3CW_MIN_N)
@@ -189,7 +275,7 @@ def dp3cw_arm(rows, cohort_dates):
 KEEP70_BAR = 50.0     # "<= 50.0% supports keeping 70" (DP-3C-y wording)
 
 
-def keep70(rows, cohort_dates, resolved_through=None):
+def keep70(rows, cohort_dates, resolved_through=None, dropouts=None):
     """KEEP-70 on both bases.
 
     rows: dicts with date, ticker, signal, conf (PERCENT), ret5 (fraction or
@@ -215,17 +301,33 @@ def keep70(rows, cohort_dates, resolved_through=None):
     row_res = [res(r) for r in pop]
     row_n = sum(1 for v in row_res if v is not None)
     row_hit = sum(1 for v in row_res if v is not None and v > 0)
-    eps = coalesce(pop, cohort_dates)
+    eps = coalesce(pop, cohort_dates, dropouts=dropouts)
     ep_res = [res(e["open_row"]) for e in eps]
     ep_n = sum(1 for v in ep_res if v is not None)
     ep_hit = sum(1 for v in ep_res if v is not None and v > 0)
     rate = (100.0 * ep_hit / ep_n) if ep_n else None
+    # DP-3C-au (RULED 2026-09-25): a state is never printed without its margin,
+    # and a reading that ONE further resolution could flip is KNIFE-EDGE. The
+    # DP-3C-y rule that a NOT SUPPORTED reading does not move the gate applies
+    # symmetrically: a SUPPORTED reading does not certify it either.
+    def _state(h, n):
+        return "SUPPORTED" if 100.0 * h / n <= KEEP70_BAR else "NOT SUPPORTED"
+    margin = (rate - KEEP70_BAR) if rate is not None else None
+    if ep_n:
+        after_hit, after_miss = _state(ep_hit + 1, ep_n + 1), _state(ep_hit, ep_n + 1)
+        knife = after_hit != after_miss or after_hit != _state(ep_hit, ep_n)
+    else:
+        after_hit = after_miss = None
+        knife = False
     return dict(
         rows=len(pop), row_n=row_n, row_hit=row_hit,
         row_rate=(100.0 * row_hit / row_n) if row_n else None,
         episodes=len(eps), ep_n=ep_n, ep_hit=ep_hit, ep_rate=rate,
         verdict=("NO RESOLVED EPISODES" if rate is None else
                  "SUPPORTED" if rate <= KEEP70_BAR else "NOT SUPPORTED"),
+        margin_pt=margin, after_hit=after_hit, after_miss=after_miss,
+        knife_edge=knife,
+        bridged=[(e["ticker"], d) for e in eps for d in e.get("bridged", [])],
     )
 
 
@@ -280,6 +382,46 @@ def selftest():
     chk("10 resolved, 5 tickers, rho = -1 -> POSITIVE",
         a["rho"] is not None and a["verdict"].startswith("POSITIVE"))
     chk("spearman ties", abs(spearman([1, 2, 2, 3], [1, 2, 2, 3]) - 1.0) < 1e-12)
+    # DP-3C-ar (2026-09-25): a run-fault dropout bridges for THAT ticker only.
+    cal3 = [D(2026, 9, 21), D(2026, 9, 22), D(2026, 9, 23), D(2026, 9, 24)]
+    r3 = [dict(ticker="MSFT", date=D(2026, 9, 21)), dict(ticker="MSFT", date=D(2026, 9, 22)),
+          dict(ticker="MSFT", date=D(2026, 9, 24)),
+          dict(ticker="NVDA", date=D(2026, 9, 22)), dict(ticker="NVDA", date=D(2026, 9, 24))]
+    e_old = coalesce(r3, cal3)
+    e_new = coalesce(r3, cal3, dropouts={("MSFT", D(2026, 9, 23))})
+    ms_new = [e for e in e_new if e["ticker"] == "MSFT"]
+    chk("without DP-3C-ar the dropout splits MSFT (status quo preserved when not passed)",
+        len([e for e in e_old if e["ticker"] == "MSFT"]) == 2)
+    chk("with DP-3C-ar MSFT is ONE episode 09-21 -> 09-24",
+        len(ms_new) == 1 and ms_new[0]["closed"] == D(2026, 9, 24))
+    chk("the bridged date is recorded on the episode",
+        ms_new[0]["bridged"] == [D(2026, 9, 23)])
+    chk("a dropout on one ticker never bridges another (NVDA still splits)",
+        len([e for e in e_new if e["ticker"] == "NVDA"]) == 2)
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        lp = os.path.join(td, "signals_2026-09-23.log")
+        with open(lp, "w", encoding="utf-8") as fh:
+            fh.write("2026-09-23 09:34:54,659 | WARNING | No quote data for MSFT \u2014 skipping.\n"
+                     "2026-09-23 09:35:00,000 | WARNING | No quote data for AAPL \u2014 skipping.\n"
+                     '2026-09-23 09:36:00,000 | INFO | Signal JSON: {"ticker": "AAPL", "signal": "HOLD"}\n')
+        got = dropouts_from_logs([lp])
+        chk("log parser: MSFT skipped and unwritten -> dropout", ("MSFT", D(2026, 9, 23)) in got)
+        chk("log parser: a skip followed by a written row is NOT a dropout",
+            ("AAPL", D(2026, 9, 23)) not in got)
+        chk("master presence vetoes a dropout",
+            dropouts_from_logs([lp], present={("MSFT", D(2026, 9, 23))}) == set())
+    # DP-3C-au (2026-09-25): margin and knife-edge.
+    k = keep70([dict(ticker="A%d" % i, date=D(2026, 9, 1) + dt.timedelta(days=2 * i),
+                     signal="BUY", conf=65, ret5=(0.01 if i < 2 else -0.01)) for i in range(4)],
+               [D(2026, 9, 1) + dt.timedelta(days=i) for i in range(10)])
+    chk("KEEP-70 2/4 = 50.00% sits ON the bar: SUPPORTED, margin 0, knife-edge",
+        k["verdict"] == "SUPPORTED" and abs(k["margin_pt"]) < 1e-9 and k["knife_edge"])
+    k = keep70([dict(ticker="B%d" % i, date=D(2026, 9, 1) + dt.timedelta(days=2 * i),
+                     signal="BUY", conf=65, ret5=(0.01 if i < 1 else -0.01)) for i in range(5)],
+               [D(2026, 9, 1) + dt.timedelta(days=i) for i in range(12)])
+    chk("NEGATIVE: 1/5 = 20% is SUPPORTED with room -> NOT knife-edge",
+        k["verdict"] == "SUPPORTED" and not k["knife_edge"] and k["margin_pt"] < -29)
     print("  RESULT:", "ALL PASS" if ok else "FAILURES")
     return 0 if ok else 1
 

@@ -90,6 +90,49 @@ SELL_GATE = 65                   # risk_engine.RiskConfig.MIN_CONFIDENCE_SELL
 FALLBACK_THETA = 5.0
 D1_FLOOR = 35                    # risk_engine.DampingConfig FLOOR - clamps, never raises
 
+# ---------------------------------------------------------------------------
+# DP-3C-at (RULED 2026-09-25) -- a run fault is not a watchlist edit.
+#   On 2026-09-23 the run analysed 27 names and wrote 26: MSFT's quote fetch
+#   returned nothing after 21.6 s and main.py logged "No quote data for MSFT
+#   -- skipping." This scan printed "cohort membership CHANGED ... REMOVED:
+#   MSFT" plus a ONE-ARMED arm-effect WARN, i.e. it filed a transport fault as
+#   a population change, and the next session filed MSFT's return as an
+#   ADDITION. Both the analysed-universe header and the skip line are in the
+#   log; the scan now reads them and keeps the two classes apart:
+#     ROW DROPPED (run fault)  FAIL  -- the cohort is incomplete today
+#     RETURNED after dropout   WARN  -- annotates, never counted as an addition
+#     membership CHANGED       FAIL  -- genuine watchlist/held-set changes only
+# ---------------------------------------------------------------------------
+ANALYZING_RE = re.compile(r"# ANALYZING (\d+) UNIQUE TICKERS")
+SKIP_RE = re.compile(r"(?:WARNING \| No quote data for (?P<tk>[A-Z][A-Z.\-]*) \u2014 skipping\."
+                     r"|ERROR \| Error processing (?P<tk2>[A-Z][A-Z.\-]*):)")
+
+# DP-3C-ao (RULED 2026-09-25) -- the T-C dark control's own denominator.
+#   Pre-registered T-C arm: 8 names [R: 2026-09-02 closing review, per-name DQ
+#   change counts AIQ 8, NTR 8, AG 7, VTI 6, XLU 6, QQQ 5, SPY 2, SCHD 0].
+#   Departures are PROSPECTIVE (rows already collected stand). Every read that
+#   uses the dark arm reports "achieved N of 8". Below TC_FLOOR the owed
+#   DQ-channel stability read is declared UNREADABLE, not weakened.
+TC_PREREGISTERED = frozenset({"AIQ", "NTR", "AG", "VTI", "XLU", "QQQ", "SPY", "SCHD"})
+TC_FLOOR = 4
+
+
+def log_faults(path):
+    """(analysed_n or None, skipped_without_row: frozenset) for the AM section
+    of one signals log. A PM diagnostic append starts a second ANALYZING header;
+    everything from it on is ignored, the same AM-canonical rule parse_log uses."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, frozenset()
+    heads = list(ANALYZING_RE.finditer(text))
+    if len(heads) > 1:
+        text = text[:heads[1].start()]
+    n = int(heads[0].group(1)) if heads else None
+    skipped = {m.group("tk") or m.group("tk2") for m in SKIP_RE.finditer(text)}
+    written = set(re.findall(r'Signal JSON: \{"ticker": "([A-Z][A-Z.\-]*)"', text))
+    return n, frozenset(skipped - written)
+
 # Signal JSON ... | [PHASE 3-C DRY RUN] [accounts] [HELD|SCOUT] TICKER | Signal: ...
 #
 # ANALYST NOTE (2026-08-03, 3-C cutover): the phase token was hardcoded as
@@ -293,9 +336,29 @@ def prior_era(this_log, explicit=None):
     # regime_score, so the step check reads it off the SAME parse. None when
     # the prior log is not regime-uniform. Consumers guard on len() >= 6.
     p_reg = sorted({r["regime_score"] for r in recs if r.get("regime_score") is not None})
+    # 7th element ADDED 2026-09-17: the prior session's DARK set (names that
+    # carried an E tag reading "no filings"). WHY IT IS NEEDED HERE AND NOWHERE
+    # ELSE: when a name LEAVES the cohort it is, by definition, absent from
+    # today's records, so today's dark/covered split cannot classify it. Without
+    # the prior split the membership check can say WHICH names left but not
+    # WHICH ARM they left -- and a departure concentrated in the dark control is
+    # a different finding from one concentrated in the treated names. None when
+    # the prior log carries no E tags at all (a pre-EDGAR run), which is
+    # reported as unclassifiable rather than silently as "covered".
+    _tagged = [r for r in recs if r.get("edgar") is not None]
+    p_dark = (frozenset(r["ticker"] for r in _tagged if r["edgar"] == "no filings")
+              if _tagged else None)
+    # 8th and 9th elements ADDED 2026-09-25: the prior session's run-fault
+    # dropouts (DP-3C-at: a name that returns after one is not an ADDITION)
+    # and its per-ticker operative confidence (DP-3C-ap: the composition
+    # decomposition needs the prior values on the common names).
+    _pn_an, p_skipped = log_faults(path)
+    p_conf = {r["ticker"]: r["conf"] for r in recs
+              if r.get("ticker") and isinstance(r.get("conf"), (int, float))}
     return "ok", (eras[0], date, path.name, len(recs),
                   frozenset(r["ticker"] for r in recs if r.get("ticker")),
-                  p_reg[0] if len(p_reg) == 1 else None)
+                  p_reg[0] if len(p_reg) == 1 else None,
+                  p_dark, p_skipped, p_conf)
 
 
 def fmt(v, spec="", dash="--"):
@@ -309,14 +372,31 @@ def fmt(v, spec="", dash="--"):
         return str(v)
 
 
-def run_integrity(records, theta_src, warnings, prior=None):
+def run_integrity(records, theta_src, warnings, prior=None, faults=None):
     """Daily_Workflow_v6_0 section 4 checks, as assertions. Returns list of
     (level, message) where level is OK / WARN / FAIL / NOCHK.
 
     `prior` is the (state, detail) pair from prior_era(), or None if the caller
-    did not ask for the era-change comparison at all."""
+    did not ask for the era-change comparison at all.
+    `faults` (ADDED 2026-09-25, DP-3C-at) is log_faults() for THIS log:
+    (analysed_n, skipped_without_row). None = not read (old callers)."""
     out = []
     n = len(records)
+    _an, _dropped = faults if faults is not None else (None, frozenset())
+    if faults is not None:
+        if _dropped:
+            out.append(("FAIL", "ROW DROPPED (run fault, DP-3C-at) - {} analysed but "
+                                "not written (quote skip or processing error): the cohort is "
+                                "INCOMPLETE for {} today. NOT a watchlist change; episode "
+                                "counts bridge it (DP-3C-ar)".format(
+                                    ", ".join(sorted(_dropped)),
+                                    "this name" if len(_dropped) == 1 else "these names")))
+        if _an is not None and _an != n + len(_dropped):
+            out.append(("FAIL", "run wrote {} row(s) of {} analysed, and only {} skip "
+                                "line(s) account for the gap - cause NOT LOGGED".format(
+                                    n, _an, len(_dropped))))
+        elif _an is not None and not _dropped:
+            out.append(("OK", "run wrote every analysed name ({} of {})".format(n, _an)))
     # ---- COHORT MEMBERSHIP ------------------------------------------------
     # LANDED 2026-08-21; built and tested 2026-08-18, then held on an ordering
     # prerequisite that had ALREADY BEEN SATISFIED on 2026-08-10 (signal_scan
@@ -358,6 +438,15 @@ def run_integrity(records, theta_src, warnings, prior=None):
             _pe, _pdate, _pname, _pn, _ptk = _p_detail[:5]
             here = frozenset(r["ticker"] for r in records if r.get("ticker"))
             added, removed = sorted(here - _ptk), sorted(_ptk - here)
+            # DP-3C-at: split run faults out of the membership comparison.
+            _p_skipped = _p_detail[7] if len(_p_detail) >= 8 and _p_detail[7] else frozenset()
+            returned = sorted(t for t in added if t in _p_skipped)
+            added = [t for t in added if t not in _p_skipped]
+            removed = [t for t in removed if t not in _dropped]
+            if returned:
+                out.append(("WARN", "RETURNED after a run-fault dropout on {} (DP-3C-at): {} "
+                                    "- NOT an addition; membership is compared as if the "
+                                    "name had been written".format(_pdate, ", ".join(returned))))
             if not added and not removed:
                 out.append(("OK", "cohort membership UNCHANGED since {} ({} names; "
                                   "count {} vs {} in {})"
@@ -372,6 +461,56 @@ def run_integrity(records, theta_src, warnings, prior=None):
                             "cohort membership CHANGED since {} ({} -> {} names) - {}"
                             "  ** during E4 a watchlist edit is a COHORT-LEVEL finding, "
                             "not a formatting one".format(_pdate, _pn, n, "; ".join(bits))))
+                # ---- WHICH ARM MOVED (added 2026-09-17) ---------------------
+                # THE COUNT AND THE NAMES ARE NOT THE FINDING. E4's arms are
+                # covered (treated) vs dark (the T-C internal control), and a
+                # change that lands entirely on one arm is a different event
+                # from one spread across both: three dark names leaving does
+                # not shrink the treatment, it shrinks the CONTROL, and the
+                # control is what the endpoint's invalidation condition is
+                # read on. This line classifies the movers so the arm effect
+                # is on the face of the scan instead of being reconstructed by
+                # hand from two sessions' dark lists.
+                # REPORTING ONLY: no arm, endpoint, n or disposition moves.
+                _pdark = _p_detail[6] if len(_p_detail) >= 7 else None
+                _here_tagged = [r for r in records if r.get("edgar") is not None]
+                _here_dark = frozenset(r["ticker"] for r in _here_tagged
+                                       if r["edgar"] == "no filings")
+                arm_bits = []
+                if removed:
+                    if _pdark is None:
+                        arm_bits.append("REMOVED arm UNCLASSIFIABLE - prior log "
+                                        "carries no E tags")
+                    else:
+                        rd = sorted(t for t in removed if t in _pdark)
+                        rc = sorted(t for t in removed if t not in _pdark)
+                        arm_bits.append("REMOVED {} dark/T-C control ({}), {} covered ({})"
+                                        .format(len(rd), ", ".join(rd) or "-",
+                                                len(rc), ", ".join(rc) or "-"))
+                if added:
+                    if not _here_tagged:
+                        arm_bits.append("ADDED arm UNCLASSIFIABLE - this run carries "
+                                        "no E tags")
+                    else:
+                        ad = sorted(t for t in added if t in _here_dark)
+                        ac = sorted(t for t in added if t not in _here_dark)
+                        arm_bits.append("ADDED {} dark/T-C control ({}), {} covered ({})"
+                                        .format(len(ad), ", ".join(ad) or "-",
+                                                len(ac), ", ".join(ac) or "-"))
+                if arm_bits:
+                    _one_armed = (removed and _pdark is not None
+                                  and (not [t for t in removed if t in _pdark]
+                                       or not [t for t in removed if t not in _pdark]))
+                    # WARN, NOT FAIL, AND THE LEVEL IS THE POINT. `fails` counts
+                    # FAIL and NOCHK, so a second FAIL here would print
+                    # "2 integrity findings" for ONE event and inflate every
+                    # findings count that cites this scan. This line ANNOTATES
+                    # the FAIL above; it can never appear without it, so nothing
+                    # can pass silently by being demoted to WARN.
+                    out.append(("WARN", "  ^ arm effect (annotates the FAIL above): "
+                                + "; ".join(arm_bits)
+                                + ("  ** the change is ONE-ARMED - it moves that arm's "
+                                   "n without touching the other" if _one_armed else "")))
 
     eras = sorted({r["era"] for r in records if r["era"]})
     if len(eras) == 1 and eras[0] in KNOWN_ERAS:
@@ -450,6 +589,17 @@ def run_integrity(records, theta_src, warnings, prior=None):
             out.append(("FAIL", "E tag present but EVERY row reads 'no filings' - "
                                 "EDGAR fetched nothing (SEC_USER_AGENT / egress)"))
         else:
+            _tc_here = sorted(TC_PREREGISTERED & frozenset(
+                r["ticker"] for r in records if r.get("ticker")))
+            _tc_gone = sorted(TC_PREREGISTERED - frozenset(_tc_here) - _dropped)
+            _tc_ok = len(_tc_here) >= TC_FLOOR
+            out.append(("OK" if _tc_ok else "WARN",
+                        "T-C control arm (DP-3C-ao): {} of 8 pre-registered present ({}); "
+                        "departed: {}; floor {} - DQ-stability read {}".format(
+                            len(_tc_here), ", ".join(_tc_here) or "-",
+                            ", ".join(_tc_gone) or "none", TC_FLOOR,
+                            "READABLE (report both denominators)" if _tc_ok
+                            else "UNREADABLE - below the ruled floor")))
             out.append(("OK", "EDGAR sections on {}/{} row(s); {} dark: {}"
                         .format(covered, len(records), len(no_filings),
                                 ", ".join(sorted(no_filings)) or "none")))
@@ -616,13 +766,13 @@ def reconcile(records):
     return checks, (len(disc), tracks_pre, tracks_post), _info_gap
 
 
-def render(records, theta, theta_src, warnings, counterfactual, prior=None):
+def render(records, theta, theta_src, warnings, counterfactual, prior=None, faults=None):
     L = []
     add = L.append
     date = next((r["date"] for r in records if r["date"]), "unknown")
     times = sorted(r["time"] for r in records if r["time"])
 
-    integrity = run_integrity(records, theta_src, warnings, prior)
+    integrity = run_integrity(records, theta_src, warnings, prior, faults)
     checks, (n_disc, pre, post), info_gap = reconcile(records)
     # NOCHK counts as a finding. "I could not check" must not cost less
     # attention than "I checked and it is fine" -- 2026-08-19.
@@ -759,6 +909,25 @@ def render(records, theta, theta_src, warnings, counterfactual, prior=None):
     if confs:
         add("  conf    : mean {:.1f}  median {:.1f}  sd(pop) {:.2f}  min {}  max {}".format(
             st.mean(confs), st.median(confs), st.pstdev(confs), min(confs), max(confs)))
+        # DP-3C-ap (RULED 2026-09-25): a cohort statistic quoted against a
+        # prior session whose MEMBERSHIP differs travels with its composition
+        # decomposition. 2026-09-17: 105% of the mean's "improvement" was three
+        # names leaving. Printed only when the two sessions' name sets differ.
+        _pd = prior[1] if prior and prior[0] == "ok" else None
+        _pconf = _pd[8] if _pd and len(_pd) >= 9 else None
+        if _pconf:
+            _here = {r["ticker"]: r["conf"] for r in records
+                     if isinstance(r["conf"], (int, float))}
+            if set(_here) != set(_pconf):
+                _common = sorted(set(_here) & set(_pconf))
+                if _common:
+                    _tot = st.mean(_here.values()) - st.mean(_pconf.values())
+                    _gen = (st.mean(_here[t] for t in _common)
+                            - st.mean(_pconf[t] for t in _common))
+                    add("  vs {} ({} -> {} names): mean {:+.2f} pt = genuine {:+.2f} pt on the "
+                        "{} common names + composition {:+.2f} pt (DP-3C-ap)".format(
+                            _pd[1], len(_pconf), len(_here), _tot, _gen, len(_common),
+                            _tot - _gen))
     # FIXED 2026-08-13. TWO defects lived in this block, both of them the
     # pooling error the block's own closing line warns about:
     #   (a) `at_gate` filtered on CONFIDENCE ALONE and listed HOLD rows under a
@@ -822,18 +991,28 @@ _SELFTEST_LINE = (
 )
 
 
-def _st_write(d, name, era, tickers=("AAPL",)):
+def _st_write(d, name, era, tickers=("AAPL",), dark=None, edgar=False):
     """`tickers` added 2026-08-21 for the cohort-membership cases. The template
     line is AAPL's, so each extra name is that line with the ticker swapped in
     both the JSON and the human half -- the same substitution case 5 already
-    used for its non-uniform-era fixture."""
+    used for its non-uniform-era fixture.
+
+    `edgar` / `dark` added 2026-09-17 for the ARM-EFFECT cases. The template
+    carries no E tag at all, so without these the fixture can only exercise the
+    UNCLASSIFIABLE branch. With edgar=True every name gets an E tag; names in
+    `dark` get `E[no filings]`, the rest get a covered tag."""
     p = Path(d) / name
+    dark = set(dark or ())
     body = ""
     for tk in tickers:
         line = _SELFTEST_LINE.format(era=era)
         if tk != "AAPL":
             line = (line.replace('"AAPL"', '"{}"'.format(tk))
                         .replace("] AAPL |", "] {} |".format(tk)))
+        if edgar:
+            tag = ("E[no filings]" if tk in dark
+                   else "E[8k=0; periodic=10-Q@2026-07-23; fin=9@2026-06-30]")
+            line = line.rstrip("\n") + " | " + tag + "\n"
         body += line
     p.write_text(body, encoding="utf-8")
     return p
@@ -990,6 +1169,73 @@ def selftest():
             _rep, fails = render(recs, 5.0, "test", [], False, (state, detail))
             ok &= _st_check("...and a membership FAIL sets the findings flag",
                             any("membership" in c[1] for c in fails), True)
+
+            # 6f. ARM EFFECT (added 2026-09-17). Four cases, two of them
+            #     negatives. The state that must never be reachable is an
+            #     arm-effect line asserted from today's dark set alone -- a
+            #     departed name is ABSENT from today's records, so classifying
+            #     it needs the prior session's split or it needs to say it
+            #     cannot.
+            #     POSITIVE: a purely DARK departure is named as one-armed.
+            _st_write(d5, "signals_2026-08-18.log", E, ("AAPL", "MSFT", "XLU", "AIQ"),
+                      dark=("XLU", "AIQ"), edgar=True)
+            t = _st_write(d5, "signals_2026-08-19.log", E, ("AAPL", "MSFT"),
+                          dark=(), edgar=True)
+            state, detail = prior_era(t)
+            recs, _w = parse_log(t)
+            integ = run_integrity(recs, "test", [], (state, detail))
+            arm = [m for lv, m in integ if lv == "WARN" and "arm effect" in m]
+            ok &= _st_check("a DARK-ONLY departure -> exactly one arm-effect line",
+                            len(arm), 1)
+            ok &= _st_check("...counting both departures to the control arm",
+                            "REMOVED 2 dark/T-C control (AIQ, XLU), 0 covered" in arm[0],
+                            True)
+            ok &= _st_check("...and flagging it ONE-ARMED",
+                            "ONE-ARMED" in arm[0], True)
+            #     NEGATIVE: ONE EVENT, ONE FINDING. The arm line must not
+            #     inflate the count the closing reviews quote.
+            _rep, _f = render(recs, 5.0, "test", [], False, (state, detail))
+            ok &= _st_check("...without inflating the findings count",
+                            len([c for c in _f if "membership" in c[1]
+                                 or "arm effect" in c[1]]), 1)
+
+            #     NEGATIVE: a MIXED departure is not one-armed.
+            _st_write(d5, "signals_2026-08-18.log", E, ("AAPL", "MSFT", "XLU"),
+                      dark=("XLU",), edgar=True)
+            t = _st_write(d5, "signals_2026-08-19.log", E, ("AAPL",),
+                          dark=(), edgar=True)
+            state, detail = prior_era(t)
+            recs, _w = parse_log(t)
+            integ = run_integrity(recs, "test", [], (state, detail))
+            arm = [m for lv, m in integ if lv == "WARN" and "arm effect" in m]
+            ok &= _st_check("a MIXED departure -> 1 dark, 1 covered",
+                            "REMOVED 1 dark/T-C control (XLU), 1 covered (MSFT)" in arm[0],
+                            True)
+            ok &= _st_check("...and NOT flagged one-armed",
+                            "ONE-ARMED" in arm[0], False)
+
+            #     NEGATIVE: no E tags anywhere -> UNCLASSIFIABLE, never a
+            #     silent "0 dark".
+            _st_write(d5, "signals_2026-08-18.log", E, ("AAPL", "MSFT", "XLU"))
+            t = _st_write(d5, "signals_2026-08-19.log", E, ("AAPL", "MSFT"))
+            state, detail = prior_era(t)
+            recs, _w = parse_log(t)
+            integ = run_integrity(recs, "test", [], (state, detail))
+            arm = [m for lv, m in integ if lv == "WARN" and "arm effect" in m]
+            ok &= _st_check("a pre-EDGAR prior log -> arm UNCLASSIFIABLE, not '0 dark'",
+                            len(arm) == 1 and "UNCLASSIFIABLE" in arm[0]
+                            and "0 dark" not in arm[0], True)
+
+            #     NEGATIVE: an unchanged cohort emits NO arm-effect line at all.
+            _st_write(d5, "signals_2026-08-18.log", E, ("AAPL", "MSFT"),
+                      dark=("MSFT",), edgar=True)
+            t = _st_write(d5, "signals_2026-08-19.log", E, ("AAPL", "MSFT"),
+                          dark=("MSFT",), edgar=True)
+            state, detail = prior_era(t)
+            recs, _w = parse_log(t)
+            integ = run_integrity(recs, "test", [], (state, detail))
+            ok &= _st_check("an UNCHANGED cohort emits no arm-effect line",
+                            any("arm effect" in m for _lv, m in integ), False)
         finally:
             shutil.rmtree(d5, ignore_errors=True)
 
@@ -1050,6 +1296,52 @@ def selftest():
     ok &= _st_check("old 5-tuple prior -> NOCHK, no crash",
                     _lv(in_range, p5, "regime_score step"), ["NOCHK"])
 
+    # 8. DP-3C-at (2026-09-25): a run fault is not a watchlist edit.
+    print("  -- run-fault classification (DP-3C-at)")
+    d8 = Path(tempfile.mkdtemp(prefix="signal_scan_selftest_at_"))
+    try:
+        E = "A-S1D2-B1-E1"
+        hdr = "2026-09-23 09:32:58,102 | INFO | # ANALYZING {} UNIQUE TICKERS\n"
+        skip = "2026-09-23 09:34:54,659 | WARNING | No quote data for {} \u2014 skipping.\n"
+        _st_write(d8, "signals_2026-09-22.log", E, ("AAPL", "MSFT"), edgar=True)
+        t = _st_write(d8, "signals_2026-09-23.log", E, ("AAPL",), edgar=True)
+        t.write_text(hdr.format(2) + skip.format("MSFT") + t.read_text(encoding="utf-8"),
+                     encoding="utf-8")
+        recs, _w = parse_log(t)
+        integ = run_integrity(recs, "test", [], prior_era(t), log_faults(t))
+        ok &= _st_check("a skipped, unwritten name -> ROW DROPPED FAIL",
+                        [lv for lv, m in integ if "ROW DROPPED" in m], ["FAIL"])
+        ok &= _st_check("...and NO membership-CHANGED FAIL for it",
+                        [m for lv, m in integ if "membership CHANGED" in m], [])
+        ok &= _st_check("...and NO arm-effect line",
+                        [m for lv, m in integ if "arm effect" in m], [])
+        t2 = _st_write(d8, "signals_2026-09-24.log", E, ("AAPL", "MSFT"), edgar=True)
+        integ = run_integrity(parse_log(t2)[0], "test", [], prior_era(t2), log_faults(t2))
+        ok &= _st_check("the next session's return -> RETURNED WARN, not an ADDITION",
+                        ([lv for lv, m in integ if "RETURNED" in m],
+                         [m for lv, m in integ if "membership CHANGED" in m]), (["WARN"], []))
+        # NEGATIVE: a genuine removal is still a membership FAIL.
+        t3 = _st_write(d8, "signals_2026-09-25.log", E, ("AAPL",), edgar=True)
+        t3.write_text(hdr.format(1) + t3.read_text(encoding="utf-8"), encoding="utf-8")
+        integ = run_integrity(parse_log(t3)[0], "test", [], prior_era(t3), log_faults(t3))
+        ok &= _st_check("NEGATIVE: a genuine departure (no skip line) -> membership FAIL",
+                        len([m for lv, m in integ if lv == "FAIL" and "REMOVED: MSFT" in m]), 1)
+        # NEGATIVE: a count gap with no skip line is a FAIL, not silence.
+        t4 = _st_write(d8, "signals_2026-09-28.log", E, ("AAPL",), edgar=True)
+        t4.write_text(hdr.format(3) + t4.read_text(encoding="utf-8"), encoding="utf-8")
+        integ = run_integrity(parse_log(t4)[0], "test", [], None, log_faults(t4))
+        ok &= _st_check("NEGATIVE: analysed 3, wrote 1, no skip line -> cause NOT LOGGED FAIL",
+                        [lv for lv, m in integ if "cause NOT LOGGED" in m], ["FAIL"])
+        # T-C floor (DP-3C-ao): 3 of 8 present -> UNREADABLE WARN.
+        t5 = _st_write(d8, "signals_2026-09-29.log", E, ("AAPL", "NTR", "SPY", "QQQ"),
+                       dark=("NTR", "SPY", "QQQ"), edgar=True)
+        integ = run_integrity(parse_log(t5)[0], "test", [], None, None)
+        ok &= _st_check("T-C arm at 3 of 8 (below floor 4) -> UNREADABLE WARN",
+                        [lv for lv, m in integ if "T-C control arm" in m and "UNREADABLE" in m],
+                        ["WARN"])
+    finally:
+        shutil.rmtree(d8, ignore_errors=True)
+
     print("\n{}\n".format("ALL PASS" if ok else "FAILURES PRESENT"))
     return 0 if ok else 1
 
@@ -1093,7 +1385,8 @@ def main():
         return 2
 
     prior = prior_era(log_path, args.prior_log)
-    report, fails = render(records, theta, theta_src, warnings, args.counterfactual, prior)
+    report, fails = render(records, theta, theta_src, warnings, args.counterfactual, prior,
+                           faults=log_faults(log_path))
     if not args.quiet:
         print(report)
 

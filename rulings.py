@@ -47,6 +47,11 @@ WHAT THIS MODULE IS, AND IS NOT
     closing block the daily runners now use instead of hardcoded text.
     `record_reading` stamps source and time on every reading.
 
+2026-09-25 UPDATE
+    Transcribed DP-3C-an..aw from claude/Phase3C_Rulings_2026-09-25.md
+    (ruled under the operator's delegation of 2026-09-25). DP-3C-am's D9
+    list gains MSFT; D9 stays an OWED operator check.
+
 ADDING A RULING
     Transcribe it from the `claude/` ruling document. `doc` is mandatory and is
     the audit trail: a status here with no document behind it is exactly the
@@ -370,7 +375,90 @@ RULINGS = {
         status="D9 OWED (operator check) before any market-adjusted work; D6 DEFERRED (API cost is Rob's call)",
         open=True, ruled_on=dt.date(2026, 9, 16), effective=dt.date(2026, 9, 16),
         doc="claude/Rulings_DP-T1_and_DP-3C-af-am_2026-09-16.md",
-        bar="D9: three closes (AAPL, PM, SCHD) checked against an external source",
+        bar="D9: four closes (AAPL, PM, SCHD, MSFT) checked against an external source",
+        note=("AMENDED 2026-09-25: MSFT added to D9 after two machine-vs-source "
+              "disagreements in three sessions (09-15, 09-17). The MSFT 09-15 "
+              "repair stays ON HOLD until D9 is done."),
+    ),
+    # ------------------------------------------------ 2026-09-25 ruling set --
+    "DP-3C-an": dict(
+        dp="DP-3C-an",
+        question="which confidence channel and which trailing-move basis G1 scores on",
+        status="RULED — RAW channel; TRACKER basis (5 rows off Price at Signal); run basis cross-read beside; read once at pooled n = 4",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
+        bar="unchanged: read at n = 4 evidence episodes (pooled WMT + GM); at the read, >= 1 responding <= 2 sessions",
+        note=("Direction disclosed: the tracker basis gives 2 evidence episodes "
+              "(both responded); the run basis would give 1 (GM 2026-09-21, no "
+              "response <= 2). The tracker basis was the detection basis in use "
+              "since July and was relied on by DP-3C-aa."),
+    ),
+    "DP-3C-ao": dict(
+        dp="DP-3C-ao",
+        question="departures from the dark/T-C control arm and its denominator",
+        status="RULED — departures prospective; every dark-arm read reports N of 8; floor 4 names, below it the DQ-stability read is UNREADABLE",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
+        bar="T-C floor = 4 of the 8 pre-registered names",
+    ),
+    "DP-3C-ap": dict(
+        dp="DP-3C-ap",
+        question="point estimates vs surfaces; cohort statistics across membership changes",
+        status="RULED — an argmax travels with its surface and margin; a cohort statistic across a membership change travels with its composition split",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md", bar="n/a — reporting",
+    ),
+    "DP-3C-aq": dict(
+        dp="DP-3C-aq",
+        question="ROE input staleness until the TTM rebuild",
+        status="RULED — implied_return section 1 carries anchor age and numerator age (quarters); no figure changes",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md", bar="n/a — reporting",
+    ),
+    "DP-3C-ar": dict(
+        dp="DP-3C-ar",
+        question="a ticker the run was asked about but never wrote (run-fault dropout) in episode coalescing",
+        status="RULED — absent for that ticker only: bridges, never splits; evidence-gated on the log; applies to every episode consumer",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
+        bar="n/a — population rule",
+        note=("First instance MSFT 2026-09-23. Effect measured before ruling: "
+              "DP-3C-w 10 -> 9 opened; actionable ledger 16 -> 15 episodes; "
+              "KEEP-70 unchanged. Numbered DP-3C-ap in the 2026-09-25 weekly "
+              "review by error (that letter was already proposed 2026-09-17)."),
+    ),
+    "DP-3C-as": dict(
+        dp="DP-3C-as",
+        question="gate logic that assumed BUY (ERASED; the WS1 gate-flip ledger)",
+        status="RULED — signal-aware: SELL rows can be ERASED at 65; SELL gate-flips kept in a separate ledger",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md", bar="n/a — definitions",
+        note="Corrects 3 rows: USO 2026-09-23, TWST 2026-09-24, TWST 2026-09-25 now ERASED.",
+    ),
+    "DP-3C-at": dict(
+        dp="DP-3C-at",
+        question="run faults vs watchlist edits; quote-fetch retry",
+        status="RULED — ROW DROPPED is its own FAIL, never a membership change; one quote retry before a skip",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
+        bar="n/a",
+        note="A retry changes whether a row exists, never what the model is shown: not a DP-3C-ai change; era stamp unchanged.",
+    ),
+    "DP-3C-au": dict(
+        dp="DP-3C-au",
+        question="KEEP-70 at the bar — margin and symmetry",
+        status="RULED — never a state without its margin; KNIFE-EDGE when one resolution flips it; neither state moves or certifies the gate",
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
+        bar="unchanged: <= 50.0% supports keeping 70 (DP-3C-y)",
+    ),
+    "DP-3C-av": dict(
+        dp="DP-3C-av",
+        question="per-account executability (DP-3C-u revisit condition, met 2026-09-16)",
+        status="PRE-REGISTERED — per-account episode counts only; read ONCE at the Phase 3-C exit, descriptive, >= 10 resolved episodes per account",
+        open=True, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
+        bar="descriptive only (DP-3C-l standard NONE); never pooled across accounts",
+    ),
+    "DP-3C-aw": dict(
+        dp="DP-3C-aw",
+        question="re-basing the damper's trailing move (owed since 2026-09-17)",
+        status="PRE-REGISTERED — lands only after the Phase 3-C exit (DP-3C-ai); nothing changes before it",
+        open=True, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25),
+        doc="claude/Phase3C_Rulings_2026-09-25.md",
+        bar=("adopt only if the before/after table (every D2 row; WMT 2026-07-23..08-26 "
+             "window shown separately) is presented at the exit review and ruled on"),
     ),
 }
 

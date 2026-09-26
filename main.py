@@ -26,6 +26,7 @@
 import os
 import json
 import logging
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -126,11 +127,26 @@ WATCHLIST_SCOUT = [
     "USO",
     "CORN",
     "BBWI",
+    "TWST",
     # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
     # GM   — added 2026-08-18 to PREVENT AN E4 SUPPLY SHORTFALL.
     # NTR  — added 2026-08-25 to PREVENT AN E4 SUPPLY SHORTFALL.
     # USO  — added 2026-08-25 to PREVENT AN E4 SUPPLY SHORTFALL.
     # BBWI — added 2026-09-09, one-off candidate, outside the E4 population.
+    # TWST — added 2026-09-21 (this file, +13 bytes, 12:54 CDT, AFTER that
+    #        day's AM run, so first in the 2026-09-22 cohort). REASON NOT
+    #        RECORDED at the time; not surfaced by ticker_suggester (absent from
+    #        logs/suggestions_history.txt). Attribution added 2026-09-25 from
+    #        the file's own mtime and the 09-22 membership FAIL -- the operator
+    #        should replace "REASON NOT RECORDED" with the reason. Outside the
+    #        E4 population by construction (SPCX/USO precedent, third instance);
+    #        covered arm (E tag, confirmed 2026-09-22).
+    # USO  — LEFT THE HELD SET between the 2026-09-22 and 2026-09-23 runs
+    #        (held 17 -> 16) and stays in the cohort through this entry, so the
+    #        cohort did not change. RECORDED CONSEQUENCE (the CORN caveat
+    #        below): USO's prompt changed class that day, held -> scout, so its
+    #        rows from 2026-09-23 are NOT prompt-comparable to earlier rows.
+    #        Recorded 2026-09-25.
     #
     # ANALYST NOTE:
     #   CORN left the held set on 2026-08-14 and would
@@ -157,6 +173,7 @@ WATCHLIST_SCOUT = [
 ]
 
 MONITOR_HOLDINGS = True
+QUOTE_RETRY_WAIT_S = 3      # DP-3C-at: one retry on an empty quote, then skip
 ENABLE_SUGGESTIONS = True   # Set False to skip the daily suggester call
 
 NEWS_DAYS_BACK = 7
@@ -514,7 +531,29 @@ def process_ticker(ticker: str, portfolios: list,
             quote_cache[ticker] = quote
 
         if not quote:
+            # DP-3C-at (RULED 2026-09-25): ONE retry before a row is dropped.
+            #   2026-09-23: MSFT's quote returned nothing after a 21.6 s stall
+            #   and the name was skipped; Schwab served its close the same
+            #   evening, so it was transient. The dropped row split a live
+            #   episode and manufactured a DP-3C-w episode (see episodes.py,
+            #   DP-3C-ar). A retry changes WHETHER a row exists, never what the
+            #   model is shown, so it is not a DP-3C-ai treatment change and
+            #   the era stamp does not move.
+            #   The skip line below is UNCHANGED WORD FOR WORD on purpose:
+            #   episodes.dropouts_from_logs() and signal_scan.log_faults() key
+            #   on it. The retry line deliberately does not match it.
+            log.warning(f"Quote for {ticker} came back empty — retrying once in "
+                        f"{QUOTE_RETRY_WAIT_S}s (DP-3C-at).")
+            time.sleep(QUOTE_RETRY_WAIT_S)
+            quote = get_quote(ticker)
+            quote_cache[ticker] = quote
+            if quote:
+                log.info(f"{ticker} | quote retry succeeded (DP-3C-at)")
+        if not quote:
             log.warning(f"No quote data for {ticker} — skipping.")
+            log.error(f"ROW DROPPED (run fault): {ticker} was analysed and will NOT be "
+                      f"written this session. It is NOT a watchlist change "
+                      f"(signal_scan DP-3C-at; episode counts bridge it, DP-3C-ar).")
             return
 
         log.info(

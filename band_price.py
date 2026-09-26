@@ -669,8 +669,17 @@ def report(rows, md_path=None):
                 f"{'HAS NOT flipped' if still else 'HAS flipped'} "
                 f"({a} {sa['median_abs']*100:.3f}% vs {b} {sb['median_abs']*100:.3f}%)")
             if n_retier and still:
-                out("  => the flagged boundary held while unflagged ones moved. The freeze doc's")
-                out("     sensitivity note was aimed at the wrong boundary. Recorded, not acted on.")
+                # AMENDED 2026-09-25. Until today this printed "the freeze doc's
+                # sensitivity note was aimed at the wrong boundary" on every run.
+                # The 2026-09-21 review amended that claim as too confident on a
+                # two-session read (the gap closed 0.180 -> 0.055pp in two
+                # sessions), but hardcoded text kept asserting it. The exhibit now
+                # prints the LIVE gap and makes no claim about the note.
+                _gap = (sb["median_abs"] - sa["median_abs"]) * 100
+                out(f"  => the flagged boundary has not flipped; live gap {_gap:.3f}pp "
+                    f"({b} above {a}); {n_retier} name(s) would re-tier across "
+                    f"unflagged boundaries. No claim is made about the freeze note's "
+                    f"aim (amended 2026-09-21).")
         if n_retier:
             findings.append(f"{n_retier} of {len(td)} covered names would re-tier at current n")
             out()

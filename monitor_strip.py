@@ -83,6 +83,13 @@ G1_VACATED = {("WMT", dt.date(2026, 8, 20))}
 G1_SURVIVES = {("WMT", dt.date(2026, 7, 23))}
 HOLD_BAND = 0.03                      # +/-3% -> a HOLD was "right"
 BUY_GATE = 70                         # KEEP-70
+SELL_GATE = 65                        # CHECK 5 SELL gate (risk_engine); DP-3C-as
+# DP-3C-an (RULED 2026-09-25). G1 is read ONCE at a pooled n of evidence
+# episodes across the WS2 tracer universe (WMT + GM) -- n = 4 is the
+# pre-registered read point [R: 2026-08-20 review, "the pre-registered n = 4"].
+# The tool counts toward it and says when it is reached; the read itself is
+# taken in a dated review, never emitted here.
+G1_READ_N = 4
 # H4 reopen bar. Raised 10 -> 12 on 2026-07-28 after the 7/27 REOPEN lasted
 # exactly one session: n crossed 10 while the rate FELL to 60.0000%, and the
 # 11th resolution flipped it straight back. The ruling attached a second
@@ -225,6 +232,84 @@ def load_blend(pattern):
     return out
 
 
+def load_raw(pattern):
+    """{(date, ticker): confidence_raw} from the Signal JSON log lines.
+
+    ADDED 2026-09-25 for DP-3C-an: G1 is scored on the RAW (model-side,
+    pre-damping) channel. The tracker stores only the OPERATIVE value, so the
+    raw channel exists only in the logs -- the same reason load_blend exists.
+    A row with no confidence_raw (logs before S1, or a missing log) falls back
+    to the tracker's operative value, which equals raw wherever damping was
+    inactive; the caller reports how many rows were overridden."""
+    out = {}
+    try:
+        import signal_logs
+        paths, _info = signal_logs.discover(pattern)
+    except Exception:
+        paths = sorted(glob.glob(pattern))
+    rx = re.compile(r'"ticker":\s*"(?P<tk>[A-Z.\-]+)".*?"confidence_raw":\s*(?P<raw>\d+)')
+    for fp in paths:
+        m = re.search(r"signals_(\d{4}-\d{2}-\d{2})", os.path.basename(fp))
+        if not m:
+            continue
+        d = dt.date.fromisoformat(m.group(1))
+        for line in open(fp, encoding="utf-8", errors="replace"):
+            if "Signal JSON" not in line:
+                continue
+            mm = rx.search(line)
+            if mm:
+                out.setdefault((d, mm.group("tk")), int(mm.group("raw")))
+    return out
+
+
+def run_basis_crossread(pattern):
+    """DP-3C-an's mandatory cross-read (ADDED 2026-09-25). G1 is scored on the
+    TRACKER basis; the run's own series -- `D[trail=…]`, closes over prior
+    sessions, the series THETA damps on -- is read beside it on every run so
+    the ruled basis can never be the only one visible. D2 logs only (from
+    D2_START): D1 logs are history under DP-3C-aj. Response on the RAW
+    channel, same baseline rule (raw five run-sessions earlier). Reported,
+    never scored."""
+    rx = re.compile(r'Signal JSON: \{"ticker": "(?P<tk>[A-Z.\-]+)".*?'
+                    r'D\[raw=(?P<raw>\d+); op=\d+; trail=(?P<tr>[+-]?[\d.]+)%')
+    ser = {tk: {} for tk in TRACERS}
+    try:
+        import signal_logs
+        paths, _info = signal_logs.discover(pattern)
+    except Exception:
+        paths = sorted(glob.glob(pattern))
+    for fp in paths:
+        m = re.search(r"signals_(\d{4}-\d{2}-\d{2})\.log$", os.path.basename(fp))
+        if not m:
+            continue                       # only canonical per-date logs
+        d = dt.date.fromisoformat(m.group(1))
+        for line in open(fp, encoding="utf-8", errors="replace"):
+            mm = rx.search(line)
+            if mm and mm.group("tk") in ser:
+                ser[mm.group("tk")].setdefault(d, (int(mm.group("raw")), float(mm.group("tr"))))
+    out = {}
+    for tk, sd in ser.items():
+        ds = sorted(sd)
+        eps, in_run = [], False
+        for i, d in enumerate(ds):
+            raw, tr = sd[d]
+            if tr > -THETA:
+                in_run = False
+                continue
+            if in_run:
+                continue
+            in_run = True
+            if d < D2_START or i < 5:
+                continue
+            pre = sd[ds[i - 5]][0]
+            lag = next((k for k in range(RESPONSE_SESSIONS + 1)
+                        if i + k < len(ds) and sd[ds[i + k]][0] < pre), None)
+            pending = lag is None and i + RESPONSE_SESSIONS >= len(ds)
+            eps.append((d, tr, lag, pending))
+        out[tk] = eps
+    return out
+
+
 # ----------------------------------------------------------------- metrics --
 def right5(sig, ret):
     if ret is None:
@@ -238,20 +323,33 @@ def _acc(sub):
     return len(sub), (100.0 * h / len(sub) if sub else 0.0)
 
 
-def ws2_episodes(rows):
+def ws2_episodes(rows, raw=None):
     """WS2/G1 — count post-deploy tracer episodes and whether each was SERVED.
 
-    episode  : trailing 5-session move <= -THETA on a tracer
-    served   : operative confidence FALLS within RESPONSE_SESSIONS sessions
+    episode  : trailing 5-session move <= -THETA on a tracer (TRACKER basis:
+               five tracker rows off Price at Signal -- DP-3C-an keeps it)
+    served   : confidence FALLS within RESPONSE_SESSIONS sessions
+
+    DP-3C-an (RULED 2026-09-25): when `raw` is passed, the response is scored
+    on the RAW channel (log `confidence_raw`, the model's own number) and the
+    OPERATIVE lag is kept beside it in e["op_lag"] so a channel-sensitive
+    episode is visible. Without `raw` the old operative scoring is unchanged.
     """
     out = {}
     for tk in TRACERS:
-        ser = [x for x in rows if x["ticker"] == tk and x["p0"]]
+        ser = [dict(x) for x in rows if x["ticker"] == tk and x["p0"]]
         ser.sort(key=lambda x: x["date"])
+        n_raw = 0
+        for x in ser:
+            x["op"] = x["conf"]
+            if raw is not None and (x["date"], tk) in raw:
+                x["conf"] = float(raw[(x["date"], tk)])
+                n_raw += 1
         post = [i for i, x in enumerate(ser) if x["date"] >= WS1_DEPLOY or True]  # full series indexable
         pre_eps = post_eps = post_served = 0
         last_ep = None
         ep_detail = []
+        op_lag = {}
         in_run, run_len = False, 0               # episode coalescing state
         for i, x in enumerate(ser):
             if i < 5 or x["date"] < LIVE_START:
@@ -301,6 +399,18 @@ def ws2_episodes(rows):
                     if c is not None and c < pre:
                         lag = k
                         break
+            # operative-channel lag, same baseline rule, kept for disclosure
+            olag = None
+            opre = ser[i - 5]["op"]
+            if opre is not None:
+                for k in range(0, RESPONSE_SESSIONS + 1):
+                    if i + k >= len(ser):
+                        break
+                    c = ser[i + k]["op"]
+                    if c is not None and c < opre:
+                        olag = k
+                        break
+            op_lag[x["date"]] = olag
             if lag is not None:
                 post_served += 1
                 drop = pre - ser[i + lag]["conf"]
@@ -313,7 +423,9 @@ def ws2_episodes(rows):
                           if last_ep is not None else None)
         out[tk] = dict(episodes=post_eps, served=post_served, pre=pre_eps,
                        last=last_ep, since=sessions_since, detail=ep_detail,
-                       post_sessions=post_sessions, n=len(ser))
+                       post_sessions=post_sessions, n=len(ser),
+                       channel=("RAW" if raw is not None else "OPERATIVE"),
+                       n_raw=n_raw, op_lag=op_lag)
     return out
 
 
@@ -321,6 +433,7 @@ def ws1_blend(rows, blend):
     """WS1/G2 — gate-flip net and confirm/discount arms (post-deploy only)."""
     idx = {(x["date"], x["ticker"]): x for x in rows}
     confirm, discount, flips, net = [], [], [], 0
+    flips_sell, net_sell = [], 0
     adjusted = 0
     for (d, tk), b in blend.items():
         if d < WS1_DEPLOY:
@@ -342,10 +455,20 @@ def ws1_blend(rows, blend):
             good = (row["ret5"] > 0) == (bl >= BUY_GATE)
             net += 1 if good else -1
             flips.append((d, tk, base, bl, row["ret5"], good))
+        # DP-3C-as (RULED 2026-09-25): a SELL crossing ITS OWN gate on the
+        # other channel is a gate-flip too. Kept as a SEPARATE ledger so the
+        # BUY ledger above -- the record since 2026-07-13 -- is not silently
+        # re-based; a SELL flip is "good" when the blend's side of the gate
+        # matched the outcome (price fell <=> blend cleared 65).
+        if b["signal"] == "SELL" and ((base >= SELL_GATE) != (bl >= SELL_GATE)):
+            good = (row["ret5"] < 0) == (bl >= SELL_GATE)
+            net_sell += 1 if good else -1
+            flips_sell.append((d, tk, base, bl, row["ret5"], good))
     nc, ac = _acc(confirm)
     nd, ad = _acc(discount)
     return dict(adjusted=adjusted, n_confirm=nc, acc_confirm=ac,
-                n_discount=nd, acc_discount=ad, flips=flips, net=net)
+                n_discount=nd, acc_discount=ad, flips=flips, net=net,
+                flips_sell=flips_sell, net_sell=net_sell)
 
 
 def near_miss(rows):
@@ -398,6 +521,12 @@ def weekly_bands(rows):
 def collect(tracker, logs):
     rows = load_rows(tracker)
     blend = load_blend(logs) if logs else {}
+    raw = load_raw(logs) if logs else None          # DP-3C-an: G1 scores RAW
+    try:
+        runx = run_basis_crossread(logs) if logs else {}
+    except Exception as e:                           # noqa: BLE001
+        runx = {"error": str(e)}
+    _paths = []
     # What log set did we ACTUALLY read? The WS1 ledger is built entirely from
     # it, so a reader cannot judge that row without this. See signal_logs.
     try:
@@ -417,8 +546,11 @@ def collect(tracker, logs):
     cohort_dates = sorted({x["date"] for x in rows})
     try:
         import episodes
-        k70 = episodes.keep70(rows, cohort_dates)          # DP-3C-y ruled basis
-        arm = episodes.dp3cw_arm(rows, cohort_dates)       # DP-3C-w, blind
+        # DP-3C-ar (2026-09-25): run-fault dropouts bridge, never split.
+        drops = episodes.dropouts_from_logs(
+            _paths, present={(x["ticker"], x["date"]) for x in rows}) if logs else set()
+        k70 = episodes.keep70(rows, cohort_dates, dropouts=drops)     # DP-3C-y ruled basis
+        arm = episodes.dp3cw_arm(rows, cohort_dates, dropouts=drops)  # DP-3C-w, blind
     except Exception as e:                                  # noqa: BLE001
         k70, arm = None, dict(error=str(e))
     return dict(
@@ -427,7 +559,8 @@ def collect(tracker, logs):
         log_info=log_info, log_report=log_report, log_warn=log_warn,
         as_of=max(x["date"] for x in rows), n_rows=len(rows),
         n_cohorts=len({x["date"] for x in rows}),
-        ws1=ws1_blend(rows, blend), ws2=ws2_episodes(rows), nm=near_miss(rows),
+        ws1=ws1_blend(rows, blend), ws2=ws2_episodes(rows, raw), nm=near_miss(rows),
+        runx=runx,
         bands=dict(n59=n59, a59=a59, n69=n69, a69=a69),
         dq=dict(nH=nH, aH=aH, nM=nM, aM=aM),
         weekly=weekly_bands(rows),
@@ -516,7 +649,10 @@ def _dp3cw_row(m):
                    f"{arm['n_resolved']} resolved** of 10 needed; "
                    f"{len(arm['tickers'])} ticker(s) of 4 "
                    f"({', '.join(arm['tickers']) or 'none'}). Discovery sample "
-                   f"(21 rows, 3 names, 4 episodes, ρ = −0.834) is FROZEN and never re-read.")
+                   f"(21 rows, 3 names, 4 episodes, ρ = −0.834) is FROZEN and never re-read."
+                   + (" DP-3C-ar bridged (run-fault dropout, not a split): "
+                      + ", ".join(f"{t} {d}" for t, d in arm["bridged"]) + "."
+                      if arm.get("bridged") else ""))
         if recorded:
             e = recorded[0]
             state = (f"READ {e['date']} (recorded): {e['detail'].get('verdict')}")
@@ -525,6 +661,23 @@ def _dp3cw_row(m):
         else:
             state = "COLLECTING — counts only; ρ is not computed before n = 10"
     return ("**DP-3C-w** confidence inversion (prospective)", reading, bar, state)
+
+
+def _runx_text(m, tk):
+    """DP-3C-an cross-read line: the OTHER basis, reported beside, never scored."""
+    rx = m.get("runx") or {}
+    if "error" in rx:
+        return f"Run-basis cross-read unavailable ({rx['error']})."
+    eps = rx.get(tk, [])
+    if not eps:
+        return ("Run-basis cross-read (DP-3C-an; D2 logs, the damper's series; "
+                "reported, not scored): no episode.")
+    parts = [f"{d} trail {tr:+.2f}% → "
+             + (f"lag {lg}" if lg is not None else
+                ("pending" if pend else f"NO RESPONSE ≤{RESPONSE_SESSIONS}"))
+             for d, tr, lg, pend in eps]
+    return ("**Run-basis cross-read** (DP-3C-an; D2 logs, the damper's series; "
+            "reported, not scored): " + "; ".join(parts) + ".")
 
 
 def question_rows(m):
@@ -538,6 +691,8 @@ def question_rows(m):
         f"gate-flip net **{ws1['net']:+d}** ({len(ws1['flips'])} flip(s)); "
         f"confirm {ws1['acc_confirm']:.0f}% (n={ws1['n_confirm']}) "
         f"vs discount {ws1['acc_discount']:.0f}% (n={ws1['n_discount']}). "
+        f"SELL-gate flips (DP-3C-as, separate ledger from 2026-09-25): "
+        f"{len(ws1.get('flips_sell', []))} resolved, net {ws1.get('net_sell', 0):+d}. "
         # ADDED 2026-09-08. This ledger is built ENTIRELY from the logs — the
         # blend has no tracker column by design — so the log span is not
         # provenance trivia, it is the ledger's denominator. Without it, the
@@ -555,6 +710,11 @@ def question_rows(m):
         "DESCOPED 2026-07-31 — no live bar; reopens on T-G2-a/b/c",
         "DESCOPED (readings are context only; see gate X8)",
     ))
+    def _evidence(tk):
+        return [(d, lg) for d, lg, _p, _n, _dr in ws2[tk].get("detail", [])
+                if (tk, d) not in G1_VACATED
+                and ((tk, d) in G1_SURVIVES or d >= D2_START)]
+    pooled_ev = sum(len(_evidence(t)) for t in TRACERS)
     for tk in TRACERS:
         e = ws2[tk]
         last = e["last"].isoformat() if e["last"] else "none"
@@ -567,14 +727,19 @@ def question_rows(m):
             if d < D2_START:
                 return " [pre-fix: recorded, not evidence]"
             return " [corrected channel]"
+        def _chan(d, lg):
+            # DP-3C-an: an episode whose response differs by channel is marked.
+            ol = e.get("op_lag", {}).get(d, lg)
+            if e.get("channel") != "RAW" or ol == lg:
+                return ""
+            return (f" [CHANNEL-SENSITIVE: operative "
+                    f"{'lag ' + str(ol) if ol is not None else 'no response'}]")
         lags = ", ".join(
-            (f"{d} lag {lg} ({pre}→{now}, −{dr}pt)" if lg is not None
+            (f"{d} lag {lg} ({pre:g}→{now:g}, −{dr:g}pt)" if lg is not None
              else f"{d} NO RESPONSE YET" if dr is None else f"{d} no response")
-            + _g1_tag(d)
+            + _g1_tag(d) + _chan(d, lg)
             for d, lg, pre, now, dr in e.get("detail", []))
-        evidence = [(d, lg) for d, lg, _p, _n, _dr in e.get("detail", [])
-                    if (tk, d) not in G1_VACATED
-                    and ((tk, d) in G1_SURVIVES or d >= D2_START)]
+        evidence = _evidence(tk)
         ev_served = sum(1 for _d, lg in evidence if lg is not None)
         # CHANNEL AND BASIS DISCLOSURE, added 2026-08-21 per the 8/20 review's
         # finding #2. This strip reported ONE response number and never said
@@ -590,6 +755,10 @@ def question_rows(m):
         # The trailing move is likewise THIS tool's basis: `window` TRACKER ROWS
         # off Price at Signal, NOT market sessions off closes, while THETA is
         # imported from risk_engine, which damps on the other basis.
+        # AMENDED 2026-09-25 (DP-3C-an, RULED): the paragraph above is history.
+        # G1 is now scored on the RAW channel (load_raw -> ws2_episodes(raw)),
+        # the operative lag is printed only where it differs, and the TRACKER
+        # basis is RULED as G1's episode basis (not left as a disclosure).
         out.append((
             f"**WS2 / G1** {tk} clock",
             (f"**{e['episodes']} post-deploy episode(s)** in {e['post_sessions']} session(s)"
@@ -597,16 +766,25 @@ def question_rows(m):
              f"{e['pre']} pre-deploy; last episode {last}"
              + (f", {e['since']} session(s) ago" if e["since"] is not None else "")
              + (f". Episodes: {lags}" if lags else "")
-             + ". **Scored on the OPERATIVE channel** (tracker `Conf %` = "
-               "`json.confidence` = `D.op`, post-damping); the model-side channel "
-               "G1 turns on is in `h1_lag_trace_" + tk + "_raw_3B.md`. Trailing "
-               "move is computed over tracker ROWS off `Price at Signal`, not "
-               "market sessions off closes."),
-            f"≥1 episode with response ≤{RESPONSE_SESSIONS} sessions "
-            f"(evidence per DP-3C-aa: corrected channel from {D2_START}, plus "
-            f"WMT 2026-07-23)",
-            (f"{len(evidence)} evidence episode(s), {ev_served} responded — "
-             f"INSUFFICIENT TEST CONDITIONS; bar not lowered"
+             + (f". **Scored on the RAW channel** (DP-3C-an, ruled 2026-09-25: "
+                f"`confidence_raw` from the logs, {e.get('n_raw', 0)} row(s); the "
+                f"operative lag is shown only where it differs). "
+                if e.get("channel") == "RAW" else
+                ". **Scored on the OPERATIVE channel** (logs unavailable — "
+                "DP-3C-an requires RAW; this reading is a fallback). ")
+             + "Episode basis (DP-3C-an): five tracker ROWS off `Price at "
+               "Signal`, ending at the signal row — the move as it stood when "
+               "the model answered; the run's `D[trail]` (closes, prior "
+               "sessions) is the damper's basis, not G1's. "
+             + _runx_text(m, tk)),
+            f"read ONCE at n = {G1_READ_N} evidence episodes pooled across WMT + GM "
+            f"(DP-3C-an); at the read, ≥1 episode with response ≤{RESPONSE_SESSIONS} "
+            f"sessions [R]. Evidence per DP-3C-aa: corrected channel from {D2_START}, "
+            f"plus WMT 2026-07-23",
+            (f"{len(evidence)} evidence episode(s) here, {ev_served} responded; pooled "
+             f"{pooled_ev} of {G1_READ_N} — "
+             + ("INSUFFICIENT TEST CONDITIONS; bar not lowered" if pooled_ev < G1_READ_N
+                else "READ POINT REACHED — the read is taken in a dated review, not here")
              if e["episodes"] else "NO TEST CASES YET"),
         ))
     out.append((
@@ -633,8 +811,15 @@ def question_rows(m):
             f"{k70['episodes']} episodes); row basis {k70['row_rate']:.1f}% "
             f"({k70['row_hit']}/{k70['row_n']}) — descriptive only",
             "≤ 50.0% supports keeping 70 (DP-3C-y: episode basis, opening row)",
-            ("supported" if k70["verdict"] == "SUPPORTED" else
-             "NOT SUPPORTED — recorded; the gate does not move on it"),
+            # DP-3C-au (RULED 2026-09-25): never a state without its margin; a
+            # reading one resolution from flipping is KNIFE-EDGE; and neither
+            # state moves or certifies the gate.
+            (("SUPPORTED" if k70["verdict"] == "SUPPORTED" else "NOT SUPPORTED")
+             + (f" — margin {k70['margin_pt']:+.2f}pt" if k70.get("margin_pt") is not None else "")
+             + (f"; next hit → {k70['after_hit']}, next miss → {k70['after_miss']}"
+                if k70.get("after_hit") else "")
+             + (" — KNIFE-EDGE" if k70.get("knife_edge") else "")
+             + ". Recorded; neither state moves or certifies the gate (DP-3C-y, DP-3C-au)"),
         ))
     else:
         out.append((
@@ -666,6 +851,13 @@ def to_markdown(m):
         for d, tk, base, bl, ret, good in ws1["flips"]:
             L.append(f"| {d} | {tk} | {base} | {bl} | {ret*100:+.2f}% | "
                      f"{'yes' if good else 'no'} |")
+    if ws1.get("flips_sell"):
+        L.append("\n**SELL-gate flips (WS1, DP-3C-as — separate ledger, gate 65):**\n")
+        L.append("| Date | Ticker | Base | Blend | +5d | Blend better? |")
+        L.append("|---|---|---:|---:|---:|---|")
+        for d, tk, base, bl, ret, good in ws1["flips_sell"]:
+            L.append(f"| {d} | {tk} | {base} | {bl} | {ret*100:+.2f}% | "
+                     f"{'yes' if good else 'no'} |")
     L.append("\n*Advisory-only · no orders · not financial advice.*")
     return "\n".join(L)
 
@@ -695,9 +887,11 @@ def _cards(m):
     ev_served = sum(1 for _t, _d, lg in ev if lg is not None)
     h4_ok = (nm["hi_resolved"] >= H4_MIN_N) and (nm["hi_rate"] >= H4_MIN_HIT)
     if eps:
+        # DP-3C-an (2026-09-25): the card states the pooled read point, and is
+        # shorter than before -- the old sub-label ran into the H4 card.
         ws2_val, ws2_sub, ws2_kind = (f"{len(ev)}",
-                                      f"evidence episode(s) · {ev_served} served "
-                                      f"\u2264{RESPONSE_SESSIONS} · {eps} detected",
+                                      f"of {G1_READ_N} to read · {ev_served} served "
+                                      f"\u2264{RESPONSE_SESSIONS} (raw)",
                                       "pos" if ev_served else "neg")
     else:
         nulls = max(ws2[t]["post_sessions"] for t in TRACERS)

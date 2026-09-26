@@ -39,6 +39,20 @@ import sys
 
 import openpyxl
 
+# ---- DAMPING PARAMETERS ARE READ, NEVER RESTATED (added 2026-09-17) ---------
+# THETA and FLOOR come from the damping engine itself. The 2026-08-04 desync
+# (analyze_log's gate thresholds drifting from risk_engine) is the precedent:
+# one field, one source. If risk_engine cannot be imported the reconciliation
+# block below is SKIPPED and says so on the face of the exhibit, rather than
+# falling back to a remembered 5.0 / 35 -- compute rather than recall.
+try:
+    from risk_engine import DampingConfig as _DAMP
+    THETA_PCT = float(_DAMP.THETA)
+    FLOOR_PTS = int(_DAMP.FLOOR)
+    DAMP_SRC = "risk_engine.DampingConfig"
+except Exception:                                   # pragma: no cover
+    THETA_PCT, FLOOR_PTS, DAMP_SRC = None, None, None
+
 SIGNALS_SHEET = "Signals"
 FIRST_DATA_ROW = 5
 LAST_ROW_CAP = 100_000
@@ -279,6 +293,30 @@ def load_raw_conf_map(patterns):
 
 
 # --------------------------------------------------------------------------- #
+def lag_scan_of(confs, trail, maxlag):
+    """[(L, r), ...] for L = 0..maxlag. One definition, used by the headline
+    scan and by every sensitivity re-run, so a sensitivity can never be
+    computed by a second, slightly different estimator."""
+    out = []
+    for L in range(0, maxlag + 1):
+        r = pearson(confs, trail) if L == 0 else pearson(confs[L:], trail[:-L])
+        out.append((L, r))
+    return out
+
+
+def best_of(scan):
+    """argmax over POSITIVE r, plus the runner-up margin. The margin is the
+    point of this function: an argmax reported without the gap to second place
+    is a point estimate presented as though the surface had a peak."""
+    pos = [(L, r) for L, r in scan if r is not None]
+    if not pos:
+        return None, None, None
+    ranked = sorted(pos, key=lambda t: t[1], reverse=True)
+    best_L, best_r = ranked[0]
+    margin = (best_r - ranked[1][1]) if len(ranked) > 1 else None
+    return best_L, best_r, margin
+
+
 def trace(tracker, ticker, window, maxlag, raw_map=None):
     rows = load_series(tracker, ticker)
     if not rows:
@@ -318,6 +356,12 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
         print("  .xlsx), which Excel keeps calculated, or open the report copy in")
         print("  Excel once to refresh, then re-run.")
         print("!" * 78)
+
+    # The OPERATIVE value is kept on every row BEFORE any raw override, so the
+    # two channels can be differenced later. Without this the tool overwrote the
+    # only copy of the post-damping number and the censoring was invisible.
+    for x in rows:
+        x["conf_op"] = x["conf"]
 
     n_raw = 0
     if raw_map is not None:  # {} still prints the 0-override audit line
@@ -368,8 +412,7 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
     # The lag is the L with the most POSITIVE correlation — i.e. how many
     # sessions late confidence catches up to the move. (argmax |r| would be
     # wrong: a NEGATIVE r at L=0 is the lag symptom, not contemporaneity.)
-    pos = [(L, r) for L, r in scan if r is not None]
-    best_L, best_r = (max(pos, key=lambda t: t[1]) if pos else (None, None))
+    best_L, best_r, margin = best_of(scan)
     if best_L is not None:
         print(f"\n   >> Estimated update lag = {best_L} session(s)  "
               f"(peak positive r = {best_r:+.3f})")
@@ -379,6 +422,113 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
             print(f"   (r at L=0 is {scan[0][1]:+.3f} — negative-at-0 flipping "
                   f"positive at L={best_L} is the lag signature: confidence sat "
                   "high through the recent adverse move.)")
+
+    # ---- HOW MUCH OF A PEAK IS THIS? (added 2026-09-17) -------------------
+    # A bare argmax hides two failure modes that this series has BOTH of:
+    #   (a) a knife-edge peak, where the reported lag turns on a margin smaller
+    #       than the noise in r; and
+    #   (b) a FLAT surface, where every L scores within a hair of every other
+    #       and the argmax is arbitrary. GM's operative scan runs +0.420..+0.453
+    #       across L = 0..5; reporting "lag = 1" off that spread is false
+    #       precision, not a measurement.
+    # Reported, not ruled. G1's bar is the episode-response table and does not
+    # move on any of this.
+    rs = [r for _, r in scan if r is not None]
+    spread = (max(rs) - min(rs)) if len(rs) > 1 else None
+    if margin is not None:
+        _sp = "n/a" if spread is None else f"{spread:.3f}"
+        print(f"   peak margin over the runner-up: {margin:+.3f}   "
+              f"surface spread (max-min over L): {_sp}")
+        if spread is not None and spread < 0.10:
+            print("   ** FLAT SURFACE (spread < 0.10) — the argmax is arbitrary "
+                  "at this spread; read the scan, not the point estimate.")
+        elif margin < 0.05:
+            print("   ** KNIFE-EDGE (margin < 0.05) — the reported lag would "
+                  "flip on a change smaller than the estimator's own noise.")
+
+    # ---- FLOOR CENSORING AND THE SENSITIVITY IT DRIVES --------------------
+    # Rows where the operative channel was clamped by the damper carry LESS
+    # information than the model produced, and they are concentrated on exactly
+    # the rows H1 is about (the response to an adverse move). Difference the two
+    # channels, then re-run the SAME estimator without those rows.
+    cens_ix = [i for i, x in enumerate(rows)
+               if x.get("conf_op") is not None and x["conf"] is not None
+               and round(x["conf_op"]) != round(x["conf"])]
+    censored = [rows[i] for i in cens_ix]
+    sens = None
+    if censored:
+        keep = [i for i in range(len(rows)) if i not in set(cens_ix)]
+        s_conf = [rows[i]["conf"] for i in keep]
+        s_trail = [trail[i] for i in keep]
+        s_scan = lag_scan_of(s_conf, s_trail, maxlag)
+        s_L, s_r, _ = best_of(s_scan)
+        o_scan = lag_scan_of([x["conf_op"] for x in rows], trail, maxlag)
+        o_L, o_r, _ = best_of(o_scan)
+        sens = dict(n=len(censored), drop_L=s_L, drop_r=s_r,
+                    op_L=o_L, op_r=o_r, op_scan=o_scan,
+                    dates=[x["date"].isoformat() for x in censored],
+                    deltas=[round(x["conf_op"]) - round(x["conf"]) for x in censored])
+        print(f"\n   FLOOR CENSORING: {len(censored)} row(s) where operative != raw "
+              f"({', '.join(sens['dates'])})")
+        print(f"     lag on this channel        = {best_L}")
+        print(f"     lag on the OTHER channel   = {o_L}"
+              + ("   ** THE TWO CHANNELS DISAGREE" if o_L != best_L else ""))
+        print(f"     lag with those rows DROPPED = {s_L}"
+              + ("   ** the censored rows decide the estimate" if s_L != best_L else ""))
+
+    # ---- DAMPER-BASIS RECONCILIATION --------------------------------------
+    # The exhibit's Trail column and the trail THETA damps on are different
+    # measurements (see the basis footnote). This block makes the CONSEQUENCE
+    # visible instead of leaving it as prose: for every row this basis calls a
+    # material adverse move, did damping actually fire? A row at the floor is
+    # INDETERMINATE and is never counted as agreement.
+    # BOTH DIRECTIONS, not one (extended 2026-09-21). The first version asked
+    # only "this basis calls it material -- did the damper fire?". GM 2026-09-21
+    # is the OTHER error: the damper fired (raw 38 -> op 37) on a run-basis
+    # -5.69%, while this basis reads -3.14% and sees no qualifying move at all.
+    # A one-directional check would have printed an empty table on the session
+    # that produced the project's first GM test case. The 2x2 is the finding.
+    recon = None
+    if THETA_PCT is not None and raw_map is not None:
+        items, extra, fired, missed, indet = [], [], 0, 0, 0
+        for i, x in enumerate(rows):
+            raw_v = None if x["conf"] is None else round(x["conf"])
+            op_v = None if x.get("conf_op") is None else round(x["conf_op"])
+            damped = (raw_v is not None and op_v is not None and raw_v != op_v)
+            qualifies = (trail[i] is not None and trail[i] * 100.0 <= -THETA_PCT)
+            if qualifies:
+                if raw_v is None or op_v is None:
+                    state = "UNREADABLE"
+                elif damped:
+                    state, fired = "DAMPED", fired + 1
+                elif FLOOR_PTS is not None and raw_v <= FLOOR_PTS:
+                    state, indet = f"INDETERMINATE (at FLOOR={FLOOR_PTS})", indet + 1
+                else:
+                    state, missed = "NOT DAMPED", missed + 1
+                items.append((x["date"].isoformat(), trail[i] * 100.0, raw_v, op_v, state))
+            elif damped:
+                extra.append((x["date"].isoformat(),
+                              None if trail[i] is None else trail[i] * 100.0,
+                              raw_v, op_v, "DAMPED, NOT MATERIAL ON THIS BASIS"))
+        if items or extra:
+            recon = dict(items=items, extra=extra, fired=fired, missed=missed,
+                         indet=indet, theta=THETA_PCT, floor=FLOOR_PTS, src=DAMP_SRC)
+            print(f"\n   DAMPER-BASIS RECONCILIATION (THETA={THETA_PCT}% from {DAMP_SRC})")
+            for d, tv, rv, ov, stt in items:
+                print(f"     {d}  trail {tv:+7.2f}%  raw {rv}  op {ov}   {stt}")
+            print(f"     -> {len(items)} qualifying row(s) on THIS basis: "
+                  f"damped {fired}, NOT damped {missed}, indeterminate {indet}")
+            if missed:
+                print("     ** A row this basis calls material and the damper did not "
+                      "touch is the off-by-one window showing up as a DECISION, not "
+                      "just a label. Reported; no threshold moves.")
+            for d, tv, rv, ov, stt in extra:
+                tvs = "   n/a  " if tv is None else f"{tv:+7.2f}%"
+                print(f"     {d}  trail {tvs}  raw {rv}  op {ov}   {stt}")
+            if extra:
+                print(f"     ** {len(extra)} row(s) DAMPED that this basis does not call "
+                      "material -- the mirror error, and the one a qualifying-rows-only "
+                      "table cannot see. Reported; no threshold moves.")
 
     # ---- contemporaneous vs predictive correlations ----
     r_now = pearson(confs, trail)
@@ -458,7 +608,9 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
     return dict(best_L=best_L, r_now=r_now, r_fwd=r_fwd, ok_cal=ok_cal,
                 cache_blank=cache_blank,
                 raw_rows=n_raw, raw_used=(raw_map is not None),
-                rows=rows, trail=trail, arc=arc, agg=agg)
+                rows=rows, trail=trail, arc=arc, agg=agg,
+                scan=scan, margin=margin, spread=spread,
+                sens=sens, recon=recon)
 
 
 def write_md(res, ticker, window, tracker, out_dir, suffix=""):
@@ -536,7 +688,18 @@ def write_md(res, ticker, window, tracker, out_dir, suffix=""):
           "**−10.20% here against +0.78% in the run** — opposite signs, 10.98 "
           "points, on the WS2 tracer. Under the documented contract for that "
           "function, **this column is the closer of the two**; the run's "
-          "figure is the one that is wrong, and THETA damping uses it.", ""]
+          "figure is the one that is wrong, and THETA damping uses it.",
+        "> **AMENDED 2026-09-25 (DP-3C-an).** The paragraph above is true of "
+        "**D1 rows only (before 2026-09-01)**. From D2 (H1-WINDOW, ruled and "
+        "applied 2026-08-31; audited every run by `trail_basis_audit.py`) the "
+        "run's window is the contract window, closes c(D−5)→c(D−1), and the "
+        "third term is gone. On D2 rows the two bases differ by (a) tracker rows "
+        "vs market sessions and (b) this column's right edge is the signal-time "
+        "quote, so it includes the session's opening move, which the run's "
+        "trail ends before. **Neither is wrong on D2.** DP-3C-an rules THIS "
+        "column G1's episode basis (the move as it stood when the model "
+        "answered) and requires the run's basis to be reported beside it; "
+        "THETA still damps on the run's.", ""]
     for i, x in enumerate(rows):
         lines.append(
             f"| {x['date'].isoformat()} | {x['signal']} | "
@@ -546,6 +709,100 @@ def write_md(res, ticker, window, tracker, out_dir, suffix=""):
     if res["arc"]:
         lines += ["", f"**+10d arc:** {' → '.join(f'{v*100:.2f}' for v in res['arc'])} "
                       f"(first {res['arc'][0]*100:+.2f}% → last {res['arc'][-1]*100:+.2f}%)"]
+
+    # ---- LAG SURFACE (added 2026-09-17) -----------------------------------
+    # The exhibit used to carry the argmax alone. The scan was printed to the
+    # console and thrown away, so the ONE number that survived into the durable
+    # record was the one that cannot be audited. Everything below is reporting:
+    # no bar, no gate and no G1 disposition moves on any of it.
+    if res.get("scan"):
+        lines += ["", "## Lag surface — the scan behind the point estimate", "",
+                  "*`r` = corr(confidence[t], trailing move[t−L]). The headline lag is "
+                  "the argmax over L. **An argmax is only a measurement when the "
+                  "surface has a peak**, so the margin to the runner-up and the "
+                  "spread across the whole scan are reported beside it.*", "",
+                  "| L (sessions) | r |", "| --- | --- |"]
+        for L, r in res["scan"]:
+            star = "  ← argmax" if L == res.get("best_L") else ""
+            lines.append(f"| {L} | {_r(r)}{star} |")
+        _m = res.get("margin")
+        _s = res.get("spread")
+        lines += ["",
+                  f"**Peak margin over the runner-up:** {_r(_m)} · "
+                  f"**surface spread (max − min over L):** "
+                  f"{'—' if _s is None else f'{_s:.3f}'}"]
+        if _s is not None and _s < 0.10:
+            lines += ["", "> **FLAT SURFACE — the argmax is arbitrary at this spread.** "
+                          "Every lag in the scan scores within "
+                          f"{_s:.3f} of every other. The headline figure above should "
+                          "be read as *no lag structure is resolvable on this sample*, "
+                          "not as a measured lag of "
+                          f"{res.get('best_L')} session(s). Reported, not ruled."]
+        elif _m is not None and _m < 0.05:
+            lines += ["", "> **KNIFE-EDGE — the reported lag turns on a margin of "
+                          f"{_m:.3f}.** A perturbation smaller than this estimator's own "
+                          "noise flips the headline. Read the surface, not the point."]
+
+    # ---- CHANNEL / CENSORING SENSITIVITY ----------------------------------
+    sens = res.get("sens")
+    if sens:
+        lines += ["", "## Floor censoring — and what the estimate does without it", "",
+                  f"**{sens['n']} row(s) carry a clamped operative value** "
+                  f"({', '.join(sens['dates'])}), i.e. the damper removed "
+                  f"{', '.join(str(d) for d in sens['deltas'])} point(s) from the "
+                  "model's own number. Those rows are not incidental: they are the "
+                  "rows where a multi-session adverse move was in progress, which is "
+                  "precisely the event H1 is about. The same estimator, re-run three "
+                  "ways:", "",
+                  "| Channel / sample | estimated lag |", "| --- | --- |",
+                  f"| this exhibit's channel | {res.get('best_L')} |",
+                  f"| the other channel, same rows | {sens['op_L']} |",
+                  f"| this channel, censored rows dropped | {sens['drop_L']} |"]
+        if sens["op_L"] != res.get("best_L") or sens["drop_L"] != res.get("best_L"):
+            lines += ["", "> **THE HEADLINE LAG IS NOT INVARIANT TO THE CHANNEL.** "
+                          f"{sens['n']} clamped row(s) out of {len(res['rows'])} decide "
+                          "it. The clamp is a risk-engine artefact, not a belief the "
+                          "model expressed, so a lag estimate read off the clamped "
+                          "channel is partly a measurement of `DampingConfig.FLOOR`. "
+                          "**`monitor_strip` scores G1 on the operative channel while "
+                          "naming this raw exhibit as the model-side channel** — that "
+                          "choice is now known to change the answer and is owed a "
+                          "ruling. Nothing here lowers G1's bar."]
+
+    # ---- DAMPER-BASIS RECONCILIATION --------------------------------------
+    recon = res.get("recon")
+    if recon:
+        lines += ["", "## Damper-basis reconciliation", "",
+                  f"*Rows this exhibit's basis calls a material adverse move "
+                  f"(trail ≤ −{recon['theta']}%, THETA read from `{recon['src']}`), "
+                  f"against whether damping actually fired. A row already at "
+                  f"FLOOR={recon['floor']} is **indeterminate** and is never scored as "
+                  f"agreement.*", "",
+                  "| Date | Trail | raw | op | damper |",
+                  "| --- | --- | --- | --- | --- |"]
+        for d, tv, rv, ov, stt in recon["items"]:
+            lines.append(f"| {d} | {tv:+.2f}% | {rv} | {ov} | {stt} |")
+        lines += ["",
+                  f"**{len(recon['items'])} qualifying row(s): damped {recon['fired']}, "
+                  f"NOT damped {recon['missed']}, indeterminate {recon['indet']}.**"]
+        if recon.get("extra"):
+            lines += ["", "**The mirror case — damped where this basis sees no "
+                          "qualifying move:**", "",
+                      "| Date | Trail | raw | op |", "| --- | --- | --- | --- |"]
+            for d, tv, rv, ov, _stt in recon["extra"]:
+                lines.append(f"| {d} | {'—' if tv is None else f'{tv:+.2f}%'} "
+                             f"| {rv} | {ov} |")
+            lines += ["", "> **The damper acted on a move this column does not see.** "
+                          "A table built only from qualifying rows would be empty on "
+                          "exactly these sessions, which is why both directions are "
+                          "counted. Reported; no threshold, gate or n moves."]
+        if recon["missed"]:
+            lines += ["", "> **The two bases disagreed on a DECISION, not a label.** "
+                          "Sessions this basis calls material on which the damper did "
+                          "nothing. On D1 rows (before 2026-09-01) this is the "
+                          "off-by-one window; on D2 rows it is the signal-time vs "
+                          "prior-close difference (amended 2026-09-25, DP-3C-an). "
+                          "Reported. No threshold, gate or n moves here."]
     lines += ["", "## Calibration guardrail — RETIRED (historical context only)",
               "*Q1-R closed 2026-07-13: the band inversion was a go-live calibration "
               "improvement, not a guardrail failure. The guardrail and T2 are retired; "
