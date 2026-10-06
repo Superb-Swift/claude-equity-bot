@@ -15,6 +15,9 @@ finnhub-python
 python-dotenv
 flask
 cryptography
+# zoneinfo has no database on Windows, and the 16:15 ET / 15:15 CT settlement
+# guard fails closed without one (first hit 2026-09-17)
+tzdata
 # Analysis tooling and the daily runners
 openpyxl>=3.1
 matplotlib       # h1_lag_trace chart, monitor_strip cards

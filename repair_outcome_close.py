@@ -170,9 +170,17 @@ def market_settled(on_date):
     in-progress print into a column labelled 'close' would reproduce that by
     machine, faster and with more authority.
 
+    THE RULE'S CLOCK IS ET, THE OPERATOR'S IS CT, so every time this
+    function reports is stamped in both. US Central is always exactly one
+    hour behind US Eastern - the two zones change on the same dates - so
+    16:15 ET is 15:15 CT in summer and in winter alike. Read the CT figure;
+    the ET one is what the rule is written against.
+
     Degrades safely: if the zone database is unavailable (a bare Windows
     python with no tzdata), settlement cannot be established and the answer
-    is False, which routes the caller to --force.
+    is False, which routes the caller to --force. `tzdata` is declared in
+    requirements.txt for exactly this reason; 2026-09-17 was the first run
+    to hit it.
     """
     today = datetime.date.today()
     if on_date < today:
@@ -184,11 +192,16 @@ def market_settled(on_date):
         now_et = datetime.datetime.now(ZoneInfo("America/New_York"))
     except Exception:                                          # noqa: BLE001
         return False, ("today's session - settlement UNVERIFIABLE (no zone "
-                       "database available to check the ET clock)")
+                       "database available to check the ET clock; fix with "
+                       "'pip install tzdata')")
+    stamp = "%s ET / %s CT" % (
+        now_et.strftime("%H:%M"),
+        (now_et - datetime.timedelta(hours=1)).strftime("%H:%M"))
     if (now_et.hour, now_et.minute) >= (16, 15):
-        return True, "today's session, settled at %s ET" % now_et.strftime("%H:%M")
-    return False, ("today's session, NOT settled - it is %s ET and the regular "
-                   "session ends 16:00" % now_et.strftime("%H:%M"))
+        return True, "today's session, settled at %s" % stamp
+    return False, ("today's session, NOT settled - it is %s; the regular "
+                   "session ends 16:00 ET / 15:00 CT and closes are entered "
+                   "from 16:15 ET / 15:15 CT" % stamp)
 
 
 def fetch_daily_closes(ticker, quiet=False):
