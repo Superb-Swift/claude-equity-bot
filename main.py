@@ -128,19 +128,18 @@ WATCHLIST_SCOUT = [
     "CORN",
     "BBWI",
     "TWST",
+    "EFA",
     # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
     # GM   — added 2026-08-18 to PREVENT AN E4 SUPPLY SHORTFALL.
     # NTR  — added 2026-08-25 to PREVENT AN E4 SUPPLY SHORTFALL.
     # USO  — added 2026-08-25 to PREVENT AN E4 SUPPLY SHORTFALL.
     # BBWI — added 2026-09-09, one-off candidate, outside the E4 population.
-    # TWST — added 2026-09-21 (this file, +13 bytes, 12:54 CDT, AFTER that
-    #        day's AM run, so first in the 2026-09-22 cohort). REASON NOT
-    #        RECORDED at the time; not surfaced by ticker_suggester (absent from
-    #        logs/suggestions_history.txt). Attribution added 2026-09-25 from
-    #        the file's own mtime and the 09-22 membership FAIL -- the operator
-    #        should replace "REASON NOT RECORDED" with the reason. Outside the
-    #        E4 population by construction (SPCX/USO precedent, third instance);
-    #        covered arm (E tag, confirmed 2026-09-22).
+    # TWST — added 2026-09-21 Barchart's chart of the day callout
+    # EFA  - added 2026-09-30 suggested by the equity bot.
+    #   Why: Headlines highlight international ETFs beating the S&P 500 by 20%+
+    #   in 2026, signaling a sustained rotation into non-US developed markets;
+    #   EFA provides broad, liquid exposure to Europe, Australasia, and the Far East with $60B+ in AUM.
+    #   Related to: Headlines: International ETFs outperforming S&P 500 in 2026
     # USO  — LEFT THE HELD SET between the 2026-09-22 and 2026-09-23 runs
     #        (held 17 -> 16) and stays in the cohort through this entry, so the
     #        cohort did not change. RECORDED CONSEQUENCE (the CORN caveat

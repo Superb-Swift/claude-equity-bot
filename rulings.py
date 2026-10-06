@@ -52,6 +52,12 @@ WHAT THIS MODULE IS, AND IS NOT
     (ruled under the operator's delegation of 2026-09-25). DP-3C-am's D9
     list gains MSFT; D9 stays an OWED operator check.
 
+2026-09-30 UPDATE
+    Transcribed DP-3C-ax (ruled by Rob, 2026-09-30) from
+    claude/Phase3C_AbsenceGap_PreRegistration_2026-09-30.md §5.3: G1's
+    trailing window is five NYSE sessions, not five tracker rows. Registry
+    only -- the tools that measure the window change after 2026-10-06.
+
 ADDING A RULING
     Transcribe it from the `claude/` ruling document. `doc` is mandatory and is
     the audit trail: a status here with no document behind it is exactly the
@@ -459,6 +465,22 @@ RULINGS = {
         doc="claude/Phase3C_Rulings_2026-09-25.md",
         bar=("adopt only if the before/after table (every D2 row; WMT 2026-07-23..08-26 "
              "window shown separately) is presented at the exit review and ruled on"),
+    ),
+    "DP-3C-ax": dict(
+        dp="DP-3C-ax",
+        question="G1 trailing windows across missing sessions (bot-absent days, run-fault dropouts)",
+        status="RULED (Rob) — G1 window = 5 NYSE sessions; no row at the base = NOT EVALUABLE",
+        open=False, ruled_on=dt.date(2026, 9, 30), effective=dt.date(2026, 9, 30),
+        doc="claude/Phase3C_AbsenceGap_PreRegistration_2026-09-30.md",
+        bar="unchanged: read at n = 4 pooled evidence episodes; >= 1 responding <= 2 sessions",
+        note=("Amends DP-3C-an's window from 5 tracker rows to 5 NYSE sessions "
+              "(trading_calendar); channel (RAW), basis (Price at Signal) and read "
+              "point unchanged. Record-neutral when ruled: all 4 post-deploy "
+              "episodes unchanged. Ruled before the 2026-10-01 / 10-05 bot-absent "
+              "sessions and before any affected row existed. Code "
+              "(monitor_strip.ws2_episodes, h1_lag_trace trailing series) changes "
+              "after 2026-10-06; until then tracer rows 2026-10-02..10-12 are "
+              "re-checked by hand before any G1 count."),
     ),
 }
 

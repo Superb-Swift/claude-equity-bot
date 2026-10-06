@@ -53,6 +53,20 @@ DISCIPLINE
     A date in here is a planned, dated absence -- never a way to hide a missed
     run after the fact. Adding an entry retroactively is an amendment.
 
+SECOND GAP (added 2026-09-30, BEFORE it): 2026-10-01 (Thu) and 2026-10-05 (Mon)
+are NYSE sessions on which the operator is travelling and the bot will not run.
+Pre-registered in `Phase3C_AbsenceGap_PreRegistration_2026-09-30.md`. Unlike
+August's, this gap is two SEPARATE single sessions with a run (2026-10-02) in
+between, so the cohort list steps 09-30 -> 10-02 -> 10-06. No horizon moves:
+every resolution date is computed here, not from the cohort list.
+
+AMENDMENT (2026-10-06, AFTER the fact): 2026-10-02 was planned as a run and
+was NOT run. It is added below, declared as an amendment, because without it
+the master's cohort list (09-30 -> 10-06) fails reconciliation with a [CAL]
+finding on 10-02 every day from now on. Recorded in
+`Phase3C_GapAmendment_ReturnRunbook_2026-10-06.md`. The realised gap is three
+sessions (10-01, 10-02, 10-05); the cohort list steps 09-30 -> 10-06.
+
 Advisory-only - no orders - not financial advice.
 """
 
@@ -77,6 +91,17 @@ BOT_ABSENT = {
                             "Phase3C_VacationGap_PreRegistration_2026-08-26.md"),
     _dt.date(2026, 8, 31): ("operator away -- no run",
                             "Phase3C_VacationGap_PreRegistration_2026-08-26.md"),
+    # Added 2026-09-30, BEFORE the sessions (operator travelling; the bot runs
+    # on 2026-10-02 in between). Not an amendment: nothing here was missed.
+    _dt.date(2026, 10, 1): ("operator travelling -- no run",
+                            "Phase3C_AbsenceGap_PreRegistration_2026-09-30.md"),
+    _dt.date(2026, 10, 5): ("operator travelling -- no run",
+                            "Phase3C_AbsenceGap_PreRegistration_2026-09-30.md"),
+    # AMENDMENT, added 2026-10-06 AFTER the session: 10-02 was planned as a run
+    # (pre-registration §1) and was missed. Declared, not hidden.
+    _dt.date(2026, 10, 2): ("AMENDMENT 2026-10-06 -- planned run missed (operator travelling); "
+                            "recorded after the fact",
+                            "Phase3C_GapAmendment_ReturnRunbook_2026-10-06.md"),
 }
 
 
@@ -266,6 +291,48 @@ def selftest(tracker: str | None = None) -> int:
     ok &= _check("+20d from 2026-08-26 (crosses Labor Day)", shift_sessions(D(2026, 8, 26), 20), D(2026, 9, 24))
     ok &= _check("round trip +10/-10", shift_sessions(shift_sessions(D(2026, 8, 26), 10), -10), D(2026, 8, 26))
     ok &= _check("Labor Day 2026-09-07 is NOT a session", is_trading_day(D(2026, 9, 7)), False)
+
+    # The SECOND pre-registered gap (2026-09-30): two single sessions with a
+    # run between them. Resolution dates land IN the gap and must not move.
+    ok &= _check("2026-10-01 IS a session (bot absent, market open)", is_trading_day(D(2026, 10, 1)), True)
+    ok &= _check("2026-10-05 IS a session (bot absent, market open)", is_trading_day(D(2026, 10, 5)), True)
+    ok &= _check("+5d from 2026-09-24 (TWST SELL open row) lands IN the gap",
+                 shift_sessions(D(2026, 9, 24), 5), D(2026, 10, 1))
+    ok &= _check("+5d from 2026-09-28 lands IN the gap", shift_sessions(D(2026, 9, 28), 5), D(2026, 10, 5))
+    ok &= _check("+5d from 2026-10-02 crosses 10-05 = 2026-10-09", shift_sessions(D(2026, 10, 2), 5), D(2026, 10, 9))
+    ok &= _check("+20d from 2026-09-14 = 2026-10-12 (signal_state prune date)",
+                 shift_sessions(D(2026, 9, 14), 20), D(2026, 10, 12))
+    # Reconciliation across the gap, with its FAILING case: the same cohort
+    # list minus a pre-registration must surface the sessions as missing.
+    _cds = [D(2026, 9, 29), D(2026, 9, 30), D(2026, 10, 2), D(2026, 10, 6)]
+    _rec = reconcile_against_cohorts(_cds)
+    ok &= _check("gap cohorts 09-30 -> 10-02 -> 10-06: nothing unexplained", _rec["missing"], [])
+    ok &= _check("...and both sessions named as pre-registered",
+                 _rec["absent_expected"], [D(2026, 10, 1), D(2026, 10, 5)])
+    _saved = {d: BOT_ABSENT.pop(d) for d in (D(2026, 10, 1), D(2026, 10, 5))}
+    try:
+        _neg = reconcile_against_cohorts(_cds)
+    finally:
+        BOT_ABSENT.update(_saved)
+    ok &= _check("NEGATIVE: without the entries both are MISSED RUNS",
+                 _neg["missing"], [D(2026, 10, 1), D(2026, 10, 5)])
+
+    # AMENDMENT 2026-10-06: the realised gap. 10-02 was not run, so the cohort
+    # list steps 09-30 -> 10-06 across three sessions. With its FAILING case.
+    _real = [D(2026, 9, 29), D(2026, 9, 30), D(2026, 10, 6)]
+    _rec2 = reconcile_against_cohorts(_real)
+    ok &= _check("realised gap 09-30 -> 10-06: nothing unexplained", _rec2["missing"], [])
+    ok &= _check("...all three sessions named",
+                 _rec2["absent_expected"], [D(2026, 10, 1), D(2026, 10, 2), D(2026, 10, 5)])
+    ok &= _check("...and 10-02 is marked as an AMENDMENT",
+                 BOT_ABSENT[D(2026, 10, 2)][0].startswith("AMENDMENT"), True)
+    _amend = BOT_ABSENT.pop(D(2026, 10, 2))
+    try:
+        _neg2 = reconcile_against_cohorts(_real)
+    finally:
+        BOT_ABSENT[D(2026, 10, 2)] = _amend
+    ok &= _check("NEGATIVE: without the amendment 10-02 is a MISSED RUN",
+                 _neg2["missing"], [D(2026, 10, 2)])
 
     # The historical horizon mappings the record already relies on.
     ok &= _check("+5d from 2026-08-19 = 2026-08-26", shift_sessions(D(2026, 8, 19), 5), D(2026, 8, 26))
