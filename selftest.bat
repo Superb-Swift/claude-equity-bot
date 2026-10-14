@@ -24,7 +24,7 @@ if errorlevel 1 (
 set "RC=0"
 REM Offline selftests. value_anchor, xbrl_sweep and edgar_client run on fixtures
 REM (no network), added 2026-09-17 per repo remediation R8b.
-for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client) do (
+for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card) do (
     python %%T.py --selftest >nul 2>&1
     if errorlevel 1 (
         echo   [FAIL] %%T --selftest   detail: python %%T.py --selftest

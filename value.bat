@@ -19,10 +19,27 @@ REM    value_anchor.py   -> master + edgar_cache + today's signals log
 REM    implied_return.py -> all of the above INCLUDING quote_dump.json, so it is
 REM                         LAST. It imports value_anchor for the accession-to-
 REM                         ticker join, so value_anchor.py must sit beside it.
+REM    value_card.py     -> ADDED 2026-10-14. Reads implied_return's dated
+REM                         exhibit (and the earlier ones), today's log,
+REM                         quote_dump.json and the master's BUY rows (date,
+REM                         ticker, confidence only). It is now the LAST step.
+REM                         Counterfactual only: no gate, no outcome, no prompt.
+REM    step 5b           -> ADDED 2026-10-14. Embeds the card as the 'Value Card'
+REM                         sheet in tracker_with_registry.xlsx. So value.bat now
+REM                         runs AFTER run_daily_review.bat (which rebuilds that
+REM                         copy) and BEFORE the Excel cache refresh (workflow
+REM                         step 6), because an openpyxl save drops Excel's
+REM                         cached formula results.
 REM
-REM  NOTHING HERE WRITES TO ANY WORKBOOK. Nothing touches the prompt,
+REM  NOTHING HERE WRITES TO THE MASTER. Nothing touches the prompt,
 REM  edgar_client.py, any E4 endpoint, KEEP-70, H4 or the +/-3%% band. The only
-REM  files written are quote_dump.json and the dated .md exhibits.
+REM  files written are quote_dump.json and the dated .md exhibits (plus, from
+REM  2026-10-14, value_card_<date>.json beside value_card_<date>.md).
+REM  AMENDED 2026-10-14: until today this line read "NOTHING HERE WRITES TO ANY
+REM  WORKBOOK". Step 5b now writes ONE sheet, 'Value Card', into the GENERATED
+REM  report copy only. It refuses while Excel has the copy open (or its ~$ owner
+REM  file exists), refuses the master, refuses a copy the review has not
+REM  rebuilt for today, and swaps the file in atomically.
 REM
 REM  NOT IN THIS PASS: fundamental_probe.py. It is a one-off diagnostic for the
 REM  open peRatio-semantics question, not a daily step. Run it by hand.
@@ -199,13 +216,72 @@ if errorlevel 1 (
     echo         its exit code -- see 2026-08-19.
     set "FAIL2=1"
 )
-goto summary
+goto step5
 
 :skip4
 echo ### 4. implied return - SKIPPED
 echo   A prerequisite step could not run. implied_return needs a valid
 echo   quote_dump.json plus the same master and cache; running it now would
 echo   report against inputs that were never verified.
+
+REM ---------------------------------------------------------------------------
+REM  Step 5 - value card. ADDED 2026-10-14 (claude/ValuePass_WhatItMeasures_
+REM  2026-10-14.md). Builds on step 4's exhibit, so it runs only when every
+REM  earlier step produced its evidence. FAIL2 is read here at TOP LEVEL.
+REM  It prints: coverage; what changed since the previous exhibit (filings,
+REM  class crossings split into price and filing parts, robustness); the
+REM  decision card; the six-way robustness of every class; DP-V2's
+REM  counterfactual flip ledger (COUNTS ONLY); book-free reads; and a check
+REM  that the class still reconstructs as a trailing-FY P/E.
+REM ---------------------------------------------------------------------------
+:step5
+echo.
+if "%FAIL2%"=="1" goto skip5
+
+echo ### 5. value card - decisions, changes, robustness, DP-V2 counterfactual ledger
+python value_card.py --date %RUNDATE% --tracker "%MASTER%" --log "%LOGFILE%" --quotes quote_dump.json --md "value_card_%RUNDATE%.md" --json "value_card_%RUNDATE%.json"
+if errorlevel 2 (
+    echo   NOTE: value_card could not run.
+    set "FAIL2=1"
+) else if errorlevel 1 (
+    set "FIND1=1"
+)
+python -c "import os,sys;p=sys.argv[1];sys.exit(0 if os.path.exists(p) and os.path.getmtime(p)>=float(sys.argv[2]) else 1)" "value_card_%RUNDATE%.md" "%T0%"
+if errorlevel 1 (
+    echo   NOTE: value_card wrote NO EXHIBIT this run ^(absent, or left over
+    echo         from an earlier run^). Treating as could-not-run regardless of
+    echo         its exit code -- see 2026-08-19.
+    set "FAIL2=1"
+)
+
+REM ---------------------------------------------------------------------------
+REM  Step 5b - embed the card into the report copy. ADDED 2026-10-14.
+REM  Today's run only: a re-run for an earlier date has no report copy to match.
+REM  Read at TOP LEVEL, like every other flag here.
+REM ---------------------------------------------------------------------------
+echo.
+if "%FAIL2%"=="1" goto summary
+for /f %%d in ('python -c "import datetime;print(datetime.date.today().isoformat())"') do set "TODAYD=%%d"
+if not "%RUNDATE%"=="%TODAYD%" goto skip5b
+
+echo ### 5b. value card - embed the 'Value Card' sheet into tracker_with_registry.xlsx
+python value_card.py --embed-from "value_card_%RUNDATE%.json" --embed-into tracker_with_registry.xlsx --tracker "%MASTER%"
+if errorlevel 1 (
+    echo   NOTE: the Value Card sheet was NOT embedded ^(reason above^). The exhibit
+    echo         value_card_%RUNDATE%.md is unaffected. Close Excel, then re-run
+    echo         value.bat, or only: python value_card.py --embed-from value_card_%RUNDATE%.json --embed-into tracker_with_registry.xlsx
+    set "FAIL2=1"
+)
+goto summary
+
+:skip5b
+echo ### 5b. value card embed - SKIPPED: %RUNDATE% is not today, and the report
+echo   copy only ever holds today's review.
+goto summary
+
+:skip5
+echo ### 5. value card - SKIPPED
+echo   It is built on implied_return's exhibit, and an earlier step could not run.
 
 :summary
 set "RC=0"
@@ -231,7 +307,7 @@ REM  The old banner listed all three names unconditionally, including on
 REM  2026-08-19 when value_anchor_2026-08-19.md did not exist. A closing summary
 REM  that names a file it never checked for is the same defect this script now
 REM  guards against, printed one line lower down.
-python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md"
+python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md" "value_card_%RUNDATE%.md"
 echo.
 echo No valuation is asserted and no price target is implied by any step.
 echo Advisory-only - no orders - not financial advice.

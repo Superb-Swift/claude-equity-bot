@@ -89,3 +89,6 @@ undo_cleanup_*.bat
 *_backup_*.xlsx
 # E4 exit counter exhibit, rewritten by run_daily_review.bat (2026-10-14)
 e4_counter.md
+# Value card exhibit and snapshot, rewritten by value.bat step 5 (2026-10-14)
+value_card_*.md
+value_card_*.json
