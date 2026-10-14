@@ -87,3 +87,5 @@ cleanup_docs_manifest_*.txt
 undo_cleanup_*.bat
 # Master backups written by enter_closes / repair_outcome_close
 *_backup_*.xlsx
+# E4 exit counter exhibit, rewritten by run_daily_review.bat (2026-10-14)
+e4_counter.md
