@@ -58,6 +58,15 @@ WHAT THIS MODULE IS, AND IS NOT
     trailing window is five NYSE sessions, not five tracker rows. Registry
     only -- the tools that measure the window change after 2026-10-06.
 
+2026-10-12 UPDATE
+    Transcribed DP-3C-ay (ruled by Rob, 2026-10-09) from
+    claude/Phase3C_Ruling_DP-3C-ay_2026-10-09.md: Phase 3-C stays open until
+    E4-3 reaches 20 events on its pre-registered definition (backstop
+    2026-11-20), and every E4 endpoint is read once at the exit. The note
+    carries the same-day count correction (10 of 20, from e4_counter.py).
+    Registry only -- no tool's behaviour changes; e4_counter.py reads no
+    ruling from here.
+
 ADDING A RULING
     Transcribe it from the `claude/` ruling document. `doc` is mandatory and is
     the audit trail: a status here with no document behind it is exactly the
@@ -481,6 +490,23 @@ RULINGS = {
               "(monitor_strip.ws2_episodes, h1_lag_trace trailing series) changes "
               "after 2026-10-06; until then tracer rows 2026-10-02..10-12 are "
               "re-checked by hand before any G1 count."),
+    ),
+    "DP-3C-ay": dict(
+        dp="DP-3C-ay",
+        question="Phase 3-C exit timing: read E4-3 INSUFFICIENT now, or hold the exit for it",
+        status="RULED (Rob) - Phase 3-C stays open until E4-3 reaches 20 events; all E4 endpoints read once at the exit",
+        open=False, ruled_on=dt.date(2026, 10, 9), effective=dt.date(2026, 10, 9),
+        doc="claude/Phase3C_Ruling_DP-3C-ay_2026-10-09.md",
+        bar=("E4-3: 20 events on its pre-registered definition, backstop 2026-11-20 (then INSUFFICIENT); "
+             "E4-2 read on every ADJACENT row resolved by the exit date; DP-3C-ai freeze runs to the exit"),
+        note=("Ruled with E4-2 at 160/150 by count and E4-3 at >= 12 events (lower bound), "
+              "no endpoint rate computed. Sub-items (i) backstop 2026-11-20 and (ii) E4-2 "
+              "read on all rows resolved by the exit date proposed and confirmed by Rob "
+              "the same day, before any arm rate existed. "
+              # extended 2026-10-09 (later): count correction, recorded rather than rewritten
+              "Count corrected the same day by e4_counter.py: E4-3 10 of 20 on the "
+              "pre-registered definition (the >= 12 included GLD, tier T-B, and NKE 10-01, "
+              "unobservable); expected exit ~2026-11-13..18; the backstop may bind."),
     ),
 }
 

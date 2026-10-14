@@ -45,6 +45,16 @@ REM   tracker_with_registry.xlsx land in the project root (override with
 REM   --out-dir on any single tool). A tool erroring prints and continues; the
 REM   others still run.
 REM
+REM AMENDED 2026-10-09: two additions, neither touching what the model sees.
+REM   * e4_counter.py - the Phase 3-C exit criteria COUNTED on their
+REM     pre-registered definitions (E4-2 resolved ADJACENT rows, E4-3
+REM     observable 8-K events, the clock). Counts only; never a read
+REM     (DP-3C-ay). E4-2 crossed 150 on 2026-10-01 and nothing said so.
+REM   * review_artifacts.py - checks that THIS run wrote every exhibit and
+REM     sheet, prints WRITTEN / STALE / ABSENT, and sets the exit code.
+REM     Same lesson as value.bat's 2026-08-19 guard: an exit code is a
+REM     claim; the artifact is the evidence. Exit 0 = complete, 1 = not.
+REM
 REM ORDERING CONSTRAINT (do not reorder the last two blocks):
 REM   build_near_miss_registry.py --emit-master-copy REBUILDS
 REM   tracker_with_registry.xlsx from the master. Any sheet embedded before
@@ -67,6 +77,9 @@ if errorlevel 1 (
     echo ERROR: Could not activate venv.
     exit /b 1
 )
+
+REM Run start time, for review_artifacts.py (added 2026-10-09).
+for /f %%t in ('python -c "import time;print(int(time.time()))"') do set "T0=%%t"
 
 REM ---- Ensure openpyxl + matplotlib + Pillow are present. openpyxl: registry ----
 REM ---- + both embeds. matplotlib: the trace chart and the strip cards.       ----
@@ -140,6 +153,18 @@ python discovery_scan.py --tracker "%TRACKER%" --progress
 python shadow_damper.py --tracker "%TRACKER%" --progress
 
 echo.
+echo ========== E4 exit counter - counts only (DP-3C-ay) ==========
+REM ADDED 2026-10-09. E4-2 resolved ADJACENT rows, E4-3 observable 8-K events
+REM and the clock, on their pre-registered definitions. Reads no return,
+REM breach or confidence value. Check: python e4_counter.py --reproduce-0902
+python e4_counter.py --tracker "%TRACKER%" --md e4_counter.md
+
+echo.
+echo ============= Review artifacts - written by THIS run? =============
+python review_artifacts.py --t0 %T0%
+set "RC=%ERRORLEVEL%"
+
+echo.
 echo ============================================================
 echo   Daily review complete. Read the questions on the 'Monitor Strip'
 echo   tab or in monitor_strip.md. STANDING, read from rulings.py - the
@@ -152,4 +177,4 @@ echo   to be checked for drama. Prospective arms (DP-3C-w, PR-1..PR-3)
 echo   print counts only until their read date: python discovery_scan.py --progress
 echo   Advisory-only - no orders - not financial advice (DP-T1).
 echo ============================================================
-endlocal
+endlocal & exit /b %RC%
