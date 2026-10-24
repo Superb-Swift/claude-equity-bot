@@ -39,6 +39,13 @@ WHAT IT DOES
     * --tickers reads names the bot does not run, into ttm_eps_<date>_adhoc.*,
       so the value card's same-date input is never overwritten.
 
+    AMENDED 2026-10-24 (DOW): the reading rules moved to sec_facts.py, shared
+    with sec_data_audit.py. A quarter missing inside a year is now derived from
+    year-to-date facts (DOW's Q2 2026 = 9M - Q1 - Q3), and a 10-Q whose facts
+    SEC filed under a co-registrant's CIK is recovered on its own accession.
+    Every derived or recovered quarter, and any fallback tag, is flagged. DOW's
+    TTM EPS as of 2026-06-30 rebuilds to -1.82, Morningstar's published figure.
+
     REPORTING ONLY. The value card's class still reads its own ROE basis; this
     exhibit sits beside it. Wiring TTM into the class is a separate change and
     would need its own ruling (it moves DP-V2's counterfactual ledger).
@@ -63,7 +70,10 @@ import os
 import re
 import sys
 
-CACHE_DIR = "valuation_cache"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sec_facts as SF                                   # noqa: E402
+
+CACHE_DIR = SF.CACHE_DIR
 EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted",
             "EarningsPerShareBasic")
 NI_TAGS = ("NetIncomeLoss", "ProfitLoss")
@@ -74,9 +84,9 @@ _LOGDATE = re.compile(r"signals_(\d{4}-\d{2}-\d{2})\.log$")
 # A 10-Q is due 40-45 days after its quarter ends, so a TTM whose last quarter
 # ended more than 90 + 45 days ago has missed at least one filing.
 STALE_DAYS = 135
-# 2: the slim cache records the filer's taxonomies (2026-10-23). A cache file
-# without this version is re-fetched once.
-SLIM_VERSION = 2
+# The slim cache's version lives in sec_facts (3 since 2026-10-24: every
+# audited metric, the periodic-filing list, co-registrant recoveries).
+SLIM_VERSION = SF.SLIM_VERSION
 # An equity figure older than this is not read at all (PAA's tag ends 2017).
 EQUITY_MAX_AGE_DAYS = 400
 
@@ -85,71 +95,23 @@ def _d(s):
     return dt.date.fromisoformat(s)
 
 
+# AMENDED 2026-10-24: the reading rules now live in sec_facts.py, shared with
+# sec_data_audit.py, so the two can never disagree. These names stay as thin
+# wrappers so callers and the selftest below keep working.
 def _facts(cf, tags, unit_hint):
-    """(tag, [facts]) for the candidate tag whose LATEST fact is the most
-    recent; a tie goes to the earlier tag in `tags` (the preference order).
-
-    AMENDED 2026-10-23: this took the FIRST tag that carried any data. A filer
-    that switches tags (SNOW's equity, after 2026-01-31) then reads stale."""
-    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
-    best = None
-    for i, t in enumerate(tags):
-        units = gaap.get(t, {}).get("units", {})
-        for u, rows in units.items():
-            if unit_hint in u and rows:
-                key = (max((r.get("end", "") for r in rows), default=""), -i)
-                if best is None or key > best[0]:
-                    best = (key, t, rows)
-    return (best[1], best[2]) if best else (None, [])
+    """(tag, rows) for the freshest candidate tag; the unit is matched exactly."""
+    return SF.rows_for(cf, tags, unit_hint)
 
 
-def _durations(rows):
-    """{(start, end): (val, filed)} keeping the latest-filed value."""
-    out = {}
-    for r in rows:
-        if "start" not in r or "end" not in r or r.get("val") is None:
-            continue
-        k = (_d(r["start"]), _d(r["end"]))
-        filed = r.get("filed", "")
-        if k not in out or filed > out[k][1]:
-            out[k] = (float(r["val"]), filed)
-    return out
-
-
-def ttm(rows):
-    """TTM sum from duration facts. Returns (value, detail, last_quarter_end);
-    (None, why, None) when four consecutive quarters are not there."""
-    dur = _durations(rows)
-    q = {k: v[0] for k, v in dur.items() if 80 <= (k[1] - k[0]).days <= 100}
-    fy = {k: v[0] for k, v in dur.items() if 350 <= (k[1] - k[0]).days <= 380}
-    # derive a missing fiscal Q4 = FY - (the three quarters inside it)
-    for (s, e), v in fy.items():
-        inside = sorted((k for k in q if k[0] >= s and k[1] <= e), key=lambda k: k[1])
-        if len(inside) == 3 and not any(abs((k[1] - e).days) <= 7 for k in inside):
-            q[(inside[-1][1] + dt.timedelta(days=1), e)] = v - sum(q[k] for k in inside)
-    if not q:
-        return None, "no quarterly facts", None
-    ends = sorted(q, key=lambda k: k[1])
-    last = ends[-1]
-    chain = [last]
-    for _ in range(3):
-        prev_end = chain[-1][0] - dt.timedelta(days=1)
-        cand = [k for k in ends if abs((k[1] - prev_end).days) <= 10]
-        if not cand:
-            return None, "gap before the quarter ending %s" % chain[-1][1], None
-        chain.append(max(cand, key=lambda k: k[1]))
-    return sum(q[k] for k in chain), "quarters ending %s" % ", ".join(
-        str(k[1]) for k in reversed(chain)), last[1]
+def ttm(rows, as_of=None):
+    """(value, detail, last_quarter_end), or (None, why, None). Quarters missing
+    inside a year are derived from year-to-date facts and labelled (sec_facts)."""
+    t = SF.ttm(rows, as_of)
+    return t["value"], t["detail"], t["end"]
 
 
 def latest_instant(rows):
-    best = None
-    for r in rows:
-        if "end" in r and "start" not in r and r.get("val") is not None:
-            k = (r["end"], r.get("filed", ""))
-            if best is None or k > best[0]:
-                best = (k, float(r["val"]))
-    return (best[1], best[0][0]) if best else (None, None)
+    return SF.latest_instant(rows)
 
 
 def _why_no_eps(cf):
@@ -161,12 +123,25 @@ def _why_no_eps(cf):
 def read_name(cf, today=None):
     """TTM figures for one filer. `today` (a date) enables the STALE flag."""
     eps_tag, eps_rows = _facts(cf, EPS_TAGS, "USD/shares")
-    ni_tag, ni_rows = _facts(cf, NI_TAGS, "USD")
     eq_tag, eq_rows = _facts(cf, EQ_TAGS, "USD")
-    eps, eps_why, eps_end = ttm(eps_rows) if eps_rows else (None, _why_no_eps(cf), None)
-    ni, ni_why, _ = ttm(ni_rows) if ni_rows else (None, "no net-income tag", None)
-    eq, eq_end = latest_instant(eq_rows) if eq_rows else (None, None)
     flags = []
+    if eps_rows:
+        te = SF.best_ttm(cf, ("eps", "Diluted EPS", "flow", "USD/shares", EPS_TAGS))
+        eps, eps_why, eps_end, eps_tag = te["value"], te["detail"], te["end"], te["tag"] or eps_tag
+    else:
+        te, eps, eps_why, eps_end = None, None, _why_no_eps(cf), None
+    tn = SF.best_ttm(cf, ("ni", "Net income", "flow", "USD", NI_TAGS))
+    ni, ni_why = tn["value"], tn["detail"] if tn["tag"] else "no net-income tag"
+    for label, t in (("EPS", te), ("net income", tn)):
+        # The fiscal Q4 every 10-K filer needs (FY minus three quarters) is
+        # routine and not flagged; a hole inside a year, or a recovery, is.
+        if t and t.get("value") is not None and t.get("unusual"):
+            flags.append("%s: %s" % (label, "; ".join(
+                "Q ending %s %s" % (e, SF.short_source(src)) for _s, e, src in t["quarters"]
+                if SF.source_kind(src) in ("derived", "recovered"))))
+        if t and t.get("note"):
+            flags.append("%s: %s" % (label, t["note"]))
+    eq, eq_end = latest_instant(eq_rows) if eq_rows else (None, None)
     if eq is not None and eq_end and today and (today - _d(eq_end)).days > EQUITY_MAX_AGE_DAYS:
         # PAA: StockholdersEquity was last reported 2017-09-30 (an MLP reports
         # partners' capital); a figure that old is not an equity, it is history.
@@ -200,31 +175,9 @@ def universe(log_dir="logs"):
 
 
 def fetch(tk, cik_map, max_age_days):
-    import edgar_client as ec
-    cik = cik_map.get(tk)
-    if not cik:
-        return None, "no CIK (fund, or not an SEC registrant)"
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, "companyfacts_%s.json" % cik)
-    if os.path.exists(path):
-        age = (dt.datetime.now().timestamp() - os.path.getmtime(path)) / 86400.0
-        if age <= max_age_days:
-            with open(path, encoding="utf-8") as fh:
-                cached = json.load(fh)
-            if cached.get("slim_version") == SLIM_VERSION:
-                return cached, "cache (%.1f d old)" % age
-    cf = ec._http_get(ec.XBRL_FACTS_URL.format(cik10=cik), as_json=True)
-    if not cf:
-        return None, "companyfacts fetch failed (%s)" % (ec._last_fetch.get("reason") or "?")
-    # Keep only the tags this exhibit reads: a full companyfacts file runs to
-    # megabytes, the slice to kilobytes.
-    gaap = cf.get("facts", {}).get("us-gaap", {})
-    slim = {"cik": cf.get("cik"), "entityName": cf.get("entityName"),
-            "slim_version": SLIM_VERSION, "taxonomies": sorted(cf.get("facts", {}).keys()),
-            "facts": {"us-gaap": {t: gaap[t] for t in EPS_TAGS + NI_TAGS + EQ_TAGS if t in gaap}}}
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(slim, fh)
-    return slim, "fetched"
+    """The shared slim cache (sec_facts.fetch): one SEC call per filer per
+    max_age_days, plus the submissions list and any co-registrant recovery."""
+    return SF.fetch(tk, cik_map, max_age_days)
 
 
 def render(day, rows, quotes):
@@ -318,6 +271,18 @@ def selftest():
           and read_name(od, dt.date(2026, 10, 22))["equity"] == 900.0)
     print("  [%s] an equity older than %d days is not read (PAA case)"
           % ("PASS" if ok else "FAIL", EQUITY_MAX_AGE_DAYS)); ok or fails.append("eq-age")
+    dow = {"facts": {"us-gaap": {"EarningsPerShareDiluted": {"units": {"USD/shares": [
+        f("2025-01-01", "2025-03-31", -0.43), f("2025-04-01", "2025-06-30", -1.18),
+        f("2025-07-01", "2025-09-30", 0.08), f("2025-01-01", "2025-12-31", -3.70),
+        f("2026-01-01", "2026-03-31", -0.74), f("2026-01-01", "2026-09-30", 0.88),
+        f("2026-07-01", "2026-09-30", 0.62)]}}}}}
+    d = read_name(dow, dt.date(2026, 10, 24))
+    # -2.17 (Q4'25 = FY - 3Q) - 0.74 + 1.00 (Q2'26 = 9M - Q1 - Q3) + 0.62
+    ok = (d["eps_ttm"] is not None and abs(d["eps_ttm"] - (-1.29)) < 1e-6
+          and any("Q ending 2026-06-30 derived" in x for x in d["flags"])
+          and not any("2025-12-31" in x for x in d["flags"]))
+    print("  [%s] DOW: Q2 2026 derived from 9M and flagged; the routine fiscal Q4 is not"
+          % ("PASS" if ok else "FAIL")); ok or fails.append("dow-derived")
     ok = read_name({"taxonomies": ["dei", "ifrs-full"],
                     "facts": {"us-gaap": {}}})["eps_basis"].startswith("IFRS filer")
     print("  [%s] an IFRS filer says so (NTR case)" % ("PASS" if ok else "FAIL"))
@@ -352,6 +317,7 @@ def main(argv=None):
     stem = "ttm_eps_%s_adhoc" % day if a.tickers else "ttm_eps_%s" % day
     try:
         import edgar_client as ec
+        SF.standalone_budget(ec)              # this process only (sec_facts docstring)
         cik_map = ec.load_cik_map({}) or {}
     except Exception as e:                              # noqa: BLE001
         print("TTM EPS COULD NOT RUN: %s" % e)

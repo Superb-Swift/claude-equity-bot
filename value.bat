@@ -250,6 +250,21 @@ echo.
 echo ### 7. TTM EPS and ROE - SEC companyfacts in valuation_cache (V2, context only)
 python ttm_eps.py --date %RUNDATE% --quotes quote_dump.json
 if errorlevel 2 echo   NOTE: ttm_eps could not run - context only; exit code unchanged.
+REM  Step 7b - ADDED 2026-10-24. The SEC data audit (sec_data_audit.py): every
+REM  name's filing and quarter gaps, the prompt's statement block against SEC
+REM  for the same period, and the value card's ROE basis against TTM. It reads
+REM  the cache ttm_eps just refreshed, writes sec_data_audit_<date>.md, and like
+REM  steps 6-7 NEVER changes the exit code. Reporting only (DP-V1, DP-V3).
+echo.
+echo ### 7b. SEC data audit - gaps, period basis, ROE basis vs TTM (reporting only)
+python sec_data_audit.py --date %RUNDATE% --quotes quote_dump.json > nul
+if errorlevel 2 (
+    echo   NOTE: sec_data_audit could not run - reporting only; exit code unchanged.
+) else if errorlevel 1 (
+    echo   NOTE: sec_data_audit has findings - read sec_data_audit_%RUNDATE%.md; exit code unchanged.
+) else (
+    echo   sec_data_audit_%RUNDATE%.md written - no unresolved gap or mismatch.
+)
 
 echo.
 if "%FAIL2%"=="1" goto skip5
@@ -323,7 +338,7 @@ REM  The old banner listed all three names unconditionally, including on
 REM  2026-08-19 when value_anchor_2026-08-19.md did not exist. A closing summary
 REM  that names a file it never checked for is the same defect this script now
 REM  guards against, printed one line lower down.
-python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md" "value_card_%RUNDATE%.md" "earnings_calendar_%RUNDATE%.md" "ttm_eps_%RUNDATE%.md"
+python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md" "value_card_%RUNDATE%.md" "earnings_calendar_%RUNDATE%.md" "ttm_eps_%RUNDATE%.md" "sec_data_audit_%RUNDATE%.md"
 echo.
 echo No valuation is asserted and no price target is implied by any step.
 echo Advisory-only - no orders - not financial advice.
