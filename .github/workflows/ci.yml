@@ -17,7 +17,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          # 3.14 since 2026-10-22: the device runs 3.14, and CI should test
+          # the interpreter the runs use (DailySequence 2026-10-09, R9).
+          python-version: '3.14'
       - run: pip install -r requirements.txt
       - name: Every module byte-compiles
         run: python -m compileall -q .
@@ -27,7 +29,10 @@ jobs:
           h1_lag_trace, h4_dq_threshold, build_actionable_registry,
           build_near_miss_registry, outcome_sanity, repair_outcome_close,
           enter_closes, discovery_scan, shadow_damper, signal_scan,
-          trail_basis_audit, log_tracker_crosscheck, band_price, risk_engine;
+          trail_basis_audit, log_tracker_crosscheck, band_price, risk_engine,
+          e4_counter, value_card, review_artifacts, repair_return_formulas,
+          run_guard, chain_check, decision_journal, prune_signal_state,
+          ttm_eps, earnings_calendar;
           print('IMPORT OK')"
       - name: Offline self-tests (each includes a failing case)
         run: |
@@ -37,5 +42,15 @@ jobs:
           python shadow_damper.py --selftest
           python signal_scan.py --selftest
           python band_price.py --selftest
+          python value_card.py --selftest
+          python e4_counter.py --selftest
+          python outcome_sanity.py --selftest
+          python enter_closes.py --selftest
+          python risk_engine.py --selftest
+          python run_guard.py --selftest
+          python decision_journal.py --selftest
+          python prune_signal_state.py --selftest
+          python ttm_eps.py --selftest
+          python earnings_calendar.py --selftest
       - name: DP-T1 - no order path exists in the repository
         run: python advisory_guard.py

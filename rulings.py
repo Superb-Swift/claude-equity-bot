@@ -67,6 +67,24 @@ WHAT THIS MODULE IS, AND IS NOT
     Registry only -- no tool's behaviour changes; e4_counter.py reads no
     ruling from here.
 
+2026-10-22 UPDATE
+    Transcribed DP-3C-az..DP-3C-bk from
+    claude/Phase3C_Rulings_Delegated_2026-10-22.md. Ruled by Claude under
+    Rob's delegation of 2026-10-22 ("make the best practice decisions when
+    deciding rulings earned"); each is marked DELEGATED and is reversible by
+    Rob at any time, with no evidence to wait for. DP-3C-bk is Rob's own
+    decision (the watchlist change deferred to the exit), transcribed.
+    Adds read_protection() (DP-3C-bb, R1): the one rule every one-time
+    reading must pass before it is recorded. DP-3C-w and DP-3C-am carry
+    dated notes; their status lines are unchanged except where ruled.
+
+2026-10-23 UPDATE
+    DP-3C-bk amended: Rob's reason recorded verbatim; the deferral
+    re-examined under the 10-22 delegation and kept; the 10-22 note's list of
+    measurement roles corrected (GLD and SNOW were missing); and a
+    `measurement_only` tuple that value_card.py reads to label those names on
+    the decision card (reporting only).
+
 ADDING A RULING
     Transcribe it from the `claude/` ruling document. `doc` is mandatory and is
     the audit trail: a status here with no document behind it is exactly the
@@ -92,6 +110,9 @@ READINGS_PATH = os.path.join("logs", "instrument_readings.json")
 # outcome resolved on or before this date has been looked at. A prospective
 # read may only use SIGNAL dates strictly after it.
 DISCOVERY_CUTOFF = dt.date(2026, 9, 16)
+
+# The 2026-10-22 delegated ruling set (DP-3C-az..bk).
+DOC_1022 = "claude/Phase3C_Rulings_Delegated_2026-10-22.md"
 
 RULINGS = {
     # ------------------------------------------------------------------ T1 --
@@ -162,7 +183,14 @@ RULINGS = {
             "10 qualifying episodes have resolved; the first such session is "
             "the read date and its reading is recorded. POSITIVE or NEGATIVE "
             "there is the disposition; otherwise the arm is read once more at "
-            "the Phase 3-C exit review."
+            "the Phase 3-C exit review. "
+            # extended 2026-10-22 (DP-3C-bl): provenance, recorded not rewritten
+            "PROVENANCE (DP-3C-bl): the 2026-10-13 reading (NOT DECIDED, rho "
+            "-0.334, n 10) was recorded 2026-10-13 15:37:12, BEFORE its resolving "
+            "close (BBWI 2026-10-13) had been carried by a later log; it was "
+            "verified 2026-10-14 against that log (BBWI 18.00 = 18.00), so the "
+            "reading stands. The exit re-read goes through read_protection() "
+            "(DP-3C-bb) and is recorded as instrument 'DP-3C-w@exit'."
         ),
     ),
     "H4": dict(
@@ -387,13 +415,28 @@ RULINGS = {
     "DP-3C-am": dict(
         dp="DP-3C-am",
         question="price provenance (D9) and a wider shadow cross-section (D6)",
-        status="D9 OWED (operator check) before any market-adjusted work; D6 DEFERRED (API cost is Rob's call)",
+        status="D9 DONE 2026-10-22 (master closes = official unadjusted closes; the log channel can be back-adjusted); D6 DEFERRED (API cost is Rob's call)",
         open=True, ruled_on=dt.date(2026, 9, 16), effective=dt.date(2026, 9, 16),
         doc="claude/Rulings_DP-T1_and_DP-3C-af-am_2026-09-16.md",
         bar="D9: four closes (AAPL, PM, SCHD, MSFT) checked against an external source",
         note=("AMENDED 2026-09-25: MSFT added to D9 after two machine-vs-source "
               "disagreements in three sessions (09-15, 09-17). The MSFT 09-15 "
-              "repair stays ON HOLD until D9 is done."),
+              "repair stays ON HOLD until D9 is done. "
+              # extended 2026-10-22, recorded not rewritten
+              "2026-10-22 [R: outcome_close_repairs.log 09:22-09:39]: the MATERIAL "
+              "queue was repaired against external closes (GM 08-20 86.15, NVDA "
+              "07-23 208.76, 08-07 223.96, 06-18 210.69) and JPM 07-02 by the "
+              "dividend identity (master 332.97 = log 334.47 - 1.50 dividend). "
+              "D9 SPOT CHECK, 2026-10-22 (claude/Phase3C_Rulings_Delegated_"
+              "2026-10-22.md section D9): master sessions agree with an external "
+              "official Close on AAPL 65/65, SCHD 49/49, SND 65/65, PM 1/1 and "
+              "MSFT 20/21 (the one miss, 10-19, is the aggregator's: master and "
+              "log both 533.52). AG 2026-09-16 18.38 is wrong (external 18.33 = "
+              "the machine close) and is repaired. FINDING: the master holds "
+              "official UNADJUSTED closes; the log's H1 series is unadjusted for "
+              "regular dividends (JPM, SCHD) but was BACK-ADJUSTED for SND's "
+              "~07-28 distribution. Source precedence: DP-3C-bd. D9 is closed; "
+              "the entry stays open for D6."),
     ),
     # ------------------------------------------------ 2026-09-25 ruling set --
     "DP-3C-an": dict(
@@ -508,6 +551,200 @@ RULINGS = {
               "pre-registered definition (the >= 12 included GLD, tier T-B, and NKE 10-01, "
               "unobservable); expected exit ~2026-11-13..18; the backstop may bind."),
     ),
+    # ------------------------------- 2026-10-22, ruled under delegation --
+    # Ruled by Claude under Rob's delegation of 2026-10-22. Every entry is
+    # reversible by Rob; none moves an E4 bar, arm, n, threshold or the freeze.
+    "DP-3C-az": dict(
+        dp="DP-3C-az",
+        question="G1 disposition after its Phase 3-C read (n = 4 pooled, 2026-10-21)",
+        status="RULED (DELEGATED) - G1 3-C read RECORDED BESIDE 3-B's INSUFFICIENT TEST CONDITIONS; it does not amend it",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="unchanged (>= 1 of 4 responding <= 2 sessions); read once, 2026-10-21: MET (weak)",
+        note=("The read is MET at n = 4 (4 of 4 at lag 0) and carries four flags "
+              "toward convenience: unfailable since 09-30; tracer pooling (DP-3C-an); "
+              "3 of 4 episodes are GM with -3/-3/-6 steps; the run basis disagrees "
+              "on every GM episode (cross-read 0 of 1 resolved). The 3-B closeout "
+              "memo forbids lowering a bar after the fact, so the 3-B disposition "
+              "stands and the 3-C read is recorded beside it as 'MET (weak)'. G1 is "
+              "not re-read in Phase 3-C; the strip shows the recorded read, and the "
+              "run-basis cross-read is reported, never scored. Rob may instead rule "
+              "that the read amends 3-B; nothing would need to be recomputed."),
+    ),
+    "DP-3C-ba": dict(
+        dp="DP-3C-ba",
+        question="data-integrity guards proposed 2026-10-20 (G-a..G-d) and R9",
+        status="RULED (DELEGATED) - adopted: Check H (due-but-blank) and Check I (K..N formula and cache) GATE; enter_closes --catch-up; UNGUARDED refused",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="n/a - integrity gates on the record, not on any endpoint",
+        note=("enter_closes refuses a session whose cohort is not yet in the "
+              "master (paste first) and any ticker with neither content guard "
+              "unless --allow-unguarded (departed names, gap sessions), and labels "
+              "such cells UNGUARDED in the ledger. Workflow step 2's drag check "
+              "(G-d) is now made by Check I on every scan. run_daily_review.bat "
+              "warns when the previous session's value.bat or step-7 refresh did "
+              "not run."),
+    ),
+    "DP-3C-bb": dict(
+        dp="DP-3C-bb",
+        question="when may a one-time reading be recorded? (R1)",
+        status="RULED (DELEGATED) - only when every resolving close predates the newest cohort in the master; before that, counts only, no statistic",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="n/a - recording rule; rulings.read_protection()",
+        note=("Applies to the DP-3C-w exit re-read, PR-1..PR-3, the exit reads of "
+              "E4-2 and E4-3, and any future one-time arm. A close entered in the "
+              "evening has not been compared with any log; the next session's log "
+              "carries it and Check F compares it. Implemented in "
+              "build_actionable_registry.py and discovery_scan.py."),
+    ),
+    "DP-3C-bc": dict(
+        dp="DP-3C-bc",
+        question="how the P4 gates are read, and how Phase 4 opens",
+        status="RULED (DELEGATED) - P4-1..P4-5 are Phase 4 ACCEPTANCE gates; Phase 4a (no prompt change) opens at the exit ruling, 4b (prompt changes) only after its own pre-registration and E4-3",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="Phase 4 closes only when P4-1..P4-5 are met",
+        note=("P4-4 and P4-5 need work reserved for Phase 4, so they cannot be "
+              "entry gates. Work that does not touch what the model sees may "
+              "land before the exit: P4-1 rule tests (risk_engine --selftest) "
+              "and the P4-3 console fix are reporting and test code."),
+    ),
+    "DP-3C-bd": dict(
+        dp="DP-3C-bd",
+        question="which close wins when a filled cell and the next session's log disagree (R10, D9 class)",
+        status="RULED (DELEGATED) - PRECISION tier: the log close wins when every log carrying it agrees; MATERIAL tier: an external official close decides, one repair at a time",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar=("PRECISION = |cell - log| > 0.0051 and < 0.05%; applied by "
+             "enter_closes.py --settle-precision; MATERIAL (>= 0.05%) via "
+             "repair_outcome_close.py --price with --source-note"),
+        note=("Ratifies the 95-cell 'settle_precision R10' application of "
+              "2026-10-22 09:22 [R: ledger], which predates this written ruling. "
+              "The log close is the Schwab daily candle as carried by the next "
+              "session's H1 trace, after Schwab's overnight settlement; an "
+              "evening candle can still be a consolidated last trade. The log "
+              "channel can also be BACK-ADJUSTED after a distribution (SND, D9 "
+              "2026-10-22), so a MATERIAL item is never settled to the log "
+              "without an external Close (and Adjusted Close) column read first, "
+              "and --settle-precision skips any candidate whose logs disagree or "
+              "that would flip a verdict (those go to D9). With the queue "
+              "adjudicated, outcome_sanity Check F gates (DP-3C-bj)."),
+    ),
+    "DP-3C-be": dict(
+        dp="DP-3C-be",
+        question="where the G6 record lives (R8), and the tracked notes slice",
+        status="RULED (DELEGATED) - G6 = the dated LOCAL notes master docs/analyst_notes_<date>.md (now 2026-10-09); never published; analyst_notes_current.md untracked (option A)",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="n/a - record location",
+        note=("Each review's splice lands in the dated master the same session or "
+              "the next; the claude/ project docs are its cited sources. "
+              "docs/analyst_notes.md and analyst_notes_2026-08-17.md are frozen "
+              "history. docs/analyst_notes_current.md is removed from the index "
+              "(git rm --cached) and excluded locally, so a regenerated slice can "
+              "never publish the master's content. A new dated master opens at "
+              "the Phase 3-C exit review."),
+    ),
+    "DP-3C-bf": dict(
+        dp="DP-3C-bf",
+        question="the DP-3C-ah arms (PR-1..PR-3) against a Phase 4b prompt change",
+        status="RULED (DELEGATED) - TRUNCATE: each arm's population ends the session before any 4b go-live; post-go-live rows reported separately, never pooled",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="unchanged; an arm short of its dates at its read date reads INSUFFICIENT",
+        note=("Keeps every arm on the treatment it was registered on and spends no "
+              "API budget. The alternative that keeps power, a frozen reference "
+              "prompt run log-only beside 4b (option A), doubles calls and is "
+              "Rob's budget decision; it must be decided before any 4b go-live."),
+    ),
+    "DP-3C-bg": dict(
+        dp="DP-3C-bg",
+        question="generator continuity (claude-sonnet-4-6, retirement not before 2027-02-17)",
+        status="RULED (DELEGATED) - on any retirement notice, run old and new generators in parallel on identical inputs for the notice period; arms read on the old population only",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="n/a - pre-registered procedure",
+        note=("The new model runs log-only; its output reaches no risk engine, "
+              "paste, gate or daily view. A forced change truncates each open arm "
+              "as in DP-3C-bf. Captured inputs (logs/inputs_<date>.jsonl) make "
+              "the parallel run reproducible. No voluntary model change in 3-C."),
+    ),
+    "DP-3C-bh": dict(
+        dp="DP-3C-bh",
+        question="shadow calls, D6, and the gap-analysis pre-registrations (#1, #2)",
+        status="RULED (DELEGATED) - a log-only shadow call is not a treatment change; #1 and #2 pre-registered now; #1 starts at Phase 4a; D6 stays DEFERRED (API cost, Rob)",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="as pre-registered in the 2026-10-22 rulings doc, sections #1 and #2",
+        note=("A shadow call is outside DP-3C-ai only if its output reaches none "
+              "of: the risk engine, the paste, any registry gate, Rob's daily "
+              "view. #2 (baseline arm, PR-5) is counted blind from signal dates "
+              "after 2026-10-22. The arithmetic-only 'advice followed' P&L is "
+              "NOT ruled here: it borders DP-T1's retired X7, and DP-T1 is "
+              "reopened only by Rob."),
+    ),
+    "DP-3C-bi": dict(
+        dp="DP-3C-bi",
+        question="where held/scout transition lines are recorded",
+        status="RULED (DELEGATED) - in the local decision journal (logs/decision_journal.tsv), not in main.py",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="n/a - record location",
+        note=("main.py is public and frozen under DP-3C-ai; a dated holding line "
+              "is personal data and a code change. The journal is git-ignored "
+              "and records each transition as an attribute, never a filter."),
+    ),
+    "DP-3C-bj": dict(
+        dp="DP-3C-bj",
+        question="Check F gating, and the remaining MATERIAL items",
+        status="RULED (DELEGATED) - CHECK_F_GATES_EXIT = True (its precondition, GM 2026-08-20, was adjudicated 2026-10-22); SND 07-24/07-27 retired as LOG-side adjustments (master correct)",
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar="n/a - integrity gate",
+        note=("outcome_sanity named its own condition for gating: 'Flip to True "
+              "once that is settled'. A MATERIAL Check F item now turns the scan "
+              "red; PRECISION items never gate. D9 (2026-10-22) found SND's two "
+              "single-digit items were NOT typos: the master holds the official "
+              "close (65 of 65 SND sessions agree with financialcontent.com's "
+              "Close column) and the logs fetched after SND's ~07-28 ex-date "
+              "carry the back-adjusted close (x0.9786; the external Adjusted "
+              "Close). Both are retired through outcome_sanity's pinned "
+              "VERIFIED_LOG_ADJUSTED allowlist; no master cell changes. The "
+              "digit-signature heuristic is amended: on a low-priced name a "
+              "proportional adjustment can move one digit."),
+    ),
+    "DP-3C-bk": dict(
+        dp="DP-3C-bk",
+        question="Rob's 2026-10-22 watchlist edit to main.py (WATCHLIST_SCOUT)",
+        status=("RULED (Rob) - DEFERRED whole to the Phase 3-C exit review; main.py restored "
+                "to HEAD on 2026-10-22; re-examined 2026-10-23 on Rob's stated reason: the "
+                "deferral stands"),
+        open=True, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        doc=DOC_1022,
+        bar=("applied at the first session after the exit ruling (DP-3C-ay), as an era "
+             "change, never inside DP-3C-ai"),
+        # The names the edit removes. Until the change is applied, the value card
+        # labels them "thesis broken (Rob)": kept in the run for measurement only.
+        measurement_only=("BBWI", "CORN", "EFA", "GLD", "NTR", "SNOW", "TWST"),
+        note=("Rob's answer, 2026-10-22: 'Defer the whole change'. The edit would "
+              "have removed CORN (T-A, E4-3's frozen population) and NTR (T-C, "
+              "leaving the control arm at its 4-of-8 floor). Post-exit list, "
+              "verbatim: GM, UNH, VHT, XLV, O, SPY, QQQ, VTI, IWM, VOE, USO, KRE, "
+              "VXUS. His edited file is kept at Retired/patches/backups/"
+              "main.py.edit-2026-10-22. OPEN until applied. "
+              "REASON (Rob, 2026-10-23 07:48 CT, verbatim): 'The thesis for the tickers I "
+              "removed earlier is broken, and that's why I changed them to include REITs, "
+              "Healthcare, major index ETFs, and a single name, UNH.' "
+              "RE-EXAMINED 2026-10-23 (DELEGATED): the reason is a portfolio reason; the "
+              "cost of removing the names before the exit falls on the measurement, which "
+              "it does not change. CORN supplied 1 of the 15 E4-3 events (2026-09-24); NTR "
+              "keeps T-C at 5 of 8 (floor 4); GLD is in the frozen tier table (DP-3C-ai); "
+              "SNOW and NTR are 2 of DP-3C-w's 8 tickers; TWST and EFA carry no role. "
+              "CORRECTION to the 10-22 note: it named CORN and NTR only. Rob may apply the "
+              "whole change, or the additions alone, at any time."),
+    ),
 }
 
 def status_of(key):
@@ -551,6 +788,28 @@ def banner(key, width=80):
 # --------------------------------------------------------------------------- #
 # READINGS LOG — so "N consecutive readings" is mechanical rather than recalled
 # --------------------------------------------------------------------------- #
+
+def read_protection(resolution_sessions, as_of):
+    """DP-3C-bb (R1): may a one-time reading be RECORDED now?
+
+    resolution_sessions: the sessions whose closes the reading rests on (the
+        +h resolution date of every row it scores). as_of: the newest cohort
+        date in the master.
+
+    A close entered on the evening of session S has not been compared with
+    any log: the log of the session after S carries it, and Check F compares
+    it there. So a reading is recordable only when EVERY resolving close is
+    strictly before the newest cohort. Returns (ok, last_session). Before
+    that point a caller prints counts only - no rho, mean or verdict - so an
+    evening run cannot show a value that the next morning then records.
+
+    Never raises: an empty list is (False, None), i.e. nothing to read yet."""
+    sess = [d for d in resolution_sessions if d is not None]
+    if not sess or as_of is None:
+        return False, None
+    last = max(sess)
+    return last < as_of, last
+
 
 def _load(path=READINGS_PATH):
     try:

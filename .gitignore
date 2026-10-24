@@ -25,6 +25,9 @@ logs/*
 # data. The master itself stays ignored (personal trading outcomes).
 !logs/instrument_readings.json
 !logs/outcome_close_repairs.log
+# ...and, from 2026-10-22, the one-line-per-run ledger of repair_return_formulas.py
+# (provenance parity with outcome_close_repairs.log; no tickers or account data).
+!logs/formula_repairs.log
 
 # Microsoft Office temp/lock files
 ~$*.docx
@@ -92,3 +95,11 @@ e4_counter.md
 # Value card exhibit and snapshot, rewritten by value.bat step 5 (2026-10-14)
 value_card_*.md
 value_card_*.json
+
+# 2026-10-22: value layer V2 / V5 exhibits (rewritten by value.bat steps 6-7)
+# and V2's separate companyfacts cache. Generated, not source.
+ttm_eps_*.md
+ttm_eps_*.json
+earnings_calendar_*.md
+earnings_calendar_*.json
+valuation_cache/

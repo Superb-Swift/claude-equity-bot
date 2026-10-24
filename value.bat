@@ -235,6 +235,22 @@ REM  counterfactual flip ledger (COUNTS ONLY); book-free reads; and a check
 REM  that the class still reconstructs as a trailing-FY P/E.
 REM ---------------------------------------------------------------------------
 :step5
+REM ---------------------------------------------------------------------------
+REM  Steps 6-7 - ADDED 2026-10-22 (value layer V5 and V2; DP-V3). CONTEXT
+REM  exhibits, run BEFORE the value card so it can show them beside the class.
+REM  They run on every path and NEVER change the exit code: a failure prints a
+REM  NOTE, and the pass stays exactly as clean or incomplete as steps 1-5 make
+REM  it. Nothing in either reaches the prompt or a gate (DP-V1).
+REM ---------------------------------------------------------------------------
+echo.
+echo ### 6. earnings calendar - next report date per name (V5, context only)
+python earnings_calendar.py --date %RUNDATE%
+if errorlevel 1 echo   NOTE: earnings_calendar did not complete - context only; exit code unchanged.
+echo.
+echo ### 7. TTM EPS and ROE - SEC companyfacts in valuation_cache (V2, context only)
+python ttm_eps.py --date %RUNDATE% --quotes quote_dump.json
+if errorlevel 2 echo   NOTE: ttm_eps could not run - context only; exit code unchanged.
+
 echo.
 if "%FAIL2%"=="1" goto skip5
 
@@ -307,7 +323,7 @@ REM  The old banner listed all three names unconditionally, including on
 REM  2026-08-19 when value_anchor_2026-08-19.md did not exist. A closing summary
 REM  that names a file it never checked for is the same defect this script now
 REM  guards against, printed one line lower down.
-python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md" "value_card_%RUNDATE%.md"
+python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md" "value_card_%RUNDATE%.md" "earnings_calendar_%RUNDATE%.md" "ttm_eps_%RUNDATE%.md"
 echo.
 echo No valuation is asserted and no price target is implied by any step.
 echo Advisory-only - no orders - not financial advice.

@@ -90,6 +90,12 @@ SELL_GATE = 65                        # CHECK 5 SELL gate (risk_engine); DP-3C-a
 # The tool counts toward it and says when it is reached; the read itself is
 # taken in a dated review, never emitted here.
 G1_READ_N = 4
+# DP-3C-az (2026-10-22, ruled under Rob's delegation): the read was TAKEN in
+# the 2026-10-21 closing review. It is recorded here so the strip prints the
+# recorded read and never a recomputed one; G1 is not re-read in Phase 3-C.
+G1_READ = dict(date=dt.date(2026, 10, 21), n=4, responded=4,
+               verdict="MET (weak)", ruling="DP-3C-az",
+               note="recorded BESIDE 3-B's INSUFFICIENT TEST CONDITIONS; does not amend it")
 # H4 reopen bar. Raised 10 -> 12 on 2026-07-28 after the 7/27 REOPEN lasted
 # exactly one session: n crossed 10 while the rate FELL to 60.0000%, and the
 # 11th resolution flipped it straight back. The ruling attached a second
@@ -335,10 +341,23 @@ def ws2_episodes(rows, raw=None):
     OPERATIVE lag is kept beside it in e["op_lag"] so a channel-sensitive
     episode is visible. Without `raw` the old operative scoring is unchanged.
     """
+    # AMENDED 2026-10-22 (DP-3C-ax, ruled by Rob 2026-09-30): the trailing
+    # window is FIVE NYSE SESSIONS, not five tracker rows. The base is Price at
+    # Signal on trading_calendar.shift_sessions(d, -5); a row whose base
+    # session has no row for the tracer (bot-absent day or dropout) is NOT
+    # EVALUABLE - it neither opens nor ends a run. The response window is the
+    # <= 2 sessions from the episode session, and an absent session consumes
+    # it. Record-neutral when ruled: all four post-deploy episodes unchanged.
+    try:
+        import trading_calendar as _tc
+    except ImportError:                       # pragma: no cover
+        _tc = None
     out = {}
     for tk in TRACERS:
         ser = [dict(x) for x in rows if x["ticker"] == tk and x["p0"]]
         ser.sort(key=lambda x: x["date"])
+        at = {x["date"]: k for k, x in enumerate(ser)}
+        not_eval = []
         n_raw = 0
         for x in ser:
             x["op"] = x["conf"]
@@ -352,9 +371,19 @@ def ws2_episodes(rows, raw=None):
         op_lag = {}
         in_run, run_len = False, 0               # episode coalescing state
         for i, x in enumerate(ser):
-            if i < 5 or x["date"] < LIVE_START:
+            if x["date"] < LIVE_START:
                 continue
-            trail = (x["p0"] - ser[i - 5]["p0"]) / ser[i - 5]["p0"] * 100.0
+            if _tc is not None:
+                b = at.get(_tc.shift_sessions(x["date"], -5))
+                if b is None:
+                    if i >= 5:
+                        not_eval.append(x["date"])   # DP-3C-ax: run state untouched
+                    continue
+            else:                                    # pragma: no cover
+                if i < 5:
+                    continue
+                b = i - 5
+            trail = (x["p0"] - ser[b]["p0"]) / ser[b]["p0"] * 100.0
             if trail > -THETA:
                 in_run = False                   # slide over; next dip is new
                 continue
@@ -389,34 +418,38 @@ def ws2_episodes(rows, raw=None):
             # i-5), NOT the confidence at the episode session — otherwise a
             # same-session (lag-0) response, which is the STRONGEST possible
             # outcome, scores as "not served" because it demands a FURTHER fall.
-            pre = ser[i - 5]["conf"]
-            lag = None
-            if pre is not None:
+            pre = ser[b]["conf"]
+
+            def _resp(key, base_v):
+                # DP-3C-ax: the k-th SESSION after the episode; an absent
+                # session consumes its place in the window
+                if base_v is None:
+                    return None
                 for k in range(0, RESPONSE_SESSIONS + 1):
-                    if i + k >= len(ser):
-                        break
-                    c = ser[i + k]["conf"]
-                    if c is not None and c < pre:
-                        lag = k
-                        break
+                    if _tc is not None:
+                        j = at.get(_tc.shift_sessions(x["date"], k))
+                    else:                            # pragma: no cover
+                        j = i + k if i + k < len(ser) else None
+                    if j is None:
+                        continue
+                    c = ser[j][key]
+                    if c is not None and c < base_v:
+                        return k, j
+                return None
+            hit = _resp("conf", pre)
+            lag = hit[0] if hit else None
             # operative-channel lag, same baseline rule, kept for disclosure
-            olag = None
-            opre = ser[i - 5]["op"]
-            if opre is not None:
-                for k in range(0, RESPONSE_SESSIONS + 1):
-                    if i + k >= len(ser):
-                        break
-                    c = ser[i + k]["op"]
-                    if c is not None and c < opre:
-                        olag = k
-                        break
-            op_lag[x["date"]] = olag
+            ohit = _resp("op", ser[b]["op"])
+            op_lag[x["date"]] = ohit[0] if ohit else None
             if lag is not None:
                 post_served += 1
-                drop = pre - ser[i + lag]["conf"]
-                ep_detail.append((x["date"], lag, pre, ser[i + lag]["conf"], drop))
+                drop = pre - ser[hit[1]]["conf"]
+                ep_detail.append((x["date"], lag, pre, ser[hit[1]]["conf"], drop))
             else:
-                pending = (i + RESPONSE_SESSIONS) >= len(ser)   # window not elapsed
+                if _tc is not None:
+                    pending = _tc.shift_sessions(x["date"], RESPONSE_SESSIONS) > ser[-1]["date"]
+                else:                                # pragma: no cover
+                    pending = (i + RESPONSE_SESSIONS) >= len(ser)
                 ep_detail.append((x["date"], None, pre, x["conf"], None if pending else 0))
         post_sessions = sum(1 for x in ser if x["date"] >= WS2_DEPLOY)
         sessions_since = (sum(1 for x in ser if x["date"] > last_ep)
@@ -425,7 +458,8 @@ def ws2_episodes(rows, raw=None):
                        last=last_ep, since=sessions_since, detail=ep_detail,
                        post_sessions=post_sessions, n=len(ser),
                        channel=("RAW" if raw is not None else "OPERATIVE"),
-                       n_raw=n_raw, op_lag=op_lag)
+                       n_raw=n_raw, op_lag=op_lag, not_evaluable=not_eval,
+                       basis=("SESSION (DP-3C-ax)" if _tc is not None else "ROWS (calendar unavailable)"))
     return out
 
 
@@ -553,8 +587,27 @@ def collect(tracker, logs):
         arm = episodes.dp3cw_arm(rows, cohort_dates, dropouts=drops)  # DP-3C-w, blind
     except Exception as e:                                  # noqa: BLE001
         k70, arm = None, dict(error=str(e))
+    e4 = None
+    if logs:
+        try:
+            import e4_counter as _e4
+            lrows, _li = _e4.load_logs(logs)
+            as_of = max(r["d"] for r in lrows)
+            e4 = dict(e42=_e4.count_e42(lrows, _e4.load_resolved(tracker), as_of),
+                      e43=_e4.count_e43(lrows, as_of), as_of=as_of)
+            try:
+                import subprocess
+                import sys as _sys
+                rc = subprocess.run([_sys.executable, "outcome_sanity.py", "--tracker",
+                                     tracker, "--logs", logs, "--quiet"],
+                                    capture_output=True, timeout=300).returncode
+                e4["sanity"] = {0: "CLEAN", 1: "FINDINGS"}.get(rc, "COULD NOT RUN")
+            except Exception:                           # noqa: BLE001
+                e4["sanity"] = "[?]"
+        except Exception as e:                          # noqa: BLE001
+            e4 = dict(error=str(e))
     return dict(
-        k70=k70, dp3cw=arm,
+        k70=k70, dp3cw=arm, e4=e4,
         tracker=tracker, logs=logs,
         log_info=log_info, log_report=log_report, log_warn=log_warn,
         as_of=max(x["date"] for x in rows), n_rows=len(rows),
@@ -708,7 +761,8 @@ def question_rows(m):
         # above are still computed and still worth seeing; what was wrong was
         # scoring them against a criterion that no longer exists.
         "DESCOPED 2026-07-31 — no live bar; reopens on T-G2-a/b/c",
-        "DESCOPED (readings are context only; see gate X8)",
+        # 2026-10-22: "see gate X8" named a gate defined nowhere (10-09 review)
+        "DESCOPED (readings are context only; reopens on T-G2-a/b/c)",
     ))
     def _evidence(tk):
         return [(d, lg) for d, lg, _p, _n, _dr in ws2[tk].get("detail", [])
@@ -772,19 +826,28 @@ def question_rows(m):
                 if e.get("channel") == "RAW" else
                 ". **Scored on the OPERATIVE channel** (logs unavailable — "
                 "DP-3C-an requires RAW; this reading is a fallback). ")
-             + "Episode basis (DP-3C-an): five tracker ROWS off `Price at "
-               "Signal`, ending at the signal row — the move as it stood when "
-               "the model answered; the run's `D[trail]` (closes, prior "
-               "sessions) is the damper's basis, not G1's. "
+             + "Episode basis (DP-3C-an, window per DP-3C-ax): five NYSE "
+               "SESSIONS off `Price at Signal`, ending at the signal row — the "
+               "move as it stood when the model answered; a row whose base "
+               "session has no row is NOT EVALUABLE"
+             + (" (" + ", ".join(d.isoformat() for d in e.get("not_evaluable", [])
+                                 if d >= D2_START) + ")"
+                if any(d >= D2_START for d in e.get("not_evaluable", [])) else "")
+             + ". The run's `D[trail]` (closes, prior sessions) is the damper's "
+               "basis, not G1's. "
              + _runx_text(m, tk)),
             f"read ONCE at n = {G1_READ_N} evidence episodes pooled across WMT + GM "
             f"(DP-3C-an); at the read, ≥1 episode with response ≤{RESPONSE_SESSIONS} "
             f"sessions [R]. Evidence per DP-3C-aa: corrected channel from {D2_START}, "
             f"plus WMT 2026-07-23",
             (f"{len(evidence)} evidence episode(s) here, {ev_served} responded; pooled "
-             f"{pooled_ev} of {G1_READ_N} — "
-             + ("INSUFFICIENT TEST CONDITIONS; bar not lowered" if pooled_ev < G1_READ_N
-                else "READ POINT REACHED — the read is taken in a dated review, not here")
+             f"{pooled_ev} — "
+             + (f"READ {G1_READ['date']}: {G1_READ['verdict']} at n = {G1_READ['n']} "
+                f"({G1_READ['responded']} of {G1_READ['n']} responded ≤{RESPONSE_SESSIONS}); "
+                f"{G1_READ['note']} ({G1_READ['ruling']}). Not re-read in Phase 3-C"
+                if G1_READ else
+                ("INSUFFICIENT TEST CONDITIONS; bar not lowered" if pooled_ev < G1_READ_N
+                 else "READ POINT REACHED — the read is taken in a dated review, not here"))
              if e["episodes"] else "NO TEST CASES YET"),
         ))
     out.append((
@@ -830,7 +893,32 @@ def question_rows(m):
             "UNREADABLE — the ruled basis could not be computed",
         ))
     out.append(_dp3cw_row(m))
+    if m.get("e4"):
+        out.append(_e4_row(m["e4"]))
     return out
+
+
+def _e4_row(e4):
+    """R5 (2026-10-22): the Phase 3-C exit criteria, COUNTS ONLY, from
+    e4_counter.py's own definitions (one counter, two renderings). No rate,
+    breach or confidence value is computed for any blind endpoint."""
+    if e4.get("error"):
+        return ("**E4 exit** criteria (counts only)", f"unavailable: {e4['error']}",
+                "DP-3C-ay", "UNREADABLE")
+    e42, e43 = e4["e42"], e4["e43"]
+    st = e43["status"]
+    return (
+        "**E4 exit** criteria (counts only, DP-3C-ay)",
+        f"clock {e42['cohorts']} admitted EDGAR-live cohort(s) · E4-2 resolved ADJACENT "
+        f"**{e42['adj_resolved']} / 150**, primary qualifiers {len(e42['qualifiers'])} of "
+        f"13 · E4-3 observable 8-K events **{st.get('OBSERVABLE', 0)} / 20** "
+        f"(pending {st.get('PENDING', 0)}, unobservable {st.get('UNOBSERVABLE', 0)}, "
+        f"possible unseen {len(e43.get('unseen_at', []) or [])}, not counted) · "
+        f"outcome_sanity {e4.get('sanity', '[?]')}",
+        "exit when E4-3 reaches 20 (backstop 2026-11-20, then INSUFFICIENT); every E4 "
+        "endpoint read once at the exit (DP-3C-ay); reads are protected by DP-3C-bb",
+        ("E4-3 COLLECTING" if st.get("OBSERVABLE", 0) < 20 else "E4-3 AT 20 — exit review due")
+        + "; BLIND (counts only)")
 
 
 def to_markdown(m):
@@ -1112,27 +1200,67 @@ def embed_into_workbook(m, png_path, embed_path, width_px=EMBED_WIDTH_PX,
         r += 1
 
     # --- WS2 episode ledger (the G1 acceptance clock, row by row) ------------
+    # AMENDED 2026-10-22 (R7; DP-3C-an, DP-3C-aa, DP-3C-ax). This ledger was
+    # titled OPERATIVE and listed WMT 2026-08-20 as served with no status,
+    # while the headline row on the same sheet said RAW and VACATED. It is now
+    # built from the same evidence rule the headline uses, with a Status column.
+    ch = m["ws2"][TRACERS[0]].get("channel", "RAW")
     ws.cell(r, 1, f"WS2 / G1 episode ledger (THETA = {THETA:.1f}%) — "
-                  f"OPERATIVE channel (post-damping); trailing move over tracker "
-                  f"rows off Price at Signal").font = f_hdr
+                  f"{ch} channel (DP-3C-an); trailing move over five NYSE sessions "
+                  f"off Price at Signal (DP-3C-ax)").font = f_hdr
     r += 1
     for c, t in enumerate(("Ticker", "Episode", "Lag", "Conf pre",
-                           "Conf at response", "Drop (pt)", "Served"), start=1):
+                           "Conf at response", "Drop (pt)", "Served", "Status"), start=1):
         _band(r, c, t)
     r += 1
     any_ep = False
     for tk in TRACERS:
-        for d, lag, pre, now, drop in m["ws2"][tk].get("detail", []):
+        e = m["ws2"][tk]
+        for d, lag, pre, now, drop in e.get("detail", []):
             any_ep = True
+            if (tk, d) in G1_VACATED:
+                status = "VACATED (DP-3C-aa)"
+            elif (tk, d) in G1_SURVIVES:
+                status = "stands (DP-3C-aa)"
+            elif d < D2_START:
+                status = "pre-fix: recorded, not evidence"
+            else:
+                status = "evidence (corrected channel)"
+            ol = e.get("op_lag", {}).get(d, lag)
+            if e.get("channel") == "RAW" and ol != lag:
+                status += "; CHANNEL-SENSITIVE (operative %s)" % (
+                    "lag %s" % ol if ol is not None else "no response")
             for c, v in enumerate((tk, d.isoformat(), "—" if lag is None else lag,
                                    pre, now, "—" if drop is None else drop,
                                    "yes" if lag is not None
-                                   else ("pending" if drop is None else "no")), start=1):
+                                   else ("pending" if drop is None else "no"),
+                                   status), start=1):
                 ws.cell(r, c, v).font = f_body
             r += 1
     if not any_ep:
         ws.cell(r, 1, "no post-deploy episodes detected yet").font = f_body
         r += 1
+    if G1_READ:
+        ws.cell(r, 1, f"READ {G1_READ['date']}: {G1_READ['verdict']} at n = {G1_READ['n']} — "
+                      f"{G1_READ['note']} ({G1_READ['ruling']})").font = f_grey
+        r += 1
+
+    # --- SELL-gate flips (DP-3C-as), added 2026-10-22: the markdown strip
+    # carried this table and the sheet did not ------------------------------
+    if m["ws1"].get("flips_sell"):
+        r += 1
+        ws.cell(r, 1, "SELL-gate flips (WS1, DP-3C-as — separate ledger, gate 65)").font = f_hdr
+        r += 1
+        for c, t in enumerate(("Date", "Ticker", "Base", "Blend", "+5d",
+                               "Blend better?"), start=1):
+            _band(r, c, t)
+        r += 1
+        for d, tk, base, bl, ret, good in m["ws1"]["flips_sell"]:
+            for c, v in enumerate((d.isoformat(), tk, base, bl,
+                                   round(ret * 100, 2), "yes" if good else "no"), start=1):
+                ws.cell(r, c, v).font = f_body
+            ws.cell(r, 5).number_format = "+0.00;-0.00"
+            r += 1
 
     if dropped:
         r += 1
@@ -1141,7 +1269,7 @@ def embed_into_workbook(m, png_path, embed_path, width_px=EMBED_WIDTH_PX,
                 "guardrail_trace.py is out of the runner.").font = f_grey
 
     for col, w in (("A", 24), ("B", 92), ("C", 40), ("D", 22),
-                   ("E", 18), ("F", 14), ("G", 12)):
+                   ("E", 18), ("F", 14), ("G", 12), ("H", 34)):
         ws.column_dimensions[col].width = w
     ws.freeze_panes = ws.cell(head + 1, 1)
 
@@ -1188,6 +1316,12 @@ def main(argv=None):
                          f"(default {EMBED_WIDTH_PX}); the PNG is resampled to "
                          f"this exactly so Excel never rescales it")
     args = ap.parse_args(argv)
+    # ADDED 2026-10-22 (R9): monitor.bat fell back to the report copy as an
+    # INPUT when the master was missing. The copy is generated from the master
+    # and its formula cache is blank; reading it is never right.
+    if os.path.basename(args.tracker).lower() == "tracker_with_registry.xlsx":
+        raise SystemExit("REFUSED: tracker_with_registry.xlsx is the GENERATED report "
+                         "copy, never an input. Pass logs\\claude_equity_bot_tracker.xlsx.")
 
     m = collect(args.tracker, args.logs)
     md = to_markdown(m)

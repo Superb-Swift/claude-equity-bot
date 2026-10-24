@@ -10,7 +10,7 @@
 #
 # USAGE:
 #   python seed_signal_state.py
-#   python seed_signal_state.py --tracker tracker_with_registry.xlsx
+#   python seed_signal_state.py          (default: logs\claude_equity_bot_tracker.xlsx, THE MASTER)
 #   python seed_signal_state.py --tracker logs\claude_equity_bot_tracker.xlsx
 #
 # ANALYST NOTE:
@@ -90,7 +90,10 @@ def load_raw_overlay(pattern):
 def main():
     ap = argparse.ArgumentParser(
         description="Seed/restore signal_state.json from the tracker Signals tab.")
-    ap.add_argument("--tracker", default="tracker_with_registry.xlsx")
+    # AMENDED 2026-10-22 (R2): the default was the GENERATED report copy,
+    # against the nomenclature rule and Workflow section 17. The master is the
+    # only input, and the report copy is now refused if passed by hand.
+    ap.add_argument("--tracker", default=os.path.join("logs", "claude_equity_bot_tracker.xlsx"))
     ap.add_argument("--out", default="signal_state.json")
     ap.add_argument("--last", type=int, default=KEEP_LAST,
                     help="sessions of history to keep per ticker (default 5)")
@@ -98,6 +101,9 @@ def main():
                     help="log glob for the RAW confidence overlay "
                          "(default: logs/signals_*.log)")
     args = ap.parse_args()
+    if os.path.basename(args.tracker).lower() == "tracker_with_registry.xlsx":
+        raise SystemExit("REFUSED: tracker_with_registry.xlsx is the GENERATED report "
+                         "copy, never an input. Use logs\\claude_equity_bot_tracker.xlsx.")
 
     overlay = load_raw_overlay(args.logs)
     n_overlaid = 0

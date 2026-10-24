@@ -381,11 +381,40 @@ def trace(tracker, ticker, window, maxlag, raw_map=None):
         # conf_pct(); the claim is now narrowed to what it can support.
     confs = [x["conf"] for x in rows]
     prices = [x["p0"] for x in rows]
-    # trailing window-day move from the signal-capture price series
+    # trailing window-day move from the signal-capture price series.
+    # AMENDED 2026-10-22 (DP-3C-ax, ruled by Rob 2026-09-30): the window is
+    # `window` NYSE SESSIONS, not `window` tracker rows. The base is Price at
+    # Signal on shift_sessions(d, -window); if the ticker has no row on that
+    # session (bot-absent day or dropout) the row is NOT EVALUABLE and its
+    # trail stays None (printed as a dash). Before this, a row after a missed
+    # session got a 6- or 7-session window, which reaches THETA more easily.
     trail = [None] * len(rows)
+    not_evaluable = []
+    try:
+        import trading_calendar as _tc
+    except ImportError:                                 # pragma: no cover
+        _tc = None
+    by_date = {x["date"]: k for k, x in enumerate(rows)}
     for i in range(len(rows)):
-        if i >= window and prices[i] is not None and prices[i - window]:
-            trail[i] = prices[i] / prices[i - window] - 1.0
+        if prices[i] is None:
+            continue
+        if _tc is not None:
+            base = _tc.shift_sessions(rows[i]["date"], -window)
+            j = by_date.get(base)
+            if j is None:
+                if rows[i]["date"] >= rows[0]["date"] and i >= window:
+                    not_evaluable.append(rows[i]["date"])
+                continue
+        else:                                           # pragma: no cover
+            j = i - window if i >= window else None
+            if j is None:
+                continue
+        if prices[j]:
+            trail[i] = prices[i] / prices[j] - 1.0
+    if not_evaluable:
+        print(f"   [DP-3C-ax] {len(not_evaluable)} row(s) NOT EVALUABLE (no row on the base "
+              f"session): " + ", ".join(d.isoformat() for d in not_evaluable[-8:])
+              + (" ..." if len(not_evaluable) > 8 else ""))
 
     # ---- per-cohort trace table ----
     print("\n" + "=" * 78)
@@ -699,7 +728,11 @@ def write_md(res, ticker, window, tracker, out_dir, suffix=""):
         "trail ends before. **Neither is wrong on D2.** DP-3C-an rules THIS "
         "column G1's episode basis (the move as it stood when the model "
         "answered) and requires the run's basis to be reported beside it; "
-        "THETA still damps on the run's.", ""]
+        "THETA still damps on the run's.",
+        "> **AMENDED 2026-10-22 (DP-3C-ax, ruled 2026-09-30).** The Trail column "
+        "is now measured over **five NYSE sessions** off Price at Signal, not "
+        "five tracker rows. A row whose base session has no row (a bot-absent "
+        "day or a dropout) is **NOT EVALUABLE** and shows a dash.", ""]
     for i, x in enumerate(rows):
         lines.append(
             f"| {x['date'].isoformat()} | {x['signal']} | "

@@ -150,7 +150,11 @@ def parse_log(log_path: str) -> list:
     )
 
     quality_pattern   = re.compile(r'"data_quality":\s*"(HIGH|MEDIUM|LOW)"')
-    reasoning_pattern = re.compile(r'"reasoning":\s*"([^"]+)"')
+    # FIXED 2026-10-22 (carried since 09-30, "analyze_log escape printing"):
+    # the old pattern "([^"]+)" stopped at the first escaped quote and printed
+    # JSON escapes literally ("exceptional \u2014 27% cloud ..."). The value is
+    # now matched as a JSON string (escapes included) and decoded with json.
+    reasoning_pattern = re.compile(r'"reasoning":\s*"((?:[^"\\]|\\.)*)"')
     price_pattern     = re.compile(r'"lastPrice":\s*([\d.]+)')
 
     signals = []
@@ -170,7 +174,10 @@ def parse_log(log_path: str) -> list:
             # Reasoning snippet for the digest — first sentence, capped
             r_match = reasoning_pattern.search(line)
             if r_match:
-                full_reasoning = r_match.group(1)
+                try:
+                    full_reasoning = json.loads('"%s"' % r_match.group(1))
+                except ValueError:
+                    full_reasoning = r_match.group(1)
                 first_sentence = full_reasoning.split('. ')[0]
                 d["reasoning_snippet"] = (
                     first_sentence[:90] + "..."

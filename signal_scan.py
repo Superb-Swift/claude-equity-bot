@@ -7,7 +7,9 @@ Claude Equity Bot - Phase 3-B - advisory-only - no orders - not financial advice
 WHAT THIS IS
     A reproducible replacement for the ad-hoc per-ticker table produced during a
     monitoring session. Reads exactly one logs\\signals_YYYY-MM-DD.log and reports:
-      1. provenance + run integrity (the Daily_Workflow_v6_0 section 4 checks)
+      1. provenance + run integrity (Daily Workflow v8.1 section 4; first
+         written as the Daily_Workflow_v6_0 section 4 checks - reference
+         refreshed 2026-10-22)
       2. the per-ticker channel table (trail5d / raw / op / damp / base / blend)
       3. channel reconciliation assertions
       4. today's tracer episode CANDIDACY (single-session only - see below)
@@ -373,7 +375,8 @@ def fmt(v, spec="", dash="--"):
 
 
 def run_integrity(records, theta_src, warnings, prior=None, faults=None):
-    """Daily_Workflow_v6_0 section 4 checks, as assertions. Returns list of
+    """Daily Workflow v8.1 section 4 checks (first written against v6.0
+    section 4), as assertions. Returns list of
     (level, message) where level is OK / WARN / FAIL / NOCHK.
 
     `prior` is the (state, detail) pair from prior_era(), or None if the caller
@@ -482,19 +485,31 @@ def run_integrity(records, theta_src, warnings, prior=None, faults=None):
                         arm_bits.append("REMOVED arm UNCLASSIFIABLE - prior log "
                                         "carries no E tags")
                     else:
-                        rd = sorted(t for t in removed if t in _pdark)
+                        # AMENDED 2026-10-22: "dark" and "T-C control" are
+                        # not the same set. T-C is the 8 PRE-REGISTERED names
+                        # (DP-3C-ao); a dark name outside it is said so.
+                        rd = sorted(t for t in removed if t in _pdark and t in TC_PREREGISTERED)
+                        rx = sorted(t for t in removed if t in _pdark and t not in TC_PREREGISTERED)
                         rc = sorted(t for t in removed if t not in _pdark)
-                        arm_bits.append("REMOVED {} dark/T-C control ({}), {} covered ({})"
+                        arm_bits.append("REMOVED {} dark/T-C control ({}), {}{} covered ({})"
                                         .format(len(rd), ", ".join(rd) or "-",
+                                                ("{} dark outside T-C ({}), ".format(
+                                                    len(rx), ", ".join(rx)) if rx else ""),
                                                 len(rc), ", ".join(rc) or "-"))
                 if added:
                     if not _here_tagged:
                         arm_bits.append("ADDED arm UNCLASSIFIABLE - this run carries "
                                         "no E tags")
                     else:
+                        # AMENDED 2026-10-22 (carried since 09-30): an ADDED
+                        # dark name was labelled "dark/T-C control". It is
+                        # dark, but it never joins the pre-registered control
+                        # (DP-3C-ao: departures prospective, denominator N of 8).
                         ad = sorted(t for t in added if t in _here_dark)
                         ac = sorted(t for t in added if t not in _here_dark)
-                        arm_bits.append("ADDED {} dark/T-C control ({}), {} covered ({})"
+                        arm_bits.append("ADDED {} dark, outside T-C ({}) - an added name "
+                                        "never joins the pre-registered control (DP-3C-ao), "
+                                        "{} covered ({})"
                                         .format(len(ad), ", ".join(ad) or "-",
                                                 len(ac), ", ".join(ac) or "-"))
                 if arm_bits:
@@ -807,7 +822,7 @@ def render(records, theta, theta_src, warnings, counterfactual, prior=None, faul
     # ---- integrity ------------------------------------------------------
     add("")
     add("-" * 78)
-    add("RUN INTEGRITY (Daily_Workflow_v6_0 section 4)")
+    add("RUN INTEGRITY (Daily Workflow v8.1 section 4)")
     add("-" * 78)
     for level, msg in integrity:
         add("  [{:<4}] {}".format(level, msg))
@@ -1213,6 +1228,19 @@ def selftest():
                             True)
             ok &= _st_check("...and NOT flagged one-armed",
                             "ONE-ARMED" in arm[0], False)
+
+            #     2026-10-22: an ADDED dark name is dark but NOT T-C control.
+            _st_write(d5, "signals_2026-08-18.log", E, ("AAPL", "MSFT"),
+                      dark=(), edgar=True)
+            t = _st_write(d5, "signals_2026-08-19.log", E, ("AAPL", "MSFT", "EFA"),
+                          dark=("EFA",), edgar=True)
+            state, detail = prior_era(t)
+            recs, _w = parse_log(t)
+            integ = run_integrity(recs, "test", [], (state, detail))
+            arm = [m for lv, m in integ if lv == "WARN" and "arm effect" in m]
+            ok &= _st_check("an ADDED dark name is labelled outside T-C",
+                            bool(arm) and "ADDED 1 dark, outside T-C (EFA)" in arm[0]
+                            and "dark/T-C control (EFA)" not in arm[0], True)
 
             #     NEGATIVE: no E tags anywhere -> UNCLASSIFIABLE, never a
             #     silent "0 dark".

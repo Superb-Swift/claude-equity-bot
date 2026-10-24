@@ -34,10 +34,19 @@ STOCK_SECTOR = {
     "RTX":  "XLI", "PWR":  "XLI",                                # Industrials
     "DOW":  "XLB", "NTR":  "XLB", "AG": "XLB",                   # Materials
     "FTI":  "XLE", "SND":  "XLE",                                # Energy (oilfield svcs)
+    # ADDED 2026-10-22, INERT until the Phase 3-C exit: names on Rob's
+    # post-exit watchlist (DP-3C-bk). None is on today's watchlist, so no run
+    # looks them up and the blend is unchanged (DP-3C-ai). Mapped now so the
+    # first post-exit run does not WARN and degrade them to base conviction.
+    "UNH":  "XLV",                                               # Health Care
+    "O":    "XLRE",                                              # Real Estate (REIT)
 }
 
 # --- sector ETFs -> self (extend as more sector ETFs enter the watchlist) ---
-SECTOR_ETF_SELF = {"XLU"}
+SECTOR_ETF_SELF = {"XLU",
+                   # 2026-10-22, inert until the exit (see STOCK_SECTOR):
+                   "XLV", "VHT",   # health care sector ETFs
+                   "KRE"}          # regional banks (an industry ETF; its own trend)
 
 # --- thematic ETFs -> dominant sector (reviewable; DP-W1 note) ---
 THEMATIC_SECTOR = {"AIQ": "XLK"}   # Global X AI & Technology -> tech-dominant
@@ -46,6 +55,8 @@ THEMATIC_SECTOR = {"AIQ": "XLK"}   # Global X AI & Technology -> tech-dominant
 NEUTRAL_C2 = {
     "SPY", "QQQ", "VTI", "SCHD",   # broad / dividend baskets -> C3's market regime covers these
     "GLD", "CORN",                 # commodities -> WS3 commodity context is the sector analog
+    # 2026-10-22, inert until the exit (see STOCK_SECTOR): broad baskets
+    "IWM", "VOE", "VXUS",
 }
 
 

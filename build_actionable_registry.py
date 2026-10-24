@@ -424,9 +424,26 @@ def load_dropouts(pattern, master_rows):
         paths, present={(r["ticker"], r["date"]) for r in master_rows})
 
 
-def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None):
+def _r1(arm, as_of):
+    """DP-3C-bb (R1): (recordable, last resolving session). A one-time read is
+    recorded only once every resolving close predates the newest cohort, i.e.
+    a later session's log has carried it and Check F has compared it."""
+    import trading_calendar as _tc
+    import rulings as _ru
+    sess = [_tc.shift_sessions(d, 5) for d in arm.get("resolved_open_dates", [])]
+    return _ru.read_protection(sess, as_of)
+
+
+def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None,
+                exit_read=False):
     """Print the DP-3C-w arm. Records the FIRST read and prints it thereafter.
-    dropouts: DP-3C-ar run-fault set (2026-09-25), bridged not split."""
+    dropouts: DP-3C-ar run-fault set (2026-09-25), bridged not split.
+
+    AMENDED 2026-10-22 (DP-3C-bb, R1): a read is recorded only once its
+    resolving closes have been log-verified; before that the block prints
+    counts only and withholds rho. exit_read: the once-more read DP-3C-ah
+    reserves for the Phase 3-C exit review, recorded as 'DP-3C-w@exit' under
+    the same protection. It is taken only when asked for (--exit-read)."""
     import episodes
     arm = episodes.dp3cw_arm(master_rows, cohort_dates, dropouts=dropouts)
     lines = ["DP-3C-w PROSPECTIVE ARM (episodes opening on/after 2026-09-03)",
@@ -441,21 +458,42 @@ def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None):
         prior = rulings.readings("DP-3C-w")
     except Exception:                                   # noqa: BLE001
         rulings, prior = None, []
+    def _take(instrument, label):
+        ok, last = _r1(arm, as_of)
+        if not ok:
+            lines.append(f"  {label} REACHED - NOT READ (DP-3C-bb): the {last} close has not "
+                         f"been log-verified (newest cohort {as_of}). Counts only; the next "
+                         f"session's chain (scan, then review) reads and records it.")
+            return
+        rho = arm["rho"]
+        lines.append(f"  {label}: rho = {rho:+.3f}  -> {arm['verdict']}"
+                     if rho is not None else f"  {label} -> {arm['verdict']}")
+        if record and rulings is not None:
+            rulings.record_reading(
+                instrument, as_of, arm["verdict"].startswith("POSITIVE"),
+                detail=dict(verdict=arm["verdict"], rho=rho, n=arm["n_resolved"],
+                            tickers=arm["tickers_resolved"], episodes=arm["episodes"],
+                            verified_through=str(_r1(arm, as_of)[1])))
+            lines.append(f"  reading recorded to the readings log as {instrument}; "
+                         "later runs print it as recorded.")
+
     if prior:
         e = prior[0]
         lines.append(f"  READ on {e['date']} (recorded, not recomputed): "
                      f"{e['detail'].get('verdict')}  rho {e['detail'].get('rho')}  "
                      f"n {e['detail'].get('n')}")
+        ex = rulings.readings("DP-3C-w@exit") if rulings is not None else []
+        if ex:
+            x = ex[0]
+            lines.append(f"  EXIT READ on {x['date']} (recorded): {x['detail'].get('verdict')}  "
+                         f"rho {x['detail'].get('rho')}  n {x['detail'].get('n')}")
+        elif exit_read and arm["read_ready"]:
+            _take("DP-3C-w@exit", "EXIT READ")
+        else:
+            lines.append("  exit read: not taken (run with --exit-read at the Phase 3-C exit "
+                         "review; protected by DP-3C-bb)")
     elif arm["read_ready"]:
-        rho = arm["rho"]
-        lines.append(f"  READ DATE REACHED: rho = {rho:+.3f}  -> {arm['verdict']}"
-                     if rho is not None else f"  READ DATE REACHED -> {arm['verdict']}")
-        if record and rulings is not None:
-            rulings.record_reading(
-                "DP-3C-w", as_of, arm["verdict"].startswith("POSITIVE"),
-                detail=dict(verdict=arm["verdict"], rho=rho, n=arm["n_resolved"],
-                            tickers=arm["tickers_resolved"], episodes=arm["episodes"]))
-            lines.append("  reading recorded to the readings log; later runs print it as recorded.")
+        _take("DP-3C-w", "READ DATE")
     else:
         lines.append(f"  {arm['verdict']}")
     return lines
@@ -957,6 +995,9 @@ def main(argv=None):
                     help="signals logs, searched recursively (Executability, ChannelMargin)")
     ap.add_argument("--no-record", action="store_true",
                     help="do not write the DP-3C-w reading to the readings log")
+    ap.add_argument("--exit-read", action="store_true",
+                    help="take DP-3C-w's once-more read for the Phase 3-C exit review "
+                         "(recorded as DP-3C-w@exit, only when log-verified: DP-3C-bb)")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.tracker):
@@ -988,7 +1029,8 @@ def main(argv=None):
               + ", ".join(f"{t} {d:%Y-%m-%d}" for t, d in sorted(dropouts, key=lambda z: (z[1], z[0]))))
     for line in dp3cw_block(master_rows, cohort_dates,
                             cohort_dates[-1] if cohort_dates else dt.date.today(),
-                            record=not args.no_record, dropouts=dropouts):
+                            record=not args.no_record, dropouts=dropouts,
+                            exit_read=args.exit_read):
         print(line)
     print(f"\nWrote: {xlsx_path}\nWrote: {md_path}")
 

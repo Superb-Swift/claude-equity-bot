@@ -54,15 +54,14 @@ REM ---- The MASTER tracker is logs\claude_equity_bot_tracker.xlsx (the file you
 REM      paste into; Excel keeps its formula cache live). tracker_with_registry.xlsx
 REM      is a GENERATED report copy - openpyxl writes it, so its cache is always
 REM      empty. Read the master; fall back to the copy only if the master is gone.
+REM AMENDED 2026-10-22: the fallback to tracker_with_registry.xlsx as an INPUT
+REM   is removed. The report copy is generated FROM the master and its formula
+REM   cache is blank after every openpyxl save; monitor_strip.py now refuses it.
 if not exist "%TRACKER%" (
-    if exist "tracker_with_registry.xlsx" (
-        set TRACKER=tracker_with_registry.xlsx
-    ) else (
-        echo ERROR: no tracker found ^(tried %TRACKER% and tracker_with_registry.xlsx^).
-        exit /b 1
-    )
+    echo ERROR: the master %TRACKER% was not found. Run from the project root.
+    echo        tracker_with_registry.xlsx is a generated copy and is never an input.
+    exit /b 2
 )
-
 python monitor_strip.py --tracker "%TRACKER%" %*
 set RC=%ERRORLEVEL%
 

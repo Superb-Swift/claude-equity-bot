@@ -372,6 +372,63 @@ def fmt(v, spec="{:.2f}", none="—"):
     return none if v is None else spec.format(v)
 
 
+def load_context(root, date):
+    """DP-V3 (2026-10-22): the TTM exhibit (ttm_eps.py, V2) and the earnings
+    calendar (earnings_calendar.py, V5) for the SAME date, if value.bat wrote
+    them before this step. Context only: neither moves the class, the
+    robustness tag or the DP-V2 ledger. Missing files mean '—', never a guess."""
+    out = {}
+    for key, name in (("ttm", "ttm_eps_%s.json"), ("earn", "earnings_calendar_%s.json")):
+        path = os.path.join(root, name % date)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = None
+        if key == "earn" and isinstance(data, list):
+            data = {r.get("ticker"): r for r in data}
+        out[key] = data
+    return out
+
+
+THESIS_LABEL = ("THESIS BROKEN (Rob, 2026-10-22): off the scout list at the exit; "
+                "until then, measurement only (DP-3C-bk)")
+
+
+def thesis_label(t):
+    """DP-3C-bk (2026-10-23): a name Rob removed from his watchlist because its
+    thesis is broken, kept in the run until the exit for the measurement. The
+    label tells the reader a BUY or SELL on it is not a candidate. Read from
+    rulings.py, so it disappears when the ruling closes. Reporting only."""
+    try:
+        import rulings
+        r = rulings.RULINGS.get("DP-3C-bk") or {}
+    except Exception:                                   # noqa: BLE001
+        return ""
+    return THESIS_LABEL if (r.get("open") and t in (r.get("measurement_only") or ())) else ""
+
+
+def _ctx_cells(ctx, t):
+    """(ttm_eps, ttm_roe_pct, next_report, sessions_away, note) for ticker t.
+
+    AMENDED 2026-10-23: the note joins every reason instead of showing only the
+    first: the calendar flag, the TTM flags (STALE, negative equity, an equity
+    date before the TTM end), a NO READ reason (without the doubled "TTM: no
+    TTM:" of 10-22) and the DP-3C-bk thesis label."""
+    tt = ((ctx.get("ttm") or {}).get(t)) or {}
+    ee = ((ctx.get("earn") or {}).get(t)) or {}
+    roe = tt.get("roe_ttm")
+    bits = [ee["note"]] if ee.get("note") else []
+    nr = tt.get("no_read")
+    if nr and not ("fund" in nr and "fund" in (ee.get("note") or "")):
+        bits.append(nr if nr.startswith("no TTM") else "TTM: " + nr)
+    bits += ["TTM " + f for f in (tt.get("flags") or [])]
+    if thesis_label(t):
+        bits.append(thesis_label(t))
+    return (tt.get("eps_ttm"), (roe * 100.0) if isinstance(roe, (int, float)) else None,
+            ee.get("date"), ee.get("sessions"), "; ".join(bits))
+
+
 def build(date, root, log_path, quotes_path, tracker):
     exhibits = find_exhibits(root)
     if date not in exhibits:
@@ -535,6 +592,28 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("  range 6x: the class ratio under both ROE routes (Schwab last-FY, EDGAR quarter x4)")
     L.append("  at r = 7/9/11%. ROBUST only if all six give the same class. NEITHER route is TTM.")
     L.append("  DP-V2 gate: BUY gate under the PROPOSED modifier (75 / 70 / 65); NOT APPLIED.")
+    L.append("")
+
+    # ---- 2b. context beside the class (DP-V3, 2026-10-22) ------------------
+    ctx = load_context(root, date)
+    L.append("  2b. BESIDE THE CLASS (DP-V3) -- TTM EPS and ROE (ttm_eps, V2) and the next")
+    L.append("      report date (earnings_calendar, V5). Context only: neither moves a class.")
+    if not ctx.get("ttm") and not ctx.get("earn"):
+        L.append("      not available for %s (value.bat steps 6-7 did not write them)." % date)
+        for c in card:                                  # DP-3C-bk labels print regardless
+            if thesis_label(c["ticker"]):
+                c.update(context_note=thesis_label(c["ticker"]))
+                L.append("  %-5s %s" % (c["ticker"], thesis_label(c["ticker"])))
+    else:
+        L.append("  %-5s %10s %9s  %-11s %8s  %s" % ("tk", "TTM EPS", "TTM ROE", "next report",
+                                                  "sessions", "note"))
+        for c in card:
+            e, roe, nd, ns, note = _ctx_cells(ctx, c["ticker"])
+            c.update(ttm_eps=e, ttm_roe_pct=roe, next_report=nd, sessions_to_report=ns,
+                     context_note=note)
+            L.append("  %-5s %10s %9s  %-11s %8s  %s" % (
+                c["ticker"], fmt(e), fmt(roe, "{:.1f}%"), nd or "—",
+                "" if ns is None else ns, note))
     L.append("")
 
     # ---- 3. robustness, every classed name ---------------------------------
@@ -799,7 +878,9 @@ def _write_sheet(ws, snap):
     put(["Decision card -- today's directionals, then held names"], f_sec)
     hdr = ["Ticker", "Held in", "Today", "Conf", "Executability", "Class", "Ratio",
            "Last-FY P/E", "Range low", "Range high", "Robust", "Why fragile", "Implied g %",
-           "DP-V2 gate (not applied)", "Would flip", "NO READ reason"]
+           "DP-V2 gate (not applied)", "Would flip", "NO READ reason",
+           # DP-V3 (2026-10-22): context beside the class; blank if steps 6-7 did not run
+           "TTM EPS", "TTM ROE %", "Next report", "Sessions to report", "Context note"]
     put(hdr, f_hdr, fill_hdr)
     for c in snap["card"]:
         detail = (c.get("robust_detail") or "").replace("FRAGILE", "").strip()
@@ -807,7 +888,9 @@ def _write_sheet(ws, snap):
         put([c["ticker"], c["account"] if c["held"] else "scout", c["signal"], c["conf"],
              c["executability"].replace("—", ""), c["cls"], c["ratio"], c["pe_lastfy"],
              c["lo"], c["hi"], tag, detail, c["g_impl"], c.get("dpv2_gate"),
-             c.get("dpv2_flip") or "", c.get("no_read_reason") or ""],
+             c.get("dpv2_flip") or "", c.get("no_read_reason") or "",
+             c.get("ttm_eps"), c.get("ttm_roe_pct"), c.get("next_report") or "",
+             c.get("sessions_to_report"), c.get("context_note") or ""],
             fill=fill_rob if tag == "ROBUST" else (fill_frag if tag == "FRAGILE" else None))
     put(["Range: the class ratio under both ROE routes (Schwab last-FY, EDGAR quarter x4) at "
          "r = 7/9/11%. ROBUST only if all six give the same class. Neither route is TTM."], f_note)
@@ -856,7 +939,7 @@ def _write_sheet(ws, snap):
         for cell in row:
             if isinstance(cell.value, float):
                 cell.number_format = "0.00"
-    widths = [8, 22, 7, 6, 26, 13, 8, 11, 10, 10, 9, 16, 11, 14, 15, 48]
+    widths = [8, 22, 7, 6, 26, 13, 8, 11, 10, 10, 9, 16, 11, 14, 15, 48, 9, 10, 12, 10, 26]
     from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -1051,6 +1134,24 @@ def _selftest():
     check("NEGATIVE: a copy the review has not rebuilt today is refused", not ok5 and "latest cohort" in msg5)
     ok6, msg6 = embed(snap_j, os.path.join(tmp, "claude_equity_bot_tracker.xlsx"))
     check("NEGATIVE: the master is never written", not ok6 and "MASTER" in msg6)
+    # ---- 2026-10-23: the context note --------------------------------------
+    cx = {"ttm": {"PAA": {"no_read": "no TTM: no EPS tag"},
+                  "DOW": {"eps_ttm": -4.0, "flags": ["STALE: last quarter ends 2026-03-31"]},
+                  "SPY": {"no_read": "fund (no EPS)"}},
+          "earn": {"DOW": {"date": "2026-10-22", "sessions": 0, "note": "INSIDE 5 SESSIONS"},
+                   "SPY": {"note": "n/a (fund)"}}}
+    check("a NO READ reason is not doubled ('TTM: no TTM:')",
+          _ctx_cells(cx, "PAA")[4] == "no TTM: no EPS tag")
+    check("the calendar flag and a TTM flag both print",
+          _ctx_cells(cx, "DOW")[4] == "INSIDE 5 SESSIONS; TTM STALE: last quarter ends 2026-03-31")
+    check("a fund says so once", _ctx_cells(cx, "SPY")[4] == "n/a (fund)")
+    import rulings
+    bk = rulings.RULINGS["DP-3C-bk"]
+    mo = (bk.get("measurement_only") or ("ZZZZ",))[0]
+    check("a DP-3C-bk name carries the thesis label while the ruling is open",
+          not bk.get("open")
+          or (thesis_label(mo) == THESIS_LABEL and THESIS_LABEL in _ctx_cells({}, mo)[4]))
+    check("a name outside DP-3C-bk carries no label", thesis_label("AAPL") == "")
     print("SELFTEST %s (%d failed)" % ("PASSED" if not fails else "FAILED", len(fails)))
     return 1 if fails else 0
 

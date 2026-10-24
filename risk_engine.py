@@ -23,6 +23,19 @@
 #
 # USAGE:
 #   from risk_engine import evaluate_signal, RiskConfig
+#   python risk_engine.py --selftest      (P4-1: every declared rule, tested)
+#
+# AMENDED 2026-10-22 (DP-3C-bc; P4-1, P4-3):
+#   * --selftest: one passing and one FAILING case for each of the nine rules
+#     RiskConfig declares, plus the per-account split. A rule that is
+#     declared but not enforced (DAILY_LOSS_LIMIT_PCT, MAX_OPEN_POSITIONS as
+#     a gate) is tested for being LABELLED as such, so it cannot start or stop
+#     being enforced silently.
+#   * print_risk_report no longer prints a share count for an account the
+#     PER-ACCOUNT verdict REJECTED. On a PARTIAL row (2026-10-06/07: one
+#     account APPROVED, the other REJECTED) the console sized both - a
+#     silent headline / per-account disagreement (P4-3). Console only: the
+#     log line, the verdict and the decision are unchanged.
 # =============================================================================
 
 
@@ -421,6 +434,24 @@ def evaluate_signal_per_account(signal: dict, portfolios: list,
     return False, f"Rejected in every account. PER-ACCOUNT: {split}. {worst}."
 
 
+def per_account_verdicts(reason) -> dict:
+    """{account label: 'APPROVED'|'REJECTED'} from a PER-ACCOUNT reason, or {}.
+
+    Reads the split evaluate_signal_per_account() writes, e.g.
+    'PER-ACCOUNT: Acct A=APPROVED; Acct B=REJECTED.' Labels may hold
+    spaces; the split ends at the first full stop."""
+    import re as _re
+    m = _re.search(r"PER-ACCOUNT: ([^.]*)\.", reason or "")
+    if not m:
+        return {}
+    out = {}
+    for part in m.group(1).split(";"):
+        if "=" in part:
+            k, v = part.rsplit("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
 # =============================================================================
 # POSITION SIZING
 # =============================================================================
@@ -527,12 +558,21 @@ def print_risk_report(signal: dict, portfolio: dict,
     if approved and signal.get("signal") == "BUY":
         price = signal.get("lastPrice", 0)
         accounts = portfolios if portfolios else ([portfolio] if portfolio else [])
+        per = per_account_verdicts(reason)
         printed = False
         for p in accounts:
             pvalue = p.get("portfolio_value", 0)
             if not (price and pvalue):
                 continue
             label = p.get("account_label", "Account")
+            # P4-3 (2026-10-22): size only where the PER-ACCOUNT verdict is
+            # APPROVED. The headline APPROVED means "actionable in at least
+            # one account"; it is not a share count for the others.
+            if per and per.get(label) != "APPROVED":
+                print(f"  Shares   : not sized in {label} -- "
+                      f"{per.get(label, 'not evaluated')} in this account")
+                printed = True
+                continue
             shares = calculate_position_size(pvalue, price)
             print(f"  Shares   : {shares} shares in {label} "
                   f"({cfg.MAX_POSITION_PCT:.0%} of ${pvalue:,.0f})")
@@ -645,3 +685,122 @@ def apply_conf_damping(signal: dict, price_history: list):
     signal["confidence"] = op
     meta.update(raw=raw, op=op, damp=damp, active=(damp != 0))
     return signal, meta
+
+
+# =============================================================================
+# SELFTEST (P4-1, added 2026-10-22, DP-3C-bc)
+# =============================================================================
+def selftest() -> int:
+    """One passing and one failing case per declared rule. Offline; no
+    network, no account data - synthetic signals and portfolios only."""
+    import contextlib
+    import io
+    fails = []
+
+    def check(name, cond):
+        print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
+        if not cond:
+            fails.append(name)
+
+    def sig(s="BUY", c=75, dq="HIGH", tk="AAA", **kw):
+        d = dict(ticker=tk, signal=s, confidence=c, data_quality=dq, lastPrice=100.0)
+        d.update(kw)
+        return d
+
+    acct = dict(portfolio_value=10000.0, positions=[], account_label="Test")
+    cfg = RiskConfig()
+
+    # CHECK 1 / CHECK 2
+    check("error signal -> REJECTED", not evaluate_signal(sig(error="parse"), acct)[0])
+    check("HOLD -> APPROVED (no action)", evaluate_signal(sig("HOLD", 10, "LOW"), acct)[0])
+    # 1. MIN_CONFIDENCE_BUY
+    check("MIN_CONFIDENCE_BUY: BUY at the gate -> APPROVED",
+          evaluate_signal(sig("BUY", cfg.MIN_CONFIDENCE_BUY), acct)[0])
+    check("MIN_CONFIDENCE_BUY: BUY one below -> REJECTED",
+          not evaluate_signal(sig("BUY", cfg.MIN_CONFIDENCE_BUY - 1), acct)[0])
+    # 2. MIN_CONFIDENCE_SELL (SELL needs nothing held in the single-account path)
+    check("MIN_CONFIDENCE_SELL: SELL at the gate -> APPROVED",
+          evaluate_signal(sig("SELL", cfg.MIN_CONFIDENCE_SELL), acct)[0])
+    check("MIN_CONFIDENCE_SELL: SELL one below -> REJECTED",
+          not evaluate_signal(sig("SELL", cfg.MIN_CONFIDENCE_SELL - 1), acct)[0])
+    # 3. MAX_POSITION_PCT (CHECK 6b) and the sizing it drives
+    cap = cfg.MAX_POSITION_PCT * acct["portfolio_value"]
+    check("MAX_POSITION_PCT: held below the cap -> APPROVED",
+          evaluate_signal(sig(), acct, held_value=cap - 1)[0])
+    check("MAX_POSITION_PCT: held at the cap -> REJECTED",
+          not evaluate_signal(sig(), acct, held_value=cap)[0])
+    with contextlib.redirect_stdout(io.StringIO()):
+        n = calculate_position_size(10000.0, 150.0)
+    check("MAX_POSITION_PCT: sizing rounds DOWN (10,000 x 5% / 150 = 3)", n == 3)
+    # 4. MAX_OPEN_POSITIONS - a FLAG, never a rejection (DP-3C-o)
+    full = dict(acct, positions=[{"instrument": {"symbol": f"T{i}"}}
+                                 for i in range(cfg.MAX_OPEN_POSITIONS)])
+    s4 = sig()
+    ok4, _ = evaluate_signal(s4, full)
+    check("MAX_OPEN_POSITIONS: at the cap -> APPROVED with a CHECK 6 flag",
+          ok4 and any("CHECK 6" in f for f in s4.get("risk_flags", [])))
+    s4b = sig()
+    evaluate_signal(s4b, acct)
+    check("MAX_OPEN_POSITIONS: below the cap -> no flag", not s4b.get("risk_flags"))
+    # 5. DAILY_LOSS_LIMIT_PCT - declared, NOT enforced (DP-T1), and LABELLED
+    check("DAILY_LOSS_LIMIT_PCT: declared", isinstance(cfg.DAILY_LOSS_LIMIT_PCT, float))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print_risk_report(sig(), acct, approved=True, reason="PENDING HUMAN APPROVAL")
+    out = buf.getvalue()
+    check("DAILY_LOSS_LIMIT_PCT: the banner says 'not enforced'",
+          "declared, not enforced" in out)
+    check("MAX_OPEN_POSITIONS: the banner says 'flag only'", "flag only" in out)
+    # 6. ALLOW_POSITION_ADD = False
+    held = dict(acct, positions=[{"instrument": {"symbol": "AAA"}}])
+    check("ALLOW_POSITION_ADD: BUY on a held name -> REJECTED",
+          not evaluate_signal(sig(tk="AAA"), held)[0])
+    check("ALLOW_POSITION_ADD: BUY on an unheld name -> APPROVED",
+          evaluate_signal(sig(tk="BBB"), held)[0])
+    # 7. REQUIRE_HUMAN_APPROVAL - every approval is advice, pending a human
+    ok7, why7 = evaluate_signal(sig(), acct)
+    check("REQUIRE_HUMAN_APPROVAL: an approval reads PENDING HUMAN APPROVAL",
+          ok7 and why7.startswith("PENDING HUMAN APPROVAL"))
+    check("REQUIRE_HUMAN_APPROVAL: is True (DP-T1)", cfg.REQUIRE_HUMAN_APPROVAL is True)
+    # 8. BANNED_TICKERS
+    saved = list(RiskConfig.BANNED_TICKERS)
+    try:
+        RiskConfig.BANNED_TICKERS = ["ZZZ"]
+        check("BANNED_TICKERS: a banned name -> REJECTED",
+              not evaluate_signal(sig(tk="ZZZ"), acct)[0])
+        check("BANNED_TICKERS: any other name -> APPROVED",
+              evaluate_signal(sig(tk="AAA"), acct)[0])
+    finally:
+        RiskConfig.BANNED_TICKERS = saved
+    # 9. MIN_DATA_QUALITY
+    check("MIN_DATA_QUALITY: LOW -> REJECTED", not evaluate_signal(sig(dq="LOW"), acct)[0])
+    check("MIN_DATA_QUALITY: MEDIUM -> APPROVED", evaluate_signal(sig(dq="MEDIUM"), acct)[0])
+
+    # PER-ACCOUNT split (D-1/D-2) and the P4-3 console rule
+    acc_a = dict(portfolio_value=20000.0, positions=[], account_label="Acct A")
+    acc_b = dict(portfolio_value=20000.0, positions=[], account_label="Acct B")
+    brk = [dict(account_label="Acct B", market_value=1000.0)]   # at the 5% cap
+    okp, whyp = evaluate_signal_per_account(sig(), [acc_a, acc_b], brk)
+    per = per_account_verdicts(whyp)
+    check("PER-ACCOUNT: PARTIAL -> headline APPROVED, split kept in the reason",
+          okp and per == {"Acct A": "APPROVED", "Acct B": "REJECTED"})
+    check("PER-ACCOUNT: SELL on a name held nowhere -> REJECTED",
+          not evaluate_signal_per_account(sig("SELL", 80), [acc_a, acc_b], [])[0])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print_risk_report(sig(), acc_a, approved=okp, reason=whyp, portfolios=[acc_a, acc_b])
+    out = buf.getvalue()
+    check("P4-3: the console sizes the APPROVED account",
+          "shares in Acct A" in out)
+    check("P4-3: the console does NOT size the REJECTED account",
+          "shares in Acct B" not in out and "not sized in Acct B" in out)
+    check("per_account_verdicts: no split -> {}", per_account_verdicts("HOLD signal") == {})
+    print(f"  risk_engine selftest: {'ALL PASS' if not fails else 'FAIL ' + ', '.join(fails)}")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    if "--selftest" in _sys.argv:
+        _sys.exit(selftest())
+    print("risk_engine.py is a library. Run with --selftest to test every declared rule.")

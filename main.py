@@ -199,6 +199,45 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# --- Input capture (gap #5 / R6, added 2026-10-22; DP-3C-bg, DP-3C-bh) ---
+# What the model was shown is only partly in the log: headline TEXT goes into
+# the prompt but only its count is logged, so a figure in a rationale cannot
+# be traced (TWST's "1-year move" on 2026-09-22..25) and a forced generator
+# change could not be replayed on identical inputs. This writes one JSON line
+# per ticker to logs/inputs_<date>.jsonl, BESIDE the log: the log line and the
+# prompt are untouched, so no parser changes and nothing the model sees moves
+# (not a DP-3C-ai change). Holdings are never written; logs/ is git-ignored.
+# FAIL-OPEN: any error here is a warning and the run carries on.
+INPUTS_PATH = os.path.join(LOG_DIR, f"inputs_{datetime.now().strftime('%Y-%m-%d')}.jsonl")
+_inputs_warned = False
+
+
+def capture_inputs(ticker: str, headlines, price_history, prior_signals,
+                   extra_context, quote) -> None:
+    global _inputs_warned
+    try:
+        import hashlib
+        ctx = extra_context or ""
+        rec = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "ticker": ticker,
+            "headlines": headlines or [],
+            "price_history": price_history or [],
+            "prior_signals": prior_signals or [],
+            "last_price": (quote or {}).get("lastPrice"),
+            "extra_context_chars": len(ctx),
+            "extra_context_sha256": hashlib.sha256(ctx.encode("utf-8")).hexdigest() if ctx else None,
+            "extra_context": ctx,
+        }
+        with open(INPUTS_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:                      # noqa: BLE001 - fail-open by design
+        if not _inputs_warned:
+            log.warning(f"input capture skipped ({e}); the run is unaffected.")
+            _inputs_warned = True
+
+
 # =============================================================================
 # PORTFOLIO DISPLAY
 # =============================================================================
@@ -624,6 +663,11 @@ def process_ticker(ticker: str, portfolios: list,
         if EDGAR_ENABLED:
             from edgar_client import last_meta
             edgar_meta = last_meta(ticker)
+
+        # Gap #5 (2026-10-22): record the inputs, fail-open. Same objects the
+        # call below receives; nothing is altered.
+        capture_inputs(ticker, headlines, price_history, prior_signals,
+                       extra_context, quote)
 
         for variant in variants:
             signal = get_signal(

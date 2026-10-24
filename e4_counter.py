@@ -66,6 +66,16 @@ E43_N = 20                                            # pre-reg E4-3 / DP-3C-ay
 E43_BACKSTOP = dt.date(2026, 11, 20)                  # DP-3C-ay (i)
 REFUSED = ("tracker_with_registry.xlsx",)
 
+# POSSIBLE-UNSEEN flags EXPLAINED, 2026-10-22 (count-only: edgar_cache FILE
+# NAMES, no content read). Each was two 8-K documents with different accession
+# numbers and the SAME filing date, so the 30-day count rose by 2 while one new
+# event date appeared. An event is (ticker, 8-K date), so neither adds an event.
+# Pinned to (ticker, run date, excess): a new or larger flag still prints.
+UNSEEN_EXPLAINED = {
+    ("JPM", dt.date(2026, 10, 13), 1): "two 8-Ks dated 2026-10-13 (accessions ...065582, ...065616)",
+    ("PM", dt.date(2026, 9, 8), 1): "two 8-Ks dated 2026-09-08 (accessions ...060806, ...060822)",
+}
+
 _TK = re.compile(r'Signal JSON: \{"ticker": "([A-Z][A-Z.\-]*)"')
 _SIG = re.compile(r'"signal": "([A-Z]+)"')
 _PV = re.compile(r'"prompt_variant": "([^"]+)"')
@@ -247,10 +257,15 @@ def report(e42, e43, as_of, log_info):
     L.append(f"          detected {e43['events']}: " + ", ".join(
         f"{k} {v}" for k, v in sorted(e43["status"].items())))
     if e43["unseen"]:
+        open_ = [(tk, day, k) for tk, day, k in e43["unseen_at"]
+                 if (tk, day, k) not in UNSEEN_EXPLAINED]
         L.append(f"          POSSIBLE UNSEEN 8-Ks (30-day count rose more than new dates explain): "
-                 f"{e43['unseen']} - not counted; check edgar_cache if it matters")
+                 f"{e43['unseen']} - not counted; {len(open_)} unexplained"
+                 + ("; check edgar_cache file names (count only)" if open_ else ""))
         for tk, day, k in e43["unseen_at"]:
-            L.append(f"            {tk} on the {day} run: {k} more 8-K(s) than new dates")
+            why = UNSEEN_EXPLAINED.get((tk, day, k))
+            L.append(f"            {tk} on the {day} run: {k} more 8-K(s) than new dates"
+                     + (f" - EXPLAINED: {why}; same event, no change to the count" if why else ""))
     for tk, f, s in e43["detail"]:
         L.append(f"            {f}  {tk:<5} {s}")
     L.append("")

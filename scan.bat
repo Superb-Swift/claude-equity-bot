@@ -34,6 +34,12 @@ REM    * trail_basis_audit now GATES. The window fix was applied 2026-08-31;
 REM      D1 logs are history, and a D2 log on the shifted window is a regression.
 REM    * Enter outcome closes with enter_closes.py BEFORE this scan (see the
 REM      daily workflow v8.0). It refuses unsettled sessions.
+REM
+REM  AMENDED 2026-10-22 (DP-3C-ba, DP-3C-bj): outcome_sanity gained Check H
+REM  (a settled session with blank closes) and Check I (K..N formulas and
+REM  cached returns), and Check F now GATES on MATERIAL items. Enter closes
+REM  with `python enter_closes.py --catch-up --apply`, which fills every
+REM  settled session still blank, not only tonight's. Saved as CRLF.
 REM ============================================================================
 setlocal
 

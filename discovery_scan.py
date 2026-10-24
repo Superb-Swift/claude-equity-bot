@@ -455,7 +455,55 @@ ARMS = {
     "PR-1": dict(h=5, need=144, label="dconf -> +5d (close)"),
     "PR-2": dict(h=20, need=125, label="trail_skip -> +20d (close)"),
     "PR-3": dict(h=5, need=144, label="shadow damper: IC(damped) - IC(conf), +5d"),
+    # PRE-REGISTERED 2026-10-22 (DP-3C-bh, gap #2), before any qualifying row:
+    # does HOLD confidence carry information NET of a fixed free baseline B?
+    # B = equal-weight mean of per-date ranks of (-trail1), (-trail_skip) and
+    # the ticker's prior mean confidence (conf - conf_dev); nothing fitted.
+    # Statistic: per-date partial rank IC of conf on +5d (close basis) after
+    # removing the rank-linear part of conf explained by B. Signal dates from
+    # 2026-10-23. Read at 144 dates: POSITIVE mean >= +0.03 and t_NW >= 2;
+    # ANTI mean <= -0.03 and t_NW <= -2; otherwise NONE. Blind until then.
+    "PR-5": dict(h=5, need=144, label="conf net of baseline B -> +5d (close)",
+                 start=dt.date(2026, 10, 23)),
 }
+
+
+def baseline_b(x):
+    """Gap #2's fixed baseline score inputs for one row, or None if any is
+    missing. Signs make every input 'higher = expected to do better':
+    reversal on the latest move and on trail_skip; the ticker's own mean
+    confidence carries the identity part of confidence (Discovery §2)."""
+    if x.get("trail1") is None or x.get("trail_skip") is None \
+            or x.get("conf") is None or x.get("conf_dev") is None:
+        return None
+    return (-x["trail1"], -x["trail_skip"], x["conf"] - x["conf_dev"])
+
+
+def partial_ic_series(xs, h, minn=8):
+    """PR-5: per date, rank-residualise conf on B and correlate the residual's
+    ranks with the +h close-basis return's ranks."""
+    out = []
+    for d, grp in by_date(xs).items():
+        pts = []
+        for x in grp:
+            b = baseline_b(x)
+            y = (x.get("rc") or {}).get(h)
+            if b is None or y is None:
+                continue
+            pts.append((x["conf"], b, y))
+        if len(pts) < minn or len({p[0] for p in pts}) <= 2:
+            continue
+        rb = [ranks([p[1][k] for p in pts]) for k in range(3)]
+        bscore = [sum(r[i] for r in rb) / 3.0 for i in range(len(pts))]
+        rc = ranks([p[0] for p in pts])
+        mb, mc = mean(bscore), mean(rc)
+        vb = sum((v - mb) ** 2 for v in bscore)
+        beta = (sum((a - mb) * (c - mc) for a, c in zip(bscore, rc)) / vb) if vb > 0 else 0.0
+        resid = [c - mc - beta * (a - mb) for a, c in zip(bscore, rc)]
+        ic = spearman(resid, [p[2] for p in pts])
+        if not math.isnan(ic):
+            out.append((d, ic))
+    return out
 
 
 def _block_t(values, block=20):
@@ -479,6 +527,9 @@ def arm_series(rows, arm):
         a = dict(ic_series(hold, lambda x: x.get("damped"), lambda x: x["rc"][h]))
         b = dict(ic_series(hold, lambda x: x["conf"], lambda x: x["rc"][h]))
         return [(d, a[d] - b[d]) for d in sorted(set(a) & set(b))]
+    if arm == "PR-5":
+        start = ARMS[arm]["start"]
+        return sorted(partial_ic_series([x for x in hold if x["d"] >= start], h))
     raise KeyError(arm)
 
 
@@ -491,7 +542,10 @@ def arm_verdict(arm, series):
     else:
         m, t, _n = nw_mean(vals, ARMS[arm]["h"] - 1)
         tdesc = f"t_NW {t:+.2f}"
-    if arm in ("PR-1", "PR-2"):
+    if arm == "PR-5":
+        v = ("POSITIVE" if (m >= 0.03 and t >= 2) else
+             "ANTI" if (m <= -0.03 and t <= -2) else "NONE")
+    elif arm in ("PR-1", "PR-2"):
         v = ("POSITIVE" if (m <= -0.05 and t <= -2) else
              "NEGATIVE" if m >= 0 else "INCONCLUSIVE")
     else:
@@ -529,14 +583,30 @@ def progress_lines(rows, only=None, record=True):
                        f"{e['detail'].get('verdict')}  mean {e['detail'].get('mean')}  "
                        f"{e['detail'].get('t')}")
         elif n >= cfg["need"]:
+            # DP-3C-bb (R1, 2026-10-22): the read is taken only once the
+            # closes it rests on have been carried by a later log. Before that
+            # nothing but the count is printed - no mean, t or verdict.
+            last = series[-1][0]
+            as_of = max(x["d"] for x in rows)
+            try:
+                import trading_calendar as _tc
+                res_sess = _tc.shift_sessions(last, cfg["h"])
+            except Exception:                            # noqa: BLE001
+                res_sess = None
+            ok, _l = (rulings.read_protection([res_sess], as_of) if rulings
+                      else (False, res_sess))
+            if not ok:
+                out.append(f"  {arm} {cfg['label']:<44} READ DATE REACHED ({n} dates) - NOT "
+                           f"READ (DP-3C-bb): the {res_sess} close is not yet log-verified")
+                continue
             v, m, t, tdesc = arm_verdict(arm, series)
             out.append(f"  {arm} {cfg['label']:<44} READ DATE REACHED ({n} dates): "
                        f"{v}  mean {m:+.3f}  {tdesc}")
             if record and rulings:
-                last = series[-1][0]
                 rulings.record_reading(arm, last, v == "POSITIVE",
                                        detail=dict(verdict=v, mean=round(m, 4),
-                                                   t=tdesc, dates=n))
+                                                   t=tdesc, dates=n,
+                                                   verified_through=str(res_sess)))
         else:
             out.append(f"  {arm} {cfg['label']:<44} {n:>4} / {cfg['need']} resolved dates   [BLIND]")
     if not only or "PR-4" in only:
@@ -568,6 +638,27 @@ def progress_lines(rows, only=None, record=True):
 
 
 # ----------------------------------------------------------------------------- selftest
+def _pr5_probe():
+    """Synthetic date: when conf is a pure function of B, the residual is flat
+    and the partial IC is undefined (dropped); when conf carries a component
+    orthogonal to B that ranks the returns, the partial IC is positive."""
+    d = dt.date(2027, 1, 4)
+    base = []
+    for i in range(12):
+        t1, ts, tm = (i % 4) * 0.01, ((i * 5) % 7) * 0.01, 50 + (i % 3)
+        base.append(dict(d=d, trail1=t1, trail_skip=ts, conf_dev=0.0, conf=tm))
+    # (a) conf identical to the ticker-mean input, returns random-ish
+    a = [dict(x, rc={5: ((i * 7) % 11) / 100.0}) for i, x in enumerate(base)]
+    flat = partial_ic_series(a, 5)
+    # (b) conf = tm + an orthogonal signal that also orders the returns
+    b = []
+    for i, x in enumerate(base):
+        sig = ((i * 3) % 12)
+        b.append(dict(x, conf=x["conf"] + sig * 10, conf_dev=sig * 10, rc={5: sig / 100.0}))
+    pos = partial_ic_series(b, 5)
+    return (not flat or abs(flat[0][1]) < 0.6) and bool(pos) and pos[0][1] > 0.5
+
+
 def selftest():
     checks = [
         (_easter(2026) - dt.timedelta(days=2), dt.date(2026, 4, 3)),
@@ -595,6 +686,14 @@ def selftest():
         (arm_verdict("PR-3", [(i, -0.01) for i in range(144)])[0], "NEGATIVE"),
         (_block_t([0.0] * 40)[1], 2),
         (PROSPECTIVE_START, dt.date(2026, 9, 17)),
+        # PR-5 (2026-10-22): verdict branches, the start date, and that the
+        # partial IC removes what B explains (conf == B exactly -> no residual
+        # signal; conf independent of B and aligned with returns -> positive)
+        (arm_verdict("PR-5", [(i, 0.05 + (0.01 if i % 2 else -0.01)) for i in range(144)])[0], "POSITIVE"),
+        (arm_verdict("PR-5", [(i, -0.05 + (0.01 if i % 2 else -0.01)) for i in range(144)])[0], "ANTI"),
+        (arm_verdict("PR-5", [(i, 0.0 + (0.02 if i % 2 else -0.02)) for i in range(144)])[0], "NONE"),
+        (ARMS["PR-5"]["start"], dt.date(2026, 10, 23)),
+        (_pr5_probe(), True),
     ]
     bad = [(i, a, b) for i, (a, b) in enumerate(checks) if a != b]
     for i, a, b in bad:

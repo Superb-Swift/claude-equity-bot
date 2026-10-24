@@ -502,6 +502,11 @@ def main():
                          "or you are entering a close off a statement")
     ap.add_argument("--apply", action="store_true", help="write the change (default is dry run)")
     ap.add_argument("--force", action="store_true", help="apply despite the plausibility guard")
+    # ADDED 2026-10-22 (DP-3C-bd): a repair made against an external close
+    # says which source, in the ledger line itself, not only in the notes.
+    ap.add_argument("--source-note", default=None,
+                    help="provenance appended to the ledger source, e.g. "
+                         "'D9 external close (financialcontent.com Close, read 2026-10-22)'")
     args = ap.parse_args()
 
     try:
@@ -693,6 +698,8 @@ def main():
     #   than at a cwd-relative logs/ path.
     src = ("manual --price" if args.price is not None else "broker feed") \
         + (" FORCED" if args.force else "")
+    if args.source_note:
+        src = "%s %s" % (args.source_note.strip().replace("\t", " "), src)
     try:
         backup, ledger, part = write_edits(
             args.tracker, edits, audit, lambda i: tkr, src,

@@ -17,8 +17,9 @@ WHAT IT NEEDS THEM FOR
                                                   Ch.12 self-supporting-g ceiling
 
 WHAT IT DOES NOT DO
-    Touches no existing file. Reads signal_state.json to learn the watchlist so
-    there is no hardcoded ticker list to drift. Writes exactly one new file,
+    Touches no existing file. Reads the latest session log (2026-10-22; before
+    that, signal_state.json) to learn the watchlist so there is no hardcoded
+    ticker list to drift. Writes exactly one new file,
     quote_dump.json. Places no orders. Changes no signal, gate or endpoint.
 
     It DOES make live Schwab API calls -- one quote per ticker, the same volume
@@ -42,6 +43,7 @@ from datetime import datetime, timezone
 
 STATE = "signal_state.json"
 OUT = "quote_dump.json"
+WATCHLIST_SOURCE = STATE      # set by watchlist(); recorded in the dump
 
 # The three fields this exists to capture. Reported per ticker so a run that
 # succeeded but returned nothing useful is visibly distinct from one that
@@ -54,14 +56,42 @@ WANTED = ("eps", "peRatio", "divYield")
 DELAY_S = 0.15
 
 
+def watchlist_from_latest_log(log_dir="logs"):
+    """ADDED 2026-10-22: the tickers the LATEST session log wrote, or [].
+
+    signal_state.json keeps every name the bot ever ran (nothing prunes it), so
+    it asked Schwab for 31 names against a 28-name cohort. The latest log is
+    the run itself: it cannot carry a departed name."""
+    import glob
+    import re
+    pat = re.compile(r'Signal JSON: \{"ticker": "([A-Z][A-Z.\-]*)"')
+    dated = re.compile(r"signals_(\d{4}-\d{2}-\d{2})\.log$")
+    logs = sorted((m.group(1), p) for p in glob.glob(os.path.join(log_dir, "signals_*.log"))
+                  for m in [dated.search(os.path.basename(p))] if m)
+    if not logs:
+        return [], None
+    d, p = logs[-1]
+    with open(p, encoding="utf-8", errors="replace") as fh:
+        return sorted({m.group(1) for ln in fh for m in [pat.search(ln)] if m}), p
+
+
 def watchlist():
-    """Derive the tickers from signal_state.json rather than hardcoding them.
+    """Derive the tickers rather than hardcoding them.
+
+    AMENDED 2026-10-22: from the latest session log first (see above); the
+    old source, signal_state.json, is the fallback only when no log has rows.
 
     The record carries a hardcoded-expected-count defect in signal_scan.py and
     a hardcoded-phase-token class with three instances; a literal ticker list
     would be the same mistake in a new file. Verified 2026-08-17: this file's
     keys match the 2026-08-17 cohort exactly, 26 of 26, no drift either way.
     """
+    global WATCHLIST_SOURCE
+    tk, src = watchlist_from_latest_log()
+    if tk:
+        WATCHLIST_SOURCE = src
+        return tk
+    WATCHLIST_SOURCE = STATE
     if not os.path.exists(STATE):
         sys.stderr.write(
             f"REFUSED: {STATE} not found. Run from the project root so the\n"
@@ -139,7 +169,7 @@ def main():
         return 2
 
     tickers = watchlist()
-    print(f"watchlist derived from {STATE}: {len(tickers)} tickers")
+    print(f"watchlist derived from {WATCHLIST_SOURCE}: {len(tickers)} tickers")
     print("requesting quotes ...")
 
     quotes, failed = {}, []
@@ -167,7 +197,7 @@ def main():
         "captured_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "captured_local": datetime.now().astimezone().isoformat(timespec="seconds"),
         "source": "schwab_client.get_quote",
-        "watchlist_source": STATE,
+        "watchlist_source": WATCHLIST_SOURCE,
         "requested": len(tickers),
         "succeeded": len(quotes),
         "failed": failed,

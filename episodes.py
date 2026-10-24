@@ -246,6 +246,9 @@ def dp3cw_arm(rows, cohort_dates, dropouts=None):
                tickers=tickers_all, tickers_resolved=tickers_res,
                episodes=[e["id"] for e in eps],
                bridged=[(e["ticker"], d) for e in eps for d in e.get("bridged", [])],
+               # ADDED 2026-10-22 (DP-3C-bb): the opening-row dates the read
+               # rests on, so the caller can apply rulings.read_protection().
+               resolved_open_dates=[r["date"] for r in resolved],
                read_ready=len(resolved) >= DP3CW_MIN_N,
                rho=None, verdict="COLLECTING — counts only, no rho before n = %d"
                % DP3CW_MIN_N)

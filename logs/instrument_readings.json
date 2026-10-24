@@ -331,6 +331,90 @@
         "source": "h4_dq_threshold.py"
       },
       "pass": false
+    },
+    {
+      "date": "2026-10-15",
+      "detail": {
+        "high": 63.16124920331422,
+        "med": 45.025510204081634,
+        "n": 61,
+        "rate": 50.81967213114754,
+        "recorded_at": "2026-10-15T15:20:17",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
+    },
+    {
+      "date": "2026-10-16",
+      "detail": {
+        "high": 62.853551225644246,
+        "med": 44.936708860759495,
+        "n": 61,
+        "rate": 50.81967213114754,
+        "recorded_at": "2026-10-16T15:23:46",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
+    },
+    {
+      "date": "2026-10-19",
+      "detail": {
+        "high": 62.853551225644246,
+        "med": 44.936708860759495,
+        "n": 61,
+        "rate": 50.81967213114754,
+        "recorded_at": "2026-10-20T09:54:49",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
+    },
+    {
+      "date": "2026-10-20",
+      "detail": {
+        "high": 62.5,
+        "med": 44.72049689440994,
+        "n": 61,
+        "rate": 50.81967213114754,
+        "recorded_at": "2026-10-20T15:46:48",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
+    },
+    {
+      "date": "2026-10-21",
+      "detail": {
+        "high": 62.32586311326469,
+        "med": 44.96314496314496,
+        "n": 62,
+        "rate": 51.61290322580645,
+        "recorded_at": "2026-10-21T17:18:52",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
+    },
+    {
+      "date": "2026-10-22",
+      "detail": {
+        "high": 62.22355050806934,
+        "med": 44.87804878048781,
+        "n": 63,
+        "rate": 50.79365079365079,
+        "recorded_at": "2026-10-22T16:48:12",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
+    },
+    {
+      "date": "2026-10-23",
+      "detail": {
+        "high": 62.10153482880756,
+        "med": 44.98186215235792,
+        "n": 64,
+        "rate": 50.0,
+        "recorded_at": "2026-10-23T17:19:15",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
     }
   ]
 }

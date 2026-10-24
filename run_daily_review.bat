@@ -55,6 +55,13 @@ REM     sheet, prints WRITTEN / STALE / ABSENT, and sets the exit code.
 REM     Same lesson as value.bat's 2026-08-19 guard: an exit code is a
 REM     claim; the artifact is the evidence. Exit 0 = complete, 1 = not.
 REM
+REM AMENDED 2026-10-22 (DP-3C-ba): chain_check.py runs FIRST and WARNS when
+REM   the evening chain is out of order: no scan for today, blank closes on a
+REM   settled session (enter_closes did not run), no value.bat for the previous
+REM   session, or a report copy never refreshed in Excel (step 7). It must run
+REM   before the copy is rebuilt, which erases the evidence for the last one.
+REM   The 10-19 and 10-20 breaks would each have printed a WARN here.
+REM
 REM ORDERING CONSTRAINT (do not reorder the last two blocks):
 REM   build_near_miss_registry.py --emit-master-copy REBUILDS
 REM   tracker_with_registry.xlsx from the master. Any sheet embedded before
@@ -80,6 +87,13 @@ if errorlevel 1 (
 
 REM Run start time, for review_artifacts.py (added 2026-10-09).
 for /f %%t in ('python -c "import time;print(int(time.time()))"') do set "T0=%%t"
+
+echo.
+echo ============ Chain check - did tonight's chain run in order? ============
+REM ADDED 2026-10-22 (DP-3C-ba). It never stops the review; a warning makes
+REM the review's exit code non-zero (folded in at the end).
+python chain_check.py --tracker "%TRACKER%" --report "%REPORT%"
+set "CHAIN_RC=%ERRORLEVEL%"
 
 REM ---- Ensure openpyxl + matplotlib + Pillow are present. openpyxl: registry ----
 REM ---- + both embeds. matplotlib: the trace chart and the strip cards.       ----
@@ -142,7 +156,8 @@ REM styles the whole sheet to match the image and hides gridlines. This step
 REM also drops the retired 'Guardrail Trace' / 'Live Cohort Scoreboard' tabs
 REM from the copy; if that notice prints EVERY run, the master still has them.
 python monitor_strip.py --tracker "%TRACKER%" --logs "logs\signals_*.log" --embed-into "%REPORT%" --theme dark
-echo   (open %REPORT% in Excel to refresh the formula cache)
+echo   STEP 7: open %REPORT% in Excel, let it recalculate, save and close.
+echo   Tomorrow's chain_check fails if this is skipped.
 
 echo.
 echo ========= Prospective arms - counts only (DP-3C-ah) ==========
@@ -163,6 +178,11 @@ echo.
 echo ============= Review artifacts - written by THIS run? =============
 python review_artifacts.py --t0 %T0%
 set "RC=%ERRORLEVEL%"
+REM 2026-10-22: a chain_check warning makes the review exit 1 (never 0).
+if not "%CHAIN_RC%"=="0" if "%RC%"=="0" (
+    echo   chain_check reported the chain out of order - exit code set to 1.
+    set "RC=1"
+)
 
 echo.
 echo ============================================================

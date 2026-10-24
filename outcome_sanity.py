@@ -66,6 +66,34 @@ CHECKS
      resolution session has not settled yet cannot hold a close. GATES. Before
      this check such cells were skipped without a word: on 2026-09-16 the
      master held 80 closes for 2026-09-17/18 and the run reported CLEAN.
+  H  DUE BUT BLANK (added 2026-10-22, DP-3C-ba; proposed 2026-10-20 as G-a).
+     A cell whose resolution session HAS settled and is still blank. GATES.
+     The mirror image of G: on 2026-10-20 the master was missing all 54 closes
+     for 2026-10-19 (enter_closes never ran that evening) and every check
+     here read CLEAN, because each of them reads only cells that hold a value.
+     Rows with no Px@signal are counted, not gated: enter_closes cannot fill
+     them (it has no return to compute), so gating them would be permanent.
+  I  FORMULA AND CACHE INTEGRITY (added 2026-10-22, DP-3C-ba; G-b). Every
+     K..N formula on the Signals sheet is the canonical from-signal one
+     (repair_return_formulas.CANON), and every cached K/L/M/N value equals what
+     that formula gives on the row's own prices. GATES. From 2026-09-16 to
+     2026-10-21, L and M carried the chained (I-H)/H, (J-I)/I pattern on 575
+     data rows; every data_only reader of +10d and +20d read the leg, not the
+     return, and nothing here could see it because this module never read
+     K..N. It still never TRUSTS K..N: it reads them only to compare them
+     with the prices.
+  VERDICT SENSITIVITY (added 2026-10-22). Each Check F line says whether
+     taking the log's close would flip a verdict: the +5d N column
+     ("VERDICT-SENSITIVE: N flips") or a +10d/+20d band or sign crossing.
+     A PRECISION item that flips a verdict is not a rounding matter.
+
+  AMENDED 2026-10-22 (DP-3C-bj): CHECK_F_GATES_EXIT is True. It was held False
+  while GM 2026-08-20 was unadjudicated; that cell was settled against an
+  external close on 2026-10-22 [R: outcome_close_repairs.log]. MATERIAL Check
+  F items now gate; PRECISION items never do. The two remaining MATERIAL
+  items (SND 2026-07-24, 07-27) were adjudicated the same day by D9: the
+  master is right and the LOG is back-adjusted. They are retired through
+  VERIFIED_LOG_ADJUSTED, pinned to both prices.
 
 Advisory-only - no orders - not financial advice.
 """
@@ -98,7 +126,8 @@ except ImportError:                                    # pragma: no cover
 # Check F reports but does not gate while GM 2026-08-20 is unadjudicated
 # (manual-entry error vs corporate-action-adjusted close). Flip to True once
 # that is settled; a known-open item should not turn the gate red daily.
-CHECK_F_GATES_EXIT = False
+# AMENDED 2026-10-22 (DP-3C-bj): adjudicated 2026-10-22, so the gate is on.
+CHECK_F_GATES_EXIT = True
 CHECK_F_TOL_PCT = 0.05      # retained for the %-gap column only (see CHECK_F_TOL_ABS)
 # AMENDED 2026-09-16 (DP-3C-ag). The log prints closes to 2dp, so a cell that
 # holds the same close can differ from it by at most half a cent. Anything
@@ -163,6 +192,39 @@ VERIFIED_REAL_MOVES = {
     ),
 }
 
+# ------------------------------------------------------- Check F allowlist
+# VERIFIED LOG ADJUSTMENTS. Added 2026-10-22 (DP-3C-bj, D9).
+#
+# WHY THIS EXISTS. Check F treats the log's H1 close series as the
+# independent source. D9 (2026-10-22) found that it is not always the raw
+# close: Schwab's daily candles are BACK-ADJUSTED after some distributions.
+# SND's logs fetched after its ~2026-07-28 ex-date carry closes x0.9786
+# (4.66 -> 4.56, 4.72 -> 4.62, 4.81 -> 4.71 ...), exactly the external
+# "Adjusted Close" column, while the master holds the official close (65 of
+# 65 SND sessions agree with the external Close column). Regular dividends
+# (JPM, SCHD) were NOT adjusted, so the class is per-distribution, not
+# per-name.
+#
+# The same discipline as VERIFIED_REAL_MOVES: the entry pins the ticker, the
+# session, the master price AND the log price. If either value moves, the
+# entry stops matching and the finding returns. A suppressed item prints in
+# its own block with its reason; nothing is dropped silently.
+#
+# key   : (TICKER, session ISO date)
+# value : (master price, log price, reason)
+VERIFIED_LOG_ADJUSTED = {
+    ("SND", "2026-07-24"): (
+        4.66, 4.56,
+        "D9 2026-10-22: official close 4.66 (financialcontent.com Close); "
+        "4.56 is the external Adjusted Close. 1 log fetched before the ~07-28 "
+        "ex-date carries 4.66, 3 fetched after carry 4.56. Master correct."),
+    ("SND", "2026-07-27"): (
+        4.72, 4.62,
+        "D9 2026-10-22: official close 4.72 (financialcontent.com Close); "
+        "4.62 is the external Adjusted Close. All 4 carrying logs post-date "
+        "the ~07-28 ex-date. Master correct."),
+}
+
 # Price equality for the pin. Tight enough that a real re-entry breaks the
 # match; loose enough to survive float round-trip through openpyxl.
 PIN_TOL = 1e-6
@@ -200,8 +262,119 @@ def load(path):
             "h": ws.cell(r, 8).value,
             "i": ws.cell(r, 9).value,
             "j": ws.cell(r, 10).value,
+            # cached K..N, read ONLY by Check I to compare against the prices
+            "k": ws.cell(r, 11).value,
+            "l": ws.cell(r, 12).value,
+            "m": ws.cell(r, 13).value,
+            "n": ws.cell(r, 14).value,
         })
     return rows
+
+
+# ---------------------------------------------------------------- Check I
+# ADDED 2026-10-22 (DP-3C-ba). One definition of the canonical formulas, shared
+# with the tool that repairs them, so the check and the repair cannot drift.
+CACHE_TOL = 1e-9          # a return is a fraction; Excel and Python agree far
+                          # inside this, and a chained leg misses it by ~1e-3
+
+
+def _band(sig, k, band=BAND_PCT / 100.0):
+    sig = str(sig or "").strip().upper()
+    if sig == "HOLD":
+        return "YES" if abs(k) < band else "NO"
+    if sig == "BUY":
+        return "YES" if k > 0 else "NO"
+    if sig == "SELL":
+        return "YES" if k < 0 else "NO"
+    return ""
+
+
+def _blankish(v):
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
+
+def check_integrity(path, rows, first_row=FIRST_DATA_ROW):
+    """Check I. Returns (findings, info) as lists of strings.
+
+    (1) Formulas: every K..N cell carrying a formula, from first_row to the
+        sheet's last row, resolves (shared formulas included) to the canonical
+        text. Template rows below the data are checked too: the 10-27 paste
+        would have dragged a broken N into use.
+    (2) Cache: on every data row with a usable Px@signal, cached K/L/M equal
+        (price - G)/G within CACHE_TOL, or are blank where the price is blank;
+        cached N equals the band verdict on that K.
+    A row whose Px@signal is blank or zero is skipped for (2) and counted."""
+    findings, info = [], []
+    try:
+        import zipfile
+        import repair_outcome_close as _roc
+        import repair_return_formulas as _rrf
+    except Exception as e:                                   # pragma: no cover
+        return ["[I] formula/cache check unavailable: %s" % e], info
+    try:
+        zin = zipfile.ZipFile(path)
+        xml = zin.read(_roc.signals_part(zin)).decode("utf-8")
+        zin.close()
+    except Exception as e:                                   # pragma: no cover
+        return ["[I] could not read the Signals sheet XML: %s" % e], info
+    cells, _groups, masters = _rrf.scan(xml, first_row)
+    bad = {}
+    for ref, c in cells.items():
+        eff = _rrf.effective(ref, c, masters)
+        if eff != _rrf.CANON[c["col"]].format(r=c["row"]):
+            bad[ref] = eff
+    by_col = {}
+    for ref in bad:
+        by_col.setdefault(ref[0], []).append(int(ref[1:]))
+    for col in sorted(by_col):
+        rs = sorted(by_col[col])
+        ex = "%s%d" % (col, rs[0])
+        findings.append("[I] %d %s formula cell(s) NOT canonical, rows %d..%d; e.g. "
+                        "%s = %s (canonical %s)"
+                        % (len(rs), col, rs[0], rs[-1], ex, bad[ex],
+                           _rrf.CANON[col].format(r=rs[0])))
+    info.append("[I] formulas: %d K..N formula cell(s) scanned from row %d, "
+                "%d non-canonical" % (len(cells), first_row, len(bad)))
+
+    mism, skipped, compared = [], 0, 0
+    for r in rows:
+        g = r["g"]
+        if not num(g) or g == 0:
+            skipped += 1
+            continue
+        for pk, ck, label in (("h", "k", "K"), ("i", "l", "L"), ("j", "m", "M")):
+            px, cv = r[pk], r[ck]
+            compared += 1
+            if num(px):
+                want = (px - g) / g
+                if not num(cv):
+                    mism.append((label, r, "cached %r, expected %.6f" % (cv, want)))
+                elif abs(cv - want) > CACHE_TOL:
+                    mism.append((label, r, "cached %.6f, expected %.6f (from Px@signal)"
+                                 % (cv, want)))
+            elif not _blankish(cv):
+                mism.append((label, r, "cached %r with a blank price" % (cv,)))
+        compared += 1
+        if num(r["h"]):
+            want = _band(r["sig"], (r["h"] - g) / g)
+            if str(r["n"] or "").strip().upper() != want:
+                mism.append(("N", r, "cached %r, expected %r" % (r["n"], want)))
+        elif not _blankish(r["n"]):
+            mism.append(("N", r, "cached %r with a blank +5d price" % (r["n"],)))
+    by = {}
+    for label, r, why in mism:
+        by.setdefault(label, []).append((r, why))
+    for label in sorted(by):
+        lst = by[label]
+        r0, why0 = lst[0]
+        findings.append("[I] %d cached %s value(s) disagree with the prices, rows %d..%d; "
+                        "e.g. %s row %d %s %s"
+                        % (len(lst), label, min(x[0]["row"] for x in lst),
+                           max(x[0]["row"] for x in lst), r0["tkr"], r0["row"],
+                           r0["date"], why0))
+    info.append("[I] cache: %d K..N value(s) compared with the prices, %d mismatched; "
+                "%d row(s) skipped (no usable Px@signal)" % (compared, len(mism), skipped))
+    return findings, info
 
 
 def _digit_signature(master, log_val):
@@ -217,6 +390,15 @@ def _digit_signature(master, log_val):
     signature is strong evidence for the typo class regardless of size --
     on the first full run these ranged from 0.061% (CORN) to 2.351% (NKE),
     which is why sorting by percentage buried the clearest cases.
+
+    AMENDED 2026-10-22 (D9). "An adjustment cannot produce one digit off by
+    one" is FALSE on a low-priced name. SND 2026-07-24/27 carried exactly
+    this signature (4.66 vs 4.56, 4.72 vs 4.62), and it was a proportional
+    back-adjustment in the LOG channel (x0.9786 after a distribution), with
+    the master holding the official close. At $4.66 a 2.1% factor moves the
+    tenths digit by one. The signature is still the best triage axis for a
+    typo, but on a name under about $10 it is not evidence on its own: check
+    the external Close and Adjusted Close columns before repairing.
 
     Returns (True, description) or (False, "").
     """
@@ -278,6 +460,111 @@ def _wrap(text, width):
     return out
 
 
+def due_but_blank(rows, resolve, settled_through):
+    """Check H's rule (DP-3C-ba). Returns ({session: [(tkr, row, label)]},
+    n_blank_without_pxsig). A cell is DUE when its +n session is on or before
+    `settled_through`; it is a finding when it is still blank and the row has
+    a usable Px@signal (without one, enter_closes has nothing to compute)."""
+    due, no_px = {}, 0
+    for r in rows:
+        for label, col, n in HORIZONS:
+            v = r[{8: "h", 9: "i", 10: "j"}[col]]
+            if num(v):
+                continue
+            rdate = resolve(r["date"], n)
+            if rdate is None or rdate > settled_through:
+                continue
+            if not num(r["g"]) or r["g"] == 0:
+                no_px += 1
+                continue
+            due.setdefault(rdate, []).append((r["tkr"], r["row"], label))
+    return due, no_px
+
+
+def _verdict_sensitivity(row_by_num, where_l, price):
+    """ADDED 2026-10-22. Would replacing these cells with the log's close
+    change a verdict? where_l is [(row, '+5d'|'+10d'|'+20d'), ...]. Returns
+    a suffix for the Check F line ('' when nothing would change)."""
+    notes = []
+    for row, label in where_l:
+        r = row_by_num.get(row)
+        if r is None or not num(r["g"]) or r["g"] == 0:
+            continue
+        key = {"+5d": "h", "+10d": "i", "+20d": "j"}[label]
+        old = r[key]
+        if not num(old):
+            continue
+        o, n_ = (old - r["g"]) / r["g"], (price - r["g"]) / r["g"]
+        if label == "+5d":
+            if _band(r["sig"], o) != _band(r["sig"], n_):
+                notes.append("row %d N flips %s->%s" % (row, _band(r["sig"], o), _band(r["sig"], n_)))
+        else:
+            hold = str(r["sig"] or "").strip().upper() == "HOLD"
+            if hold and (abs(o) < BAND_PCT / 100.0) != (abs(n_) < BAND_PCT / 100.0):
+                notes.append("row %d %s band crossing" % (row, label))
+            elif (o > 0) != (n_ > 0):
+                notes.append("row %d %s sign flip" % (row, label))
+    return ("  VERDICT-SENSITIVE: " + "; ".join(notes)) if notes else ""
+
+
+def log_close_consensus(rows, logs_glob, resolve):
+    """{(ticker, session): (price, n_runs, {price: [run dates]})} - the close
+    each session log's H1 trace carries, with the most-corroborated price as
+    the challenger. Shared with enter_closes.py --settle-precision (DP-3C-bd)
+    so the cell that Check F flags and the cell that is settled are found by
+    one piece of code. Returns {} if trail_basis_audit is unavailable."""
+    if _tba is None:                                       # pragma: no cover
+        return {}
+    import glob as _glob
+    closes_ref = {}
+    for r in rows:
+        for label, col, n in HORIZONS:
+            v = r[{8: "h", 9: "i", 10: "j"}[col]]
+            if num(v):
+                rd = resolve(r["date"], n)
+                if rd is not None:
+                    closes_ref.setdefault((r["tkr"], rd), []).append((v, r["row"], label))
+    logs = sorted(set(_glob.glob(logs_glob) +
+                      _glob.glob(os.path.join(os.path.dirname(logs_glob) or ".",
+                                              "**", os.path.basename(logs_glob)),
+                                 recursive=True)))
+    seen = {}
+    for lp in logs:
+        m = _tba.LOG_DATE_RE.search(os.path.basename(lp))
+        if not m:
+            continue
+        run_date = datetime.date.fromisoformat(m.group(1))
+        per = _tba.parse_log(lp)
+        if not per:
+            continue
+        ref_for_align = {k: v[0][0] for k, v in closes_ref.items()}
+        a_in = _tba.score_alignment(per, run_date, ref_for_align, True)
+        a_do = _tba.score_alignment(per, run_date, ref_for_align, False)
+        last_is_run = a_in[0] >= a_do[0]
+        for tkr, (_lbl, _tr, cl) in per.items():
+            k = len(cl)
+            for pos, price in enumerate(cl):
+                back = (k - 1 - pos) if last_is_run else (k - pos)
+                if back <= 0:
+                    continue
+                sess = resolve(run_date, -back)
+                if sess is None:
+                    continue
+                seen.setdefault((tkr, sess), {}).setdefault(price, []).append(run_date)
+    out = {}
+    for key, byprice in seen.items():
+        price, runs = max(byprice.items(), key=lambda kv: len(kv[1]))
+        out[key] = (price, len(runs), byprice)
+    return out
+
+
+def default_resolve():
+    """The calendar resolver outcome_sanity uses, for callers."""
+    if _cal is None:                                       # pragma: no cover
+        raise RuntimeError("trading_calendar.py is required")
+    return _cal.shift_sessions
+
+
 def main():
     ap = argparse.ArgumentParser(description="Magnitude guard for manual outcome columns.")
     ap.add_argument("--tracker", default=os.path.join("logs", "claude_equity_bot_tracker.xlsx"))
@@ -290,10 +577,14 @@ def main():
     ap.add_argument("--sd-pct", type=float, default=SD_PCT)
     ap.add_argument("--shape-n", type=int, default=10,
                     help="how many recent cohorts to show in the Check E shape table")
+    ap.add_argument("--selftest", action="store_true",
+                    help="offline self-test of Checks H and I on a synthetic master")
     ap.add_argument("--no-allowlist", action="store_true",
                     help="ignore VERIFIED_REAL_MOVES and show the raw ungated "
                          "[C] set (audit view - run this before trusting a clean result)")
     args = ap.parse_args()
+    if args.selftest:
+        return selftest()
 
     if not os.path.exists(args.tracker):
         print("ERROR: not found: %s" % args.tracker, file=sys.stderr)
@@ -373,6 +664,19 @@ def main():
                                   "which has NOT SETTLED (settled through %s)"
                                   % (r["tkr"], r["row"], r["date"], label, v,
                                      rdate, settled_through))
+
+    # ---- Check H: a SETTLED resolution must be filled (DP-3C-ba) -----------
+    # ADDED 2026-10-22. See the header. Grouped by resolution session so the
+    # line names the command that fixes it.
+    due_blank, no_pxsig = due_but_blank(rows, resolve, settled_through)
+    findings_h = []
+    for rdate in sorted(due_blank):
+        lst = due_blank[rdate]
+        tks = sorted({t for t, _, _ in lst})
+        findings_h.append("[H] %s has SETTLED and %d cell(s) resolving on it are blank "
+                          "(%d ticker(s): %s)"
+                          % (rdate, len(lst), len(tks),
+                             ", ".join(tks[:12]) + (" ..." if len(tks) > 12 else "")))
 
     # ---- Check A: quote-vs-close, and Check B: cross-horizon agreement ------
     resolved_at = {}   # (resolution_date, ticker) -> list of (label, row, price)
@@ -463,6 +767,8 @@ def main():
     findings_f = []
     findings_f_prec = []     # below 0.05% but beyond the log's print precision
     checked_f = 0
+    row_by_num = {r["row"]: r for r in rows}
+    suppressed_f, matched_adj = [], set()     # VERIFIED_LOG_ADJUSTED hits
     if _tba is not None:
         try:
             closes_ref = {}
@@ -533,6 +839,7 @@ def main():
                 for v, row, label in bad:
                     by_val.setdefault(round(v, 6), []).append((row, label))
                 for v, where_l in sorted(by_val.items()):
+                    sens = _verdict_sensitivity(row_by_num, where_l, price)
                     gap = (price - v) / v * 100.0 if v else float("nan")
                     material = abs(gap) >= CHECK_F_TOL_PCT
                     is_digit, sig = _digit_signature(v, price)
@@ -546,13 +853,20 @@ def main():
                         hint = "  ADJUDICATION: log agrees with %s" % "/".join(
                             "row %d %s (%.4f)" % (g[1], g[2], g[0]) for g in good)
                     where = "/".join("row %d %s" % w for w in where_l)
+                    adj = VERIFIED_LOG_ADJUSTED.get((tkr, str(sess)))
+                    if (adj and not args.no_allowlist
+                            and abs(adj[0] - v) <= PIN_TOL and abs(adj[1] - price) <= PIN_TOL):
+                        suppressed_f.append(("[F] %-5s %s  master %.4f vs log %.4f  cells %s"
+                                             % (tkr, sess, v, price, where), adj[2]))
+                        matched_adj.add((tkr, str(sess)))
+                        continue
                     findings_f.append((
                         0 if material else 1, 0 if is_digit else 1, -len(runs), -abs(gap),
                         "[F] %-5s %s  master %.4f vs log %.4f  %+.3f%%  %d log(s)  "
-                        "cells %s  %s%s%s"
+                        "cells %s  %s%s%s%s"
                         % (tkr, sess, v, price, gap, len(runs), where,
                            sig if is_digit else ("no digit signature" if material else sig),
-                           spread, hint)))
+                           spread, hint, sens)))
             findings_f.sort()
             findings_f_prec = [f[-1] for f in findings_f if f[0] == 1]
             findings_f = [f[-1] for f in findings_f if f[0] == 0]
@@ -711,6 +1025,9 @@ def main():
         print("  [C] allowlist: %d verified-real-move entry(ies)%s"
               % (len(VERIFIED_REAL_MOVES),
                  " - DISABLED (--no-allowlist)" if args.no_allowlist else ""))
+        print("  [F] allowlist: %d verified log-adjustment entry(ies)%s"
+              % (len(VERIFIED_LOG_ADJUSTED),
+                 " - DISABLED (--no-allowlist)" if args.no_allowlist else ""))
         print("-" * 78)
 
     # ---- allowlist hygiene --------------------------------------------------
@@ -783,6 +1100,24 @@ def main():
         print("    manual-entry error and would mean the two channels are not")
         print("    interchangeable.")
         print("-" * 78)
+    if suppressed_f:
+        print("  %d SUPPRESSED [F] item(s) - verified log-channel adjustments, NOT gating:"
+              % len(suppressed_f))
+        for line, reason in suppressed_f:
+            print("    " + line)
+            for chunk in _wrap(reason, 68):
+                print("        " + chunk)
+        print("    The master holds the official close; the log carries an adjusted")
+        print("    one (D9, 2026-10-22). Re-run with --no-allowlist to see them.")
+        print("-" * 78)
+    stale_adj = [k for k in VERIFIED_LOG_ADJUSTED if k not in matched_adj]
+    if stale_adj and not args.no_allowlist and not args.quiet:
+        print("  [!] %d STALE log-adjustment allowlist entry(ies) - matched nothing:"
+              % len(stale_adj))
+        for k in sorted(stale_adj):
+            print("      %s %s - a value moved, or the cell left the master. Verify," % k)
+            print("      then delete the entry.")
+        print("-" * 78)
     if findings_f_prec and not args.quiet:
         print("  %d CHECK F PRECISION-TIER item(s) - the cell differs from the log's"
               % len(findings_f_prec))
@@ -805,9 +1140,37 @@ def main():
         print("    enter closes with enter_closes.py, which refuses unsettled sessions.")
         print("-" * 78)
 
+    if findings_h:
+        print("  %d CHECK H FINDING(S) - a settled session with blank closes:"
+              % len(findings_h))
+        for f in findings_h:
+            print("    " + f)
+        print("    Enter them: python enter_closes.py --catch-up   (dry run first;")
+        print("    it fills every settled session with blank cells, oldest first).")
+        print("-" * 78)
+    if not args.quiet:
+        print("  [H] due-but-blank: %d cell(s) on %d settled session(s); %d blank cell(s)"
+              % (sum(len(v) for v in due_blank.values()), len(due_blank), no_pxsig))
+        print("      on rows with no Px@signal counted, not gated (nothing can fill them)")
+
+    findings_i, info_i = check_integrity(args.tracker, rows)
+    if not args.quiet:
+        for line in info_i:
+            print("  " + line)
+    if findings_i:
+        print("  %d CHECK I FINDING(S) - K..N formulas or cached returns are wrong:"
+              % len(findings_i))
+        for f in findings_i:
+            print("    " + f)
+        print("    Formulas: python repair_return_formulas.py (dry run), then --apply")
+        print("    with Excel closed. A cache-only mismatch clears when Excel")
+        print("    recalculates and saves the master (open, wait, save, close).")
+        print("-" * 78)
+
     g_summary = (["[G] %d cell(s) hold a close for an unsettled session - listed above"
                   % len(findings_g)] if findings_g else [])
-    findings = findings_cal + g_summary + findings + (findings_f if CHECK_F_GATES_EXIT else [])
+    findings = (findings_cal + g_summary + findings_h + findings_i + findings
+                + (findings_f if CHECK_F_GATES_EXIT else []))
 
     if findings:
         print("  %d FINDING(S) - VERIFY BEFORE READING ANY RESOLUTION:" % len(findings))
@@ -828,6 +1191,100 @@ def main():
             print("  RESULT: CLEAN - no implausible outcome prices.")
         print("=" * 78)
     return 0
+
+
+def selftest():
+    """Offline. Builds a five-row synthetic master and checks that Check H and
+    Check I fire on the defect each exists for and stay quiet on a clean
+    master. Negative cases first: a check that cannot fail is not a check."""
+    import shutil
+    import tempfile
+    import zipfile
+    import repair_outcome_close as _roc
+    import repair_return_formulas as _rrf
+    fails = []
+
+    def build(path, chained=False, stale_cache=False):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Signals"
+        d0 = datetime.datetime(2026, 9, 1)
+        rows = []
+        for i, (tk, sig, g, h) in enumerate([("AAA", "HOLD", 100.0, 101.0),
+                                              ("BBB", "BUY", 50.0, 49.0),
+                                              ("CCC", "SELL", 20.0, 19.0)]):
+            r = FIRST_DATA_ROW + i
+            ws.cell(r, 1, d0)
+            ws.cell(r, 2, tk)
+            ws.cell(r, 4, sig)
+            ws.cell(r, 7, g)
+            ws.cell(r, 8, h)
+            for col in "KLMN":
+                f = _rrf.CANON[col].format(r=r)
+                if chained and col == "L":
+                    f = 'IF(I{r}="","",(I{r}-H{r})/H{r})'.format(r=r)
+                ws["%s%d" % (col, r)] = "=" + f
+            rows.append((r, sig, g, h))
+        wb.save(path)
+        # give the formulas cached values, as Excel or enter_closes would
+        zin = zipfile.ZipFile(path)
+        part = _roc.signals_part(zin)
+        xml = zin.read(part).decode("utf-8")
+        items = [(it, zin.read(it.filename)) for it in zin.infolist()]
+        zin.close()
+        for r, sig, g, h in rows:
+            k = (h - g) / g
+            xml = _roc.set_cached(xml, "K%d" % r, repr(k + (0.01 if stale_cache else 0.0)))
+            xml = _roc.set_cached(xml, "N%d" % r, _roc.band_flag(sig, k), numeric=False)
+        with zipfile.ZipFile(path, "w") as zout:
+            for it, data in items:
+                zout.writestr(it, xml.encode("utf-8") if it.filename == part else data)
+
+    tmp = tempfile.mkdtemp(prefix="os_selftest_")
+    try:
+        for name, kw, expect in (("clean", {}, 0), ("chained", dict(chained=True), 1),
+                                 ("stale", dict(stale_cache=True), 1)):
+            p = os.path.join(tmp, name + ".xlsx")
+            build(p, **kw)
+            f, _info = check_integrity(p, load(p))
+            got = 1 if f else 0
+            ok = got == expect
+            print("  [%s] Check I %-8s -> %d finding(s)%s"
+                  % ("PASS" if ok else "FAIL", name, len(f),
+                     "" if ok else "  (expected %s)" % ("some" if expect else "none")))
+            if not ok:
+                fails.append("I-" + name)
+        # Check H's rule, isolated: settled + blank + usable Px@signal = due
+        if _cal is None:                                      # pragma: no cover
+            fails.append("H-calendar")
+        else:
+            d = datetime.date(2026, 10, 12)
+            r5 = _cal.shift_sessions(d, 5)            # 2026-10-19, the real 10-19 gap
+            base = dict(row=5, date=d, tkr="AAA", sig="HOLD", g=10.0,
+                        h=None, i=None, j=None)
+            cases = (("due", dict(base), r5, 1),
+                     ("filled", dict(base, h=10.5), r5, 0),
+                     ("not-yet", dict(base), _cal.prior_session(r5), 0),
+                     ("no-pxsig", dict(base, g=None), r5, 0))
+            for name, row, st_through, expect in cases:
+                due, _nopx = due_but_blank([row], _cal.shift_sessions, st_through)
+                got = sum(len(v) for v in due.values())
+                ok = got == expect
+                print("  [%s] Check H %-8s -> %d due-but-blank" % ("PASS" if ok else "FAIL", name, got))
+                if not ok:
+                    fails.append("H-" + name)
+        # verdict sensitivity
+        rb = {9: dict(row=9, g=100.0, sig="HOLD", h=102.99, i=None, j=None)}
+        s1 = _verdict_sensitivity(rb, [(9, "+5d")], 103.01)
+        s2 = _verdict_sensitivity(rb, [(9, "+5d")], 102.98)
+        ok = ("N flips" in s1) and s2 == ""
+        print("  [%s] verdict sensitivity (crossing / not)" % ("PASS" if ok else "FAIL"))
+        if not ok:
+            fails.append("sensitivity")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  outcome_sanity selftest: %s" % ("ALL PASS" if not fails else "FAIL " + ", ".join(fails)))
+    return 1 if fails else 0
 
 
 if __name__ == "__main__":
