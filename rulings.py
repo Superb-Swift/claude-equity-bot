@@ -745,6 +745,40 @@ RULINGS = {
               "CORRECTION to the 10-22 note: it named CORN and NTR only. Rob may apply the "
               "whole change, or the additions alone, at any time."),
     ),
+    "DP-V4": dict(
+        dp="DP-V4",
+        question=("the value card's class basis: Schwab's last-fiscal-year ROE, or 12-month ROE "
+                  "from SEC filings"),
+        status=("RULED (Rob) - the class reads 12-month ROE (SEC filings, point in time); the "
+                "DP-V2 ledger is rebuilt on it from 2026-08-24 and the last-FY ledger CLOSED, "
+                "never pooled"),
+        open=False, ruled_on=dt.date(2026, 10, 24), effective=dt.date(2026, 10, 24),
+        doc="claude/DP-V4_ValueCard_TTM_2026-10-24.md",
+        bar=("unchanged: the 2.00x / 1.50x lines, r = 9%, g = 3%, and DP-V2's bar (12 flip rows "
+             "on 3 tickers by 2026-12-31, else withdrawn)"),
+        note=("Rob, 2026-10-24 11:23 CT, verbatim: 'what the project needs is the most "
+              "informative version possible ... The goal of the valuation card is to provide an "
+              "under the hood view of the vehicle and help inform a buy, hold, sell decision "
+              "from the user.' Asked how to build it, he chose 'Full build now (Recommended)' "
+              "in the same conversation. "
+              "DEFINITIONS, fixed here before anything further was read: ROE = 12-month net "
+              "income / shareholders' equity at the latest period end (ttm_eps.read_name's "
+              "rule); fallback tags only labelled; no 12-month figure -> NO READ, never a "
+              "last-FY fallback; point in time: the card reads filings made on or before its "
+              "date, the DP-V2 ledger only filings made BEFORE the session (the BUY was decided "
+              "that morning); rebuilt rows count (each uses only what was public before its "
+              "session and the exhibit written that day); robustness = the r 7/9/11% grid on "
+              "this basis plus the distance to the nearest line; the last-FY class is printed "
+              "for reference only. The forward panel (Finnhub's adjusted consensus) is context "
+              "and never enters the class or the ledger. "
+              "AMENDS DP-V3 (2026-10-22): TTM is no longer only context beside the class. "
+              "KNOWN WHEN RULED (counts, no outcome): on the 12-month basis the ledger reads 6 "
+              "rows, all FTI REJECT->ADMIT (10-15..10-23), 1 of 3 tickers; the closed last-FY "
+              "ledger reads 3 (NVDA 09-14, 09-21; SPCX 10-23), all ADMIT->REJECT. Four classes "
+              "change today (NVDA, SND DEMANDING->NEUTRAL; GM, FTI NEUTRAL->UNDEMANDING); SPCX "
+              "becomes NO READ (no 10-K yet). The basis is chosen on B1 of the 2026-08-24 memo "
+              "(written before any of these counts), not on which rows survive."),
+    ),
 }
 
 def status_of(key):

@@ -105,6 +105,14 @@ INPUT PROVENANCE -- TWO ROUTES TO ROE, AND WHY ONE IS PREFERRED
     THAT `eps` IS TRAILING AND `peRatio` IS FORWARD, and it is marked [?]
     because schwab_client documents neither. Using peRatio as a trailing input
     would have silently mixed a forecast into a forecast-free instrument.
+    SETTLED 2026-10-24 (sec_data_audit; claude/DP-V4_ValueCard_TTM_2026-10-24.md):
+    peRatio is Schwab's TRAILING 12-MONTH P/E, not a forward one. Price over
+    peRatio equals the SEC 12-month diluted EPS within about 1% on AAPL, JPM,
+    MSFT, NVDA, PM, PWR, SND and WMT, and lags it only where a 10-Q landed that
+    week (GM, DOW). `eps` is the last fiscal year. The pattern above was real,
+    but it measured earnings that HAD moved since the last 10-K, not an
+    expectation. peRatio is still not an input here; the value card's class
+    reads 12-month ROE from SEC filings (DP-V4).
 
     PRICE COMES FROM THE MASTER, not from quote_dump.json, even though the
     dump carries a fresher lastPrice. One price source, deliberately: the
@@ -728,7 +736,7 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
 
     # ---- 5. the peRatio finding
     out("-" * 100)
-    out("5. WHY `peRatio` IS NOT USED -- the designed cross-check fired  [?]")
+    out("5. `peRatio` IS SCHWAB'S 12-MONTH P/E -- settled 2026-10-24 (was [?]); still not an input")
     out("-" * 100)
     out("  (M/B)/(P/E) is algebraically identical to eps/BVPS, so it should give the")
     out("  same ROE. It does not, and the discrepancy is not a constant factor:")
@@ -739,8 +747,9 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
             continue
         trail = r["qpx"] / r["eps"]
         ratio = r["pe"] / trail
-        rd = ("forward cheaper: earnings expected UP" if ratio < 0.97
-              else "forward dearer: earnings expected DOWN" if ratio > 1.03 else "flat")
+        # relabelled 2026-10-24: peRatio is TRAILING 12-month (see the SETTLED note)
+        rd = ("12-month EPS above last-FY: earnings have RISEN" if ratio < 0.97
+              else "12-month EPS below last-FY: earnings have FALLEN" if ratio > 1.03 else "flat")
         out(f"{r['tk']:>6} {trail:9.2f} {r['pe']:9.2f} {ratio:7.3f}  {rd}")
     # Derived from the table above rather than written into the prose. The first
     # draft hardcoded the name list from an earlier analysis and included PM,
@@ -750,6 +759,15 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
     dearer = [r["tk"] for r in recs
               if r["pe"] and r["eps"] and r["qpx"]
               and r["pe"] / (r["qpx"] / r["eps"]) > 1.03]
+    out()
+    out("  SETTLED 2026-10-24: price / peRatio equals the SEC 12-month diluted EPS within")
+    out("  about 1% on AAPL, JPM, MSFT, NVDA, PM, PWR, SND and WMT, and lags it only where a")
+    out("  10-Q landed that week (GM, DOW). peRatio is TRAILING TWELVE MONTHS; `eps` is the")
+    out("  last fiscal year. A row above says how far the last 12 months have moved from the")
+    out("  last fiscal year: earnings that HAVE changed, not an expectation. The value card's")
+    out("  class reads 12-month ROE from SEC filings since DP-V4 (2026-10-24).")
+    out("  THE RECORD BELOW (2026-08-17 .. 08-21) IS KEPT AS WRITTEN. Its 'peRatio is")
+    out("  FORWARD' reading is SUPERSEDED; 'expected UP/DOWN' there means risen/fallen.")
     out()
     out("  Every name reading 'expected UP' is a grower; the 'expected DOWN' set is")
     out(f"  {dearer} -- and GM's own XBRL block shows operating income -31.4% YoY")
@@ -781,13 +799,15 @@ def report(tracker, cache_dir, log_path, quotes_path, md_path=None):
     out("  forward denominator was revised. Reading a row here as a statement about")
     out("  a business is a category error; it is a statement about how stale the")
     out("  two fields are RELATIVE TO EACH OTHER on the day they were captured.")
-    findings.append("peRatio and eps are not the same measure [?]; peRatio excluded "
-                    "from ROE pending confirmation of Schwab field semantics")
+    findings.append("peRatio is Schwab's trailing 12-month P/E and eps its last fiscal year "
+                    "(settled 2026-10-24); peRatio stays outside this exhibit's ROE")
     findings.append("NEITHER ROE basis is trailing-twelve-month: Schwab's eps is the last "
                     "fiscal year (verified = GM's FY2025 10-K EPS 3.27) and the EDGAR "
                     "route is one quarter x4. GM reads 4.88% against a true TTM ~3.33% "
                     "(Morningstar 3.28%) -- a 1.5x overstatement inherited by everything "
-                    "downstream of ROE")
+                    "downstream of ROE. RESOLVED for the value card's class by DP-V4 "
+                    "(2026-10-24): it reads 12-month ROE from SEC filings; this exhibit's "
+                    "own ROE stays last-FY")
     out()
 
     # ---- 6. exclusions, classified by REASON -- they are not one category

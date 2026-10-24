@@ -24,6 +24,10 @@ REM                         exhibit (and the earlier ones), today's log,
 REM                         quote_dump.json and the master's BUY rows (date,
 REM                         ticker, confidence only). It is now the LAST step.
 REM                         Counterfactual only: no gate, no outcome, no prompt.
+REM                         AMENDED 2026-10-24 (DP-V4): its class reads 12-month
+REM                         ROE from valuation_cache\ (written by ttm_eps), and
+REM                         its expectations panel reads the calendar's consensus
+REM                         (earnings_calendar). Both run before it below.
 REM    step 5b           -> ADDED 2026-10-14. Embeds the card as the 'Value Card'
 REM                         sheet in tracker_with_registry.xlsx. So value.bat now
 REM                         runs AFTER run_daily_review.bat (which rebuilds that

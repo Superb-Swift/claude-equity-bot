@@ -38,7 +38,14 @@ USAGE
     cf, src = SF.fetch("DOW", cik_map, max_age_days=7)
     tag, rows = SF.rows_for(cf, SF.metric("net_income"))
     t = SF.ttm(rows)                 # dict(value, detail, end, quarters, ...)
+    pit = SF.point_in_time(cf, date) # only what SEC had published by `date` (DP-V4)
+    SF.ttm_roe(pit, date)            # the value card's class basis (DP-V4)
+    SF.fundamentals(pit, date)       # growth, earnings quality, balance sheet
     python sec_facts.py --selftest   (offline, fixtures)
+
+DP-V4 (2026-10-24) moved the value card's class onto 12-month ROE. The class,
+its robustness and the DP-V2 ledger all read ttm_roe() on point_in_time()
+facts, so a class dated d uses only filings SEC had published by d.
 
 Advisory-only - no orders - not financial advice.
 """
@@ -388,6 +395,188 @@ def instant_at(rows, end):
 
 
 # --------------------------------------------------------------------------- #
+# Point in time, 12-month ROE and the value card's fundamentals (DP-V4, 2026-10-24)
+# --------------------------------------------------------------------------- #
+EQUITY_MAX_AGE_DAYS = 400       # as ttm_eps: an equity older than this is history, not a book
+STALE_TAG_DAYS = 10             # a metric whose TTM ends further behind is not current (as the audit)
+YEAR_BACK_DAYS = 358            # "a year earlier": the window ending ~52 weeks before
+
+
+def point_in_time(cf, cutoff, strict=True):
+    """A copy of cf holding only the facts FILED before `cutoff` (strict) or on
+    or before it. A fact with no filing date is dropped, never assumed public.
+    DP-V4: a class dated d reads only what SEC had published by d, so a ledger
+    rebuilt after the fact sees exactly what a live run would have seen."""
+    if cf is None:
+        return None
+    lim = cutoff.isoformat()
+    gaap = {}
+    for tag, node in ((cf.get("facts") or {}).get("us-gaap") or {}).items():
+        units = {}
+        for u, rows in (node.get("units") or {}).items():
+            keep = [r for r in rows if r.get("filed")
+                    and (r["filed"] < lim if strict else r["filed"] <= lim)]
+            if keep:
+                units[u] = keep
+        if units:
+            gaap[tag] = dict(node, units=units)
+    out = {k: v for k, v in cf.items() if k != "facts"}
+    out["facts"] = dict(cf.get("facts") or {}, **{"us-gaap": gaap})
+    return out
+
+
+def _unusual(t):
+    return ["Q ending %s %s" % (e, short_source(src)) for _s, e, src in (t.get("quarters") or [])
+            if source_kind(src) in ("derived", "recovered")]
+
+
+def ttm_roe(cf, today):
+    """12-month ROE, the DP-V4 class basis: TTM net income over shareholders'
+    equity at the latest period end (the rule ttm_eps.read_name uses, so the
+    card and the TTM exhibit agree). dict(roe (fraction; None when there is no
+    figure), ni, ni_end, ni_tag, notes, equity, equity_end, equity_tag, why);
+    `why` names the reason a class cannot be read, including a negative ROE."""
+    t = best_ttm(cf, metric("net_income"))
+    eq_tag, eq_rows = rows_for(cf, metric("equity"))
+    eq, eq_end = latest_instant(eq_rows) if eq_rows else (None, None)
+    notes = ["net income: " + x for x in _unusual(t)] if t["value"] is not None else []
+    if t.get("note"):
+        notes.append("net income: " + t["note"])
+    out = dict(roe=None, ni=t["value"], ni_end=str(t["end"]) if t["end"] else None,
+               ni_tag=t.get("tag"), notes=notes, equity=eq, equity_end=eq_end,
+               equity_tag=eq_tag, why=None)
+    if t["value"] is None:
+        out["why"] = "no 12-month net income (%s)" % t["why"]
+    elif eq is None:
+        out["why"] = "no equity line"
+    elif today is not None and (today - _d(eq_end)).days > EQUITY_MAX_AGE_DAYS:
+        out["why"] = "equity last reported %s" % eq_end
+    elif eq <= 0:
+        out["why"] = "non-positive book equity"
+    else:
+        out["roe"] = t["value"] / eq
+        if out["roe"] <= 0:
+            out["why"] = "negative 12-month ROE"
+        if t["end"] and _d(eq_end) < t["end"] - dt.timedelta(days=10):
+            notes.append("equity as of %s predates the 12-month end %s" % (eq_end, t["end"]))
+    return out
+
+
+def _chg(now, then):
+    """Relative change, signed by direction: (now - then) / |then|."""
+    if now is None or then is None or then == 0:
+        return None
+    return (now - then) / abs(then)
+
+
+def _div(a, b):
+    return None if a is None or b is None or b == 0 else a / b
+
+
+def fundamentals(cf, today):
+    """The value card's under-the-hood panels for one filer, from SEC facts only.
+
+    One 12-month window ending at the name's latest quarter. A metric whose
+    window ends more than STALE_TAG_DAYS behind is not used (the audit's
+    STALE-TAG rule), and every fallback or derivation is listed in `notes`.
+      growth   12-month EPS, revenue and net income against the window a year
+               earlier; the latest quarter against the same quarter a year earlier
+      quality  operating cash flow / net income; gross and operating margin,
+               now and a year earlier
+      balance  at the latest period end: equity, liabilities (or assets minus
+               equity, labelled), liabilities / equity, cash, long-term debt"""
+    out = dict(end=None, notes=[],
+               growth={k: dict(ttm=None, year_ago=None, chg=None)
+                       for k in ("eps", "revenue", "net_income")},
+               quality=dict(ocf_to_ni=None, gross_margin=None, gross_margin_year_ago=None,
+                            op_margin=None, op_margin_year_ago=None),
+               balance=dict(end=None, equity=None, negative_equity=False))
+    out["growth"].update({k: dict(quarter=None, year_ago=None, chg=None)
+                          for k in ("q_eps", "q_revenue")})
+    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
+    tt = {k: best_ttm(cf, metric(k)) for k in
+          ("revenue", "gross_profit", "operating_income", "net_income", "eps_diluted", "ocf")}
+    ends = [t["end"] for k, t in tt.items()
+            if t["value"] is not None and k in ("net_income", "eps_diluted", "revenue")]
+    if not ends:
+        out["notes"].append("no 12-month figures")
+        return out
+    end = max(ends)
+    out["end"] = str(end)
+    cur = {}
+    for k, t in tt.items():
+        if t["value"] is None:
+            continue
+        lab = metric(k)[1]
+        if (end - t["end"]).days > STALE_TAG_DAYS:
+            out["notes"].append("%s: %s ends %s, not used" % (lab, t["tag"], t["end"]))
+            continue
+        cur[k] = t
+        if t.get("note"):
+            out["notes"].append("%s: %s" % (lab, t["note"]))
+
+    def rows(k):
+        t = cur.get(k)
+        return gaap.get(t["tag"], {}).get("units", {}).get(metric(k)[3], []) if t else []
+
+    def yago(k):
+        t = cur.get(k)
+        if not t:
+            return None
+        y = ttm(rows(k), t["end"] - dt.timedelta(days=YEAR_BACK_DAYS))
+        if y["value"] is None or not (350 <= (t["end"] - y["end"]).days <= 380):
+            return None
+        return y["value"]
+
+    def q_yoy(k):
+        t = cur.get(k)
+        if not t:
+            return None, None
+        q = quarters(rows(k))
+        now = [v["val"] for kk, v in q.items() if abs((kk[1] - t["end"]).days) <= 7]
+        then = [v["val"] for kk, v in q.items()
+                if abs((kk[1] - (t["end"] - dt.timedelta(days=364))).days) <= 10]
+        return (now[0] if now else None), (then[0] if then else None)
+
+    val = {k: (cur[k]["value"] if k in cur else None) for k in tt}
+    ya = {k: yago(k) for k in tt}
+    for k, name in (("eps_diluted", "eps"), ("revenue", "revenue"), ("net_income", "net_income")):
+        out["growth"][name] = dict(ttm=val[k], year_ago=ya[k], chg=_chg(val[k], ya[k]))
+    for k, name in (("eps_diluted", "q_eps"), ("revenue", "q_revenue")):
+        n, p = q_yoy(k)
+        out["growth"][name] = dict(quarter=n, year_ago=p, chg=_chg(n, p))
+    ni, ocf = val["net_income"], val["ocf"]
+    out["quality"] = dict(
+        ocf_to_ni=_div(ocf, ni) if (ni is not None and ni > 0) else None,
+        gross_margin=_div(val["gross_profit"], val["revenue"]),
+        gross_margin_year_ago=_div(ya["gross_profit"], ya["revenue"]),
+        op_margin=_div(val["operating_income"], val["revenue"]),
+        op_margin_year_ago=_div(ya["operating_income"], ya["revenue"]))
+    eq_tag, eq_rows = rows_for(cf, metric("equity"))
+    eq, eq_end = latest_instant(eq_rows) if eq_rows else (None, None)
+    if eq is not None and today is not None and (today - _d(eq_end)).days > EQUITY_MAX_AGE_DAYS:
+        out["notes"].append("equity: %s last reported %s, not used" % (eq_tag, eq_end))
+        eq, eq_end = None, None
+    bal = dict(end=eq_end, equity=eq, negative_equity=(eq is not None and eq <= 0))
+    if eq_end:
+        at = _d(eq_end)
+
+        def inst(k):
+            _t, r = rows_for(cf, metric(k))
+            return instant_at(r, at) if r else None
+        assets, liab = inst("assets"), inst("liabilities")
+        src = "reported"
+        if liab is None and assets is not None:
+            liab, src = assets - eq, "assets minus equity (includes any noncontrolling interest)"
+            out["notes"].append("liabilities: derived as " + src)
+        bal.update(assets=assets, liabilities=liab, liabilities_source=src if liab is not None else None,
+                   liab_to_equity=_div(liab, eq) if eq and eq > 0 else None,
+                   cash=inst("cash"), lt_debt=inst("lt_debt"))
+    out["balance"] = bal
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Filing-level gaps and the co-registrant recovery
 # --------------------------------------------------------------------------- #
 def _has_fact_at(slim, report_date):
@@ -484,6 +673,48 @@ def standalone_budget(ec, seconds=STANDALONE_EDGAR_SECONDS):
 
 def cache_path(cik10):
     return os.path.join(CACHE_DIR, "companyfacts_%s.json" % cik10)
+
+
+def cik_map_path(root="."):
+    return os.path.join(root, CACHE_DIR, "cik_map.json")
+
+
+def load_saved_cik_map(root="."):
+    """The ticker -> CIK map the last online run saved beside the slim cache
+    ({} if none), so an offline reader (value_card, the audit's --offline)
+    can find each filer's file without a SEC call."""
+    try:
+        with open(cik_map_path(root), encoding="utf-8") as fh:
+            m = json.load(fh)
+        return m if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_cik_map(cik_map, names, root="."):
+    """MERGE the CIKs of `names` into the saved map; it never shrinks, so an
+    ad-hoc run on a few names cannot cost the value card its other filers."""
+    if not cik_map:
+        return
+    cur = load_saved_cik_map(root)
+    cur.update({t: cik_map[t] for t in names if t in cik_map})
+    os.makedirs(os.path.join(root, CACHE_DIR), exist_ok=True)
+    tmp = cik_map_path(root) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(dict(sorted(cur.items())), fh)
+    os.replace(tmp, cik_map_path(root))
+
+
+def load_slim(tk, cik_map, root="."):
+    """The cached slim companyfacts for a ticker, or None. Reads only."""
+    cik = (cik_map or {}).get(tk)
+    if not cik:
+        return None
+    try:
+        with open(os.path.join(root, cache_path(cik)), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
 
 
 def fetch(tk, cik_map, max_age_days, ec=None, recover_gaps=True, today=None):
@@ -617,6 +848,67 @@ def selftest():
           latest_instant(inst) == (10.0, "2026-09-30")
           and latest_instant(inst, dt.date(2026, 7, 1)) == (9.0, "2026-06-30")
           and instant_at(inst, dt.date(2026, 6, 28)) == 9.0)
+    # 9. DP-V4: point in time, 12-month ROE, the fundamentals panels
+    ends = ["2024-09-30", "2024-12-31", "2025-03-31", "2025-06-30",
+            "2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"]
+
+    def qs(vals):
+        out, start = [], "2024-07-01"
+        for e, v in zip(ends, vals):
+            filed = (_d(e) + dt.timedelta(days=30)).isoformat()
+            out.append(_f(start, e, v, filed=filed, accn="x" + e))
+            start = (_d(e) + dt.timedelta(days=1)).isoformat()
+        return out
+    old, new = [1.0] * 4, [1.2] * 4
+    fx = {"facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": qs([100.0] * 4 + [110.0] * 4)}},
+        "GrossProfit": {"units": {"USD": qs([40.0] * 4 + [55.0] * 4)}},
+        "OperatingIncomeLoss": {"units": {"USD": [
+            _f(s, e, 9.0, filed="2016-02-01") for s, e in (("2015-01-01", "2015-03-31"),
+                ("2015-04-01", "2015-06-30"), ("2015-07-01", "2015-09-30"), ("2015-10-01", "2015-12-31"))]}},
+        "NetIncomeLoss": {"units": {"USD": qs([10.0] * 4 + [12.0] * 4)}},
+        "EarningsPerShareDiluted": {"units": {"USD/shares": qs(old + new)}},
+        "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": qs([9.0] * 4 + [15.0] * 4)}},
+        "StockholdersEquity": {"units": {"USD": [
+            {"end": "2026-03-31", "val": 190.0, "filed": "2026-04-30"},
+            {"end": "2026-06-30", "val": 200.0, "filed": "2026-07-30"}]}},
+        "Assets": {"units": {"USD": [{"end": "2026-06-30", "val": 500.0, "filed": "2026-07-30"}]}},
+        "CashAndCashEquivalentsAtCarryingValue": {"units": {"USD": [
+            {"end": "2026-06-30", "val": 30.0, "filed": "2026-07-30"}]}}}}}
+    today = dt.date(2026, 10, 24)
+    r = ttm_roe(fx, today)
+    check("12-month ROE = TTM net income / period-end equity (48 / 200)",
+          r["roe"] is not None and abs(r["roe"] - 0.24) < 1e-12 and r["why"] is None
+          and r["equity_end"] == "2026-06-30")
+    pit = point_in_time(fx, dt.date(2026, 7, 30))
+    r2 = ttm_roe(pit, dt.date(2026, 7, 30))
+    check("point in time: a 10-Q filed ON the cutoff is not yet public (strict); the TTM ends a quarter earlier",
+          r2["ni_end"] == "2026-03-31" and abs(r2["roe"] - 46.0 / 190.0) < 1e-12)
+    r3 = ttm_roe(point_in_time(fx, dt.date(2026, 7, 30), strict=False), dt.date(2026, 7, 30))
+    check("point in time, same day allowed: the 10-Q filed that day counts", r3["ni_end"] == "2026-06-30")
+    nodate = {"facts": {"us-gaap": {"NetIncomeLoss": {"units": {"USD": [
+        {"start": "2026-01-01", "end": "2026-03-31", "val": 1.0}]}}}}}
+    check("NEGATIVE: a fact with no filing date is never assumed public",
+          not point_in_time(nodate, today)["facts"]["us-gaap"])
+    neg = json.loads(json.dumps(fx))
+    neg["facts"]["us-gaap"]["StockholdersEquity"]["units"]["USD"][-1]["val"] = -5.0
+    check("NEGATIVE: non-positive equity gives no ROE and says why",
+          ttm_roe(neg, today)["roe"] is None and "non-positive" in ttm_roe(neg, today)["why"])
+    check("NEGATIVE: an equity older than 400 days is not a book",
+          ttm_roe(fx, dt.date(2027, 9, 1))["why"].startswith("equity last reported"))
+    fu = fundamentals(fx, today)
+    g, qy, b = fu["growth"], fu["quality"], fu["balance"]
+    check("growth: 12-month EPS +20%, revenue +10% against the window a year earlier",
+          abs(g["eps"]["chg"] - 0.20) < 1e-9 and abs(g["revenue"]["chg"] - 0.10) < 1e-9
+          and abs(g["q_eps"]["chg"] - 0.20) < 1e-9)
+    check("quality: cash conversion 60/48, gross margin 50% now against 40% a year earlier",
+          abs(qy["ocf_to_ni"] - 1.25) < 1e-9 and abs(qy["gross_margin"] - 0.50) < 1e-9
+          and abs(qy["gross_margin_year_ago"] - 0.40) < 1e-9)
+    check("a tag that stopped years ago is not used, and the note says so (operating income 2015)",
+          qy["op_margin"] is None and any("Operating income" in n and "not used" in n for n in fu["notes"]))
+    check("balance: liabilities derived as assets minus equity, labelled; liabilities/equity 1.5",
+          b["liabilities"] == 300.0 and "assets minus equity" in b["liabilities_source"]
+          and abs(b["liab_to_equity"] - 1.5) < 1e-9 and b["cash"] == 30.0)
     # 8. the map mirrors the prompt's (drift alarm)
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

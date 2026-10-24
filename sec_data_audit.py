@@ -661,11 +661,7 @@ def _cache_only(tk, cik_map, any_version=True):
 def _offline_cik_map():
     """CIK by ticker from the cached files' entity names is not possible, so
     offline mode reads the map the last online run saved."""
-    p = os.path.join(SF.CACHE_DIR, "cik_map.json")
-    if os.path.exists(p):
-        with open(p, encoding="utf-8") as fh:
-            return json.load(fh)
-    return {}
+    return SF.load_saved_cik_map(".")
 
 
 def run(args, today=None, ec=None, quiet=False):
@@ -692,10 +688,7 @@ def run(args, today=None, ec=None, quiet=False):
                 return 2, None
         SF.standalone_budget(ec)              # this process only (sec_facts docstring)
         cik_map = ec.load_cik_map({}) or {}
-        if cik_map:
-            os.makedirs(SF.CACHE_DIR, exist_ok=True)
-            with open(os.path.join(SF.CACHE_DIR, "cik_map.json"), "w", encoding="utf-8") as fh:
-                json.dump({t: cik_map[t] for t in names if t in cik_map}, fh)
+        SF.save_cik_map(cik_map, names)   # merged, never shrunk (DP-V4: value_card reads it)
     inputs_path = args.inputs or latest_inputs()
     blocks = prompt_blocks(inputs_path)
     vrecs, exhibit = {}, None

@@ -322,6 +322,7 @@ def main(argv=None):
     except Exception as e:                              # noqa: BLE001
         print("TTM EPS COULD NOT RUN: %s" % e)
         return 2
+    SF.save_cik_map(cik_map, tks)         # merged; value_card finds each slim file by it (DP-V4)
     quotes = {}
     if os.path.exists(a.quotes):
         with open(a.quotes, encoding="utf-8") as fh:
