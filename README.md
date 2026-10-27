@@ -201,28 +201,34 @@ Retired harnesses (`h2_direction_asymmetry.py`, `h3_thesis_stability.py`, `guard
 
 ```
 ============================================================
-  SIGNAL: BUY  |  Ticker: NTR  |  Confidence: 72%
+  SIGNAL: BUY  |  Ticker: MSFT  |  Confidence: 72%
 ============================================================
-  Reasoning   : NTR has surged ~9% over the last five sessions,
-                breaking above the cost basis, with upward momentum
-                confirming the gradual confidence build across prior
-                sessions. Raised guidance despite nitrogen volume
-                headwinds signals pricing power...
-  Bull Case   : Continued fertilizer price recovery, guidance upgrades...
-  Bear Case   : Sliding nitrogen volumes could accelerate if global...
+  Reasoning   : MSFT's FY2026 fundamentals are outstanding — revenue +17.8%, net income +31.3%, operating cash flow +34.4%, and cloud revenue up 27% to $214.4B — supporting a durable bullish thesis. The 5-day price trajectory is essentially flat (+0.14%), consistent with consolidation near the 52-week high, and tomorrow's earnings report (Oct 28) is the key near-term catalyst. At a P/E of ~29.7x on $17.95 EPS with strong cash flow conversion, valuation is reasonable for the growth profile, though hyperscaler capex scrutiny noted in the headline is a legitimate near-term test.
+  Bull Case   : Strong Azure/cloud momentum and AI monetization could drive a beat-and-raise earnings event, pushing shares toward and through the 52-week high of $553.72.
+  Bear Case   : If free cash flow disappoints due to elevated AI infrastructure capex or cloud growth decelerates from the 27% pace, the stock could sell off sharply from near-highs.
   Time Frame  : MEDIUM
   Data Quality: HIGH
-  Position    : Roth IRA shares (6 @ $70.16) should be held or added
-                tax-free on dips, while Individual account gains
-                ($42.80) would be taxable on sale...
-  Risk Flags  : Nitrogen volume decline despite guidance raise,
-                Volume well below 10-day average (~380K vs ~2.9M),
-                Stock has run 9% in 5 days — short-term overbought risk,
-                RISK-ENGINE: 15 open positions at or above the monitoring
-                cap of 8 (CHECK 6, non-blocking per DP-3C-o)
+  Position    : Position is profitable (+$549 total, ~24% gain vs $442 avg cost); with 3 shares in a taxable Individual account, consider that any post-earnings trim would trigger capital gains — the Roth IRA lot is the cleaner exit vehicle if trimming into strength after earnings.
+  Risk Flags  : Earnings report due Oct 28 — binary near-term event risk, Hyperscaler capex concerns flagged by analysts; 'cash flow is the test', Insider selling by CFO and CHRO (~$4M net) in last 30 days, Volume today is ~20% of 10-day average — thin pre-earnings trading, Cash and equivalents down 30.8% YoY despite strong OCF — capex intensity rising, Stock trading near 52-week high; limited technical cushion on a miss, [Roth IRA] RISK-ENGINE: 14 open positions at or above the monitoring cap of 8 (CHECK 6, non-blocking per DP-3C-o), [Individual] RISK-ENGINE: 17 open positions at or above the monitoring cap of 8 (CHECK 6, non-blocking per DP-3C-o)
+  Tokens Used : 2270 in / 530 out
 ============================================================
-  Risk: REJECTED — Already holding NTR and ALLOW_POSITION_ADD is False
-============================================================
+
+
+------------------------------------------------------------
+  RISK ENGINE REPORT
+------------------------------------------------------------
+  Decision : REJECTED
+  Reason   : Rejected in every account. PER-ACCOUNT: Roth IRA=REJECTED; Individual=REJECTED. Roth IRA: Already holding MSFT and ALLOW_POSITION_ADD is False; Individual: Position concentration: MSFT is already $XX,XXX in this account, at or above the 5% cap of $XX,XXX.
+
+  Active Rules:
+    Min BUY confidence  : 70%
+    Min SELL confidence : 65%
+    Max position size   : 5.0% of portfolio
+    Max open positions  : 8 (flag only - DP-3C-o)
+    Daily loss limit    : 2% (declared, not enforced - DP-T1)
+    Human approval      : True (ALWAYS - advisory only, no order path, DP-T1)
+    Min data quality    : MEDIUM
+------------------------------------------------------------
 ```
 
 *(When damping engages, the header shows both channels: `Confidence: 35% (raw 38%)`.)*
