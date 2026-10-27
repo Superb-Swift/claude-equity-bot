@@ -415,6 +415,30 @@
         "source": "h4_dq_threshold.py"
       },
       "pass": false
+    },
+    {
+      "date": "2026-10-26",
+      "detail": {
+        "high": 61.946386946386944,
+        "med": 45.01800720288116,
+        "n": 65,
+        "rate": 50.76923076923077,
+        "recorded_at": "2026-10-27T09:55:36",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
+    },
+    {
+      "date": "2026-10-27",
+      "detail": {
+        "high": 62.04715353651524,
+        "med": 45.22673031026253,
+        "n": 66,
+        "rate": 51.515151515151516,
+        "recorded_at": "2026-10-27T15:45:29",
+        "source": "h4_dq_threshold.py"
+      },
+      "pass": false
     }
   ]
 }

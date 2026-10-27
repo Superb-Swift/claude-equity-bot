@@ -426,10 +426,15 @@ def roe_bases(cf, vrec, today):
                    anchor=vrec.get("anchor"))
         c = vrec.get("roe")
         ratio = vrec.get("ratio")
-        if c is not None and ttm_roe is not None and ratio is not None and c > 0 and ttm_roe > 0:
-            # the class ratio is roe_implied(9%) / trailing ROE (implied_return
-            # section 4), so on a TTM basis it scales by class_roe / ttm_roe
-            r_ttm = ratio * c / ttm_roe
+        i9 = vrec.get("i9")
+        if ttm_roe is not None and ttm_roe > 0 and ratio is not None and \
+                (i9 is not None or (c is not None and c > 0)):
+            # The value card's own arithmetic (DP-V4): implied ROE at 9% / 12-month
+            # ROE. AMENDED 2026-10-27: it scaled the PRINTED ratio (2 decimals) by
+            # class_roe / ttm_roe, which read GM 1.4993 (UNDEMANDING) against the
+            # card's 1.5014 (NEUTRAL) on a name sitting on the line. i9 carries
+            # more digits; the scaled ratio is kept only as a fallback.
+            r_ttm = (i9 / ttm_roe) if i9 is not None else ratio * c / ttm_roe
             try:
                 import value_card as VC
                 out.update(class_now=VC.klass(ratio), class_on_ttm=VC.klass(r_ttm),
@@ -751,9 +756,18 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="output stem (default sec_data_audit_<date>)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
+    SF.console_safe()
     if a.selftest:
         return selftest()
-    rc, _ = run(a)
+    try:
+        rc, _ = run(a)
+    except Exception as e:                              # noqa: BLE001
+        # exit 2 = could not run: value.bat reads 1 as findings, and a bare
+        # traceback also exits 1 (the 2026-10-27 run). Say what broke.
+        import traceback
+        traceback.print_exc()
+        print("SEC DATA AUDIT COULD NOT RUN: %s: %s" % (type(e).__name__, e))
+        return 2
     return rc
 
 
@@ -914,6 +928,45 @@ def selftest():
     finally:
         os.chdir(cwd)
         shutil.rmtree(tmp, ignore_errors=True)
+    # ---- 2026-10-27: the console, the crash exit, the card's arithmetic ----
+    import io
+    buf = io.BytesIO()
+    con = io.TextIOWrapper(buf, encoding="cp1252")
+    SF.console_safe(con)
+    try:
+        print("NEUTRAL \u2192 UNDEMANDING", file=con)
+        con.flush()
+        ok = b"NEUTRAL ? UNDEMANDING" in buf.getvalue()
+    except UnicodeEncodeError:
+        ok = False
+    check("a redirected cp1252 console prints '?' for an arrow instead of crashing (10-27)", ok)
+    real_run = globals()["run"]
+    try:
+        def _boom(*_a, **_k):
+            raise RuntimeError("synthetic")
+        globals()["run"] = _boom
+        sink = io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout = sys.stderr = sink
+        try:
+            code = main(["--offline"])
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+        check("NEGATIVE: an unexpected error exits 2 (could not run), never 1 (findings)",
+              code == 2 and "COULD NOT RUN: RuntimeError" in sink.getvalue())
+    finally:
+        globals()["run"] = real_run
+    cfg = {"facts": {"us-gaap": {
+        "NetIncomeLoss": {"units": {"USD": [
+            {"start": s, "end": e, "val": 1.0, "filed": "2026-11-01", "form": "10-Q", "accn": e}
+            for s, e in (("2025-10-01", "2025-12-31"), ("2026-01-01", "2026-03-31"),
+                         ("2026-04-01", "2026-06-30"), ("2026-07-01", "2026-09-30"))]}},
+        "StockholdersEquity": {"units": {"USD": [
+            {"end": "2026-09-30", "val": 62.2, "filed": "2026-11-01"}]}}}}}
+    rb = roe_bases(cfg, dict(roe=4.66, ratio=2.07, i9=9.66, basis="Schwab last-FY"),
+                   dt.date(2026, 11, 2))
+    check("class on TTM is the card's own i9 / 12-month ROE (GM on the line, 10-27)",
+          abs(rb["ratio_on_ttm"] - 9.66 / (400.0 / 62.2)) < 1e-9 and rb["class_on_ttm"] == "NEUTRAL")
     print("  sec_data_audit selftest: %s" % ("ALL PASS" if not fails else "FAIL " + ", ".join(fails)))
     return 1 if fails else 0
 

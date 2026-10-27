@@ -103,3 +103,11 @@ ttm_eps_*.json
 earnings_calendar_*.md
 earnings_calendar_*.json
 valuation_cache/
+# 2026-10-24: the SEC data audit exhibit (value.bat step 7b), and any outside
+# reference file kept beside it (a third party's figures; keep it local)
+sec_data_audit_*.md
+sec_data_audit_*.json
+reference_*.csv
+# 2026-10-27: console captures of a day's run hold account positions and
+# balances. They stay local (logs\ is ignored as well).
+docs/TODAYS RUN*.txt

@@ -257,7 +257,7 @@ def selftest():
     return 1 if fails else 0
 
 
-def main(argv=None):
+def _main(argv=None):
     ap = argparse.ArgumentParser(description="Next earnings date per name (V5).")
     ap.add_argument("--date", default=None)
     ap.add_argument("--days", type=int, default=60)
@@ -308,6 +308,24 @@ def main(argv=None):
     print("\nWrote: %s.md (%d names; %d inside %d sessions)"
           % (stem, len(rows), sum(1 for r in rows if r["note"].startswith("INSIDE")), FLAG_SESSIONS))
     return 0
+
+
+def main(argv=None):
+    """_main with two guards (2026-10-27): a redirected console loses a
+    character instead of the run, and an unexpected error exits 2 ('could not
+    run') with its reason, never a bare traceback whose exit 1 value.bat could
+    misread (the sec_data_audit defect of 2026-10-27)."""
+    try:
+        sys.stdout.reconfigure(errors="replace")     # cp1252 when redirected
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        return _main(argv)
+    except Exception as e:                              # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        print("EARNINGS CALENDAR COULD NOT RUN: %s: %s" % (type(e).__name__, e))
+        return 2
 
 
 if __name__ == "__main__":

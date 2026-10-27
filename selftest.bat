@@ -28,7 +28,8 @@ REM AMENDED 2026-10-22: e4_counter (it had a selftest and was never in this
 REM list), outcome_sanity (Checks H and I), enter_closes (catch-up, R9),
 REM risk_engine (P4-1: every declared rule), run_guard (R2), and the new local
 REM tools decision_journal, prune_signal_state, ttm_eps, earnings_calendar.
-for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar) do (
+REM AMENDED 2026-10-24: sec_facts (the shared SEC reader) and sec_data_audit.
+for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar sec_facts sec_data_audit) do (
     python %%T.py --selftest >nul 2>&1
     if errorlevel 1 (
         echo   [FAIL] %%T --selftest   detail: python %%T.py --selftest

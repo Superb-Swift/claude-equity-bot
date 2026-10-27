@@ -291,11 +291,15 @@ def selftest():
     return 1 if fails else 0
 
 
-def main(argv=None):
+def _main(argv=None):
     ap = argparse.ArgumentParser(description="TTM EPS / ROE from SEC companyfacts (V2).")
     ap.add_argument("--date", default=None)
     ap.add_argument("--quotes", default="quote_dump.json")
-    ap.add_argument("--max-age-days", type=float, default=7.0)
+    # AMENDED 2026-10-27: 0.5 day, was 7. Since DP-V4 the value card's class
+    # reads this cache, and a week-old file cannot hear a 10-Q filed this week
+    # (MSFT 10-28, FTI and PWR 10-29). value.bat runs this once an evening, so
+    # 12 hours refreshes every filer each evening (~45 SEC calls, ~30 s).
+    ap.add_argument("--max-age-days", type=float, default=0.5)
     ap.add_argument("--md", default=None)
     ap.add_argument("--json", default=None)
     ap.add_argument("--tickers", default=None,
@@ -353,6 +357,21 @@ def main(argv=None):
     print(md)
     print("\nWrote: %s  (%d name(s), %d NO READ)" % (md_path, len(rows), no_read))
     return 1 if no_read else 0
+
+
+def main(argv=None):
+    """_main with two guards (2026-10-27): a redirected console loses a
+    character instead of the run, and an unexpected error exits 2 ('could not
+    run') with its reason, never a bare traceback whose exit 1 value.bat could
+    misread (the sec_data_audit defect of 2026-10-27)."""
+    SF.console_safe()
+    try:
+        return _main(argv)
+    except Exception as e:                              # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+        print("TTM EPS COULD NOT RUN: %s: %s" % (type(e).__name__, e))
+        return 2
 
 
 if __name__ == "__main__":

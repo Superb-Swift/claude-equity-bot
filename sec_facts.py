@@ -675,6 +675,21 @@ def cache_path(cik10):
     return os.path.join(CACHE_DIR, "companyfacts_%s.json" % cik10)
 
 
+def console_safe(stream=None):
+    """Let a redirected console lose a character instead of the run.
+
+    value.bat runs step 7b with stdout redirected ('> nul'). A redirected
+    stdout on Windows encodes with the ANSI code page (cp1252), which has no
+    arrow (U+2192). On 2026-10-27 the audit wrote both exhibits, then died
+    printing one, and value.bat read the traceback's exit 1 as 'has findings'.
+    The exhibits are UTF-8 on disk; only the console copy may show a '?'."""
+    s = stream or sys.stdout
+    try:
+        s.reconfigure(errors="replace")
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 def cik_map_path(root="."):
     return os.path.join(root, CACHE_DIR, "cik_map.json")
 
