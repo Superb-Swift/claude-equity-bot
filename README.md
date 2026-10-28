@@ -208,8 +208,8 @@ Retired harnesses (`h2_direction_asymmetry.py`, `h3_thesis_stability.py`, `guard
   Bear Case   : If free cash flow disappoints due to elevated AI infrastructure capex or cloud growth decelerates from the 27% pace, the stock could sell off sharply from near-highs.
   Time Frame  : MEDIUM
   Data Quality: HIGH
-  Position    : Position is profitable (+$549 total, ~24% gain vs $442 avg cost); with 3 shares in a taxable Individual account, consider that any post-earnings trim would trigger capital gains — the Roth IRA lot is the cleaner exit vehicle if trimming into strength after earnings.
-  Risk Flags  : Earnings report due Oct 28 — binary near-term event risk, Hyperscaler capex concerns flagged by analysts; 'cash flow is the test', Insider selling by CFO and CHRO (~$4M net) in last 30 days, Volume today is ~20% of 10-day average — thin pre-earnings trading, Cash and equivalents down 30.8% YoY despite strong OCF — capex intensity rising, Stock trading near 52-week high; limited technical cushion on a miss, [Roth IRA] RISK-ENGINE: 14 open positions at or above the monitoring cap of 8 (CHECK 6, non-blocking per DP-3C-o), [Individual] RISK-ENGINE: 17 open positions at or above the monitoring cap of 8 (CHECK 6, non-blocking per DP-3C-o)
+  Position    : Held. (Share count, cost basis and gain are left out of this example.)
+  Risk Flags  : Earnings report due Oct 28 — binary near-term event risk, Hyperscaler capex concerns flagged by analysts; 'cash flow is the test', Insider selling by CFO and CHRO (~$4M net) in last 30 days, Volume today is ~20% of 10-day average — thin pre-earnings trading, Cash and equivalents down 30.8% YoY despite strong OCF — capex intensity rising, Stock trading near 52-week high; limited technical cushion on a miss, RISK-ENGINE: open positions at or above the monitoring cap of 8 (CHECK 6, non-blocking per DP-3C-o)
   Tokens Used : 2270 in / 530 out
 ============================================================
 
@@ -218,7 +218,7 @@ Retired harnesses (`h2_direction_asymmetry.py`, `h3_thesis_stability.py`, `guard
   RISK ENGINE REPORT
 ------------------------------------------------------------
   Decision : REJECTED
-  Reason   : Rejected in every account. PER-ACCOUNT: Roth IRA=REJECTED; Individual=REJECTED. Roth IRA: Already holding MSFT and ALLOW_POSITION_ADD is False; Individual: Position concentration: MSFT is already $XX,XXX in this account, at or above the 5% cap of $XX,XXX.
+  Reason   : Rejected in every account. PER-ACCOUNT: Account A=REJECTED; Account B=REJECTED. Account A: Already holding MSFT and ALLOW_POSITION_ADD is False; Account B: Position concentration: MSFT is at or above the 5% cap in this account.
 
   Active Rules:
     Min BUY confidence  : 70%
