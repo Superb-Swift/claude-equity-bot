@@ -481,10 +481,17 @@ def fundamentals(cf, today):
     STALE-TAG rule), and every fallback or derivation is listed in `notes`.
       growth   12-month EPS, revenue and net income against the window a year
                earlier; the latest quarter against the same quarter a year earlier
-      quality  operating cash flow / net income; gross and operating margin,
-               now and a year earlier
+      quality  operating cash flow / net income; operating cash flow / revenue
+               (defined through a loss, where OCF/NI is not); gross and operating
+               margin, now and a year earlier
       balance  at the latest period end: equity, liabilities (or assets minus
-               equity, labelled), liabilities / equity, cash, long-term debt"""
+               equity, labelled), liabilities / equity, liabilities / assets
+               (defined at any sign of equity), cash, long-term debt
+
+    2026-10-29: the balance date is the equity's; with no usable equity line it
+    is the latest total-assets date, so cash and liabilities / assets still read
+    (PAA files partners' capital, not an equity tag, yet its cash is filed). The
+    12-month class (ttm_roe) reads its own equity and is not affected."""
     out = dict(end=None, notes=[],
                growth={k: dict(ttm=None, year_ago=None, chg=None)
                        for k in ("eps", "revenue", "net_income")},
@@ -548,6 +555,8 @@ def fundamentals(cf, today):
     ni, ocf = val["net_income"], val["ocf"]
     out["quality"] = dict(
         ocf_to_ni=_div(ocf, ni) if (ni is not None and ni > 0) else None,
+        ocf_margin=_div(ocf, val["revenue"]),
+        net_loss=(ni is not None and ni <= 0),
         gross_margin=_div(val["gross_profit"], val["revenue"]),
         gross_margin_year_ago=_div(ya["gross_profit"], ya["revenue"]),
         op_margin=_div(val["operating_income"], val["revenue"]),
@@ -557,20 +566,27 @@ def fundamentals(cf, today):
     if eq is not None and today is not None and (today - _d(eq_end)).days > EQUITY_MAX_AGE_DAYS:
         out["notes"].append("equity: %s last reported %s, not used" % (eq_tag, eq_end))
         eq, eq_end = None, None
-    bal = dict(end=eq_end, equity=eq, negative_equity=(eq is not None and eq <= 0))
-    if eq_end:
-        at = _d(eq_end)
+    bal_end = eq_end
+    if bal_end is None:
+        _a_tag, a_rows = rows_for(cf, metric("assets"))
+        _a_val, a_end = latest_instant(a_rows) if a_rows else (None, None)
+        if a_end and (today is None or (today - _d(a_end)).days <= EQUITY_MAX_AGE_DAYS):
+            bal_end = a_end
+    bal = dict(end=bal_end, equity=eq, negative_equity=(eq is not None and eq <= 0))
+    if bal_end:
+        at = _d(bal_end)
 
         def inst(k):
             _t, r = rows_for(cf, metric(k))
             return instant_at(r, at) if r else None
         assets, liab = inst("assets"), inst("liabilities")
         src = "reported"
-        if liab is None and assets is not None:
+        if liab is None and assets is not None and eq is not None:
             liab, src = assets - eq, "assets minus equity (includes any noncontrolling interest)"
             out["notes"].append("liabilities: derived as " + src)
         bal.update(assets=assets, liabilities=liab, liabilities_source=src if liab is not None else None,
                    liab_to_equity=_div(liab, eq) if eq and eq > 0 else None,
+                   liab_to_assets=_div(liab, assets) if liab is not None else None,
                    cash=inst("cash"), lt_debt=inst("lt_debt"))
     out["balance"] = bal
     return out
@@ -924,6 +940,29 @@ def selftest():
     check("balance: liabilities derived as assets minus equity, labelled; liabilities/equity 1.5",
           b["liabilities"] == 300.0 and "assets minus equity" in b["liabilities_source"]
           and abs(b["liab_to_equity"] - 1.5) < 1e-9 and b["cash"] == 30.0)
+    # 2026-10-29: the three cases the 10-28 sheet left blank
+    check("quality: OCF / revenue 60/440, liabilities / assets 300/500",
+          abs(qy["ocf_margin"] - 60.0 / 440.0) < 1e-9 and qy["net_loss"] is False
+          and abs(b["liab_to_assets"] - 0.6) < 1e-9)
+    nq = json.loads(json.dumps(fx))
+    nq["facts"]["us-gaap"]["StockholdersEquity"]["units"]["USD"][-1]["val"] = -50.0
+    nb = fundamentals(nq, today)["balance"]
+    check("negative equity (BBWI, PM): L/E not defined, liabilities / assets is (550/500)",
+          nb["negative_equity"] and nb["liab_to_equity"] is None and abs(nb["liab_to_assets"] - 1.1) < 1e-9)
+    lq = json.loads(json.dumps(fx))
+    for row in lq["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"]:
+        row["val"] = -3.0
+    lqq = fundamentals(lq, today)["quality"]
+    check("a 12-month net loss (DOW): OCF/NI not defined, OCF / revenue still is, flagged",
+          lqq["ocf_to_ni"] is None and lqq["net_loss"] is True and abs(lqq["ocf_margin"] - 60.0 / 440.0) < 1e-9)
+    pq = json.loads(json.dumps(fx))
+    del pq["facts"]["us-gaap"]["StockholdersEquity"]
+    pb = fundamentals(pq, today)["balance"]
+    check("no equity line (PAA): cash still read at the latest assets date; nothing derived from equity",
+          pb["end"] == "2026-06-30" and pb["cash"] == 30.0 and pb["equity"] is None
+          and pb["liabilities"] is None and pb["liab_to_assets"] is None and pb["liab_to_equity"] is None)
+    check("NEGATIVE: an assets date older than 400 days opens no balance sheet",
+          fundamentals(pq, dt.date(2027, 9, 1))["balance"].get("cash") is None)
     # 8. the map mirrors the prompt's (drift alarm)
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

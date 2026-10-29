@@ -43,6 +43,15 @@ DP-V4 (2026-10-24, claude/DP-V4_ValueCard_TTM_2026-10-24.md): THE CLASS
           last four surprises (earnings_calendar), and the class if the
           consensus is met (approximate; its own basis, never the class)
 
+2b, 2026-10-29 (claude/UnderTheHood_GapAnalysis_2026-10-29.md, step 1): the
+    cells the 10-28 sheet left blank for a reason it did not print. OCF/rev
+    (operating cash flow / revenue) is defined through a loss, where OCF/NI is
+    not; L/A (liabilities / assets) is defined when equity is negative, where
+    L/E is not; the balance sheet opens on the latest assets date when there
+    is no equity line (PAA's cash). The text card and the sheet share one note
+    list (hood_notes) and one +/-300% cap. Display only: the class, its
+    robustness and the DP-V2 ledger are unchanged.
+
 WHAT IT DOES NOT DO
     It reads no return, breach, hit or +Nd cell. It modifies no gate, admits
     and rejects nothing, touches no workbook, no prompt, no endpoint, no
@@ -378,6 +387,62 @@ def pct_s(x, cap=3.0):
     if abs(x) > cap:
         return ">+300%" if x > 0 else "<-300%"
     return "%+.0f%%" % (100.0 * x)
+
+
+def pct0(x):
+    """'9%' for a ratio 0.09; '—' when undefined."""
+    return "—" if x is None else "%.0f%%" % (100.0 * x)
+
+
+def _p100(x):
+    return None if x is None else 100.0 * x
+
+
+def growth_cell(x, cap=3.0):
+    """A sheet cell for a y/y change in percent; beyond +/-300% the same text
+    the card prints (2026-10-29: the sheet printed SND 1200 and DOW 675)."""
+    if x is None:
+        return None
+    if abs(x) > cap:
+        return ">+300%" if x > 0 else "<-300%"
+    return 100.0 * x
+
+
+def hood_notes(u):
+    """The 2b notes for one name, ONE list for the text card and the sheet
+    (2026-10-29: the sheet had dropped 'negative book equity'). `u` is the
+    fundamentals dict plus its sector caveat."""
+    b, q = u.get("balance") or {}, u.get("quality") or {}
+    out = [u["caveat"]] if u.get("caveat") else []
+    if b.get("negative_equity"):
+        eq = b.get("equity")
+        out.append("negative book equity%s: L/E not defined, see L/A"
+                   % ("" if eq is None else " (deficit $%.2fB)" % (abs(eq) / 1e9)))
+    if q.get("net_loss"):
+        out.append("12-month net loss: OCF/NI not defined, see OCF/rev")
+    return out + list(u.get("notes") or [])
+
+
+def hood_sheet_row(t, u):
+    """The 2b sheet row, in HOOD_SHEET_COLUMNS order."""
+    g, q, b = u["growth"], u["quality"], u["balance"]
+    bank = (u.get("caveat") or "").startswith("bank")
+    return [t, g["eps"]["ttm"], growth_cell(g["eps"]["chg"]), growth_cell(g["revenue"]["chg"]),
+            growth_cell(g["q_eps"]["chg"]), None if bank else q.get("ocf_to_ni"),
+            None if bank else _p100(q.get("ocf_margin")),
+            _p100(q.get("gross_margin")), _p100(q.get("gross_margin_year_ago")),
+            _p100(q.get("op_margin")), _p100(q.get("op_margin_year_ago")),
+            None if bank else b.get("liab_to_equity"),
+            None if bank else _p100(b.get("liab_to_assets")),
+            None if b.get("cash") is None else b["cash"] / 1e9,
+            "; ".join(hood_notes(u))]
+
+
+HOOD_SHEET_COLUMNS = (
+    "Ticker", "EPS 12m", "EPS y/y %", "Revenue y/y %", "Last quarter EPS y/y %", "OCF / NI",
+    "OCF / revenue %", "Gross margin %", "Gross margin a year ago %", "Operating margin %",
+    "Operating margin a year ago %", "Liabilities / equity", "Liabilities / assets %", "Cash ($B)",
+    "Notes")
 
 
 def dividend_implied_g(yield_pct, r=R_BASE):
@@ -774,9 +839,9 @@ def build(date, root, log_path, quotes_path, tracker):
     # ---- 2b. under the hood (DP-V4) ------------------------------------------
     L.append("  2b. UNDER THE HOOD -- SEC filings, last 12 months against the 12 months before.")
     L.append("      Direction (are earnings growing?), quality (are they cash?), balance sheet.")
-    L.append("  %-5s %8s %8s %8s %9s %6s %-15s %-15s %6s %8s  %s" % (
-        "tk", "EPS 12m", "EPS y/y", "rev y/y", "lastQ y/y", "OCF/NI", "gross mgn (yr ago)",
-        "op mgn (yr ago)", "L/E", "cash", "note"))
+    L.append("  %-5s %8s %8s %8s %9s %6s %7s %-18s %-15s %6s %5s %8s  %s" % (
+        "tk", "EPS 12m", "EPS y/y", "rev y/y", "lastQ y/y", "OCF/NI", "OCF/rev", "gross mgn (yr ago)",
+        "op mgn (yr ago)", "L/E", "L/A", "cash", "note"))
 
     def mgn(a, b):
         if a is None:
@@ -794,20 +859,25 @@ def build(date, root, log_path, quotes_path, tracker):
             c.update(under_hood=None)
             continue
         g, q, b = fu["growth"], fu["quality"], fu["balance"]
-        ocfni = None if cav.startswith("bank") else q.get("ocf_to_ni")
-        le = None if cav.startswith("bank") else b.get("liab_to_equity")
-        notes = ([cav] if cav else []) + (["negative book equity"] if b.get("negative_equity") else []) \
-            + list(fu.get("notes") or [])
-        L.append("  %-5s %8s %8s %8s %9s %6s %-15s %-15s %6s %8s  %s" % (
+        bank = cav.startswith("bank")
+        ocfni = None if bank else q.get("ocf_to_ni")
+        ocfm = None if bank else q.get("ocf_margin")
+        le = None if bank else b.get("liab_to_equity")
+        la = None if bank else b.get("liab_to_assets")
+        notes = hood_notes(dict(fu, caveat=cav or None))
+        L.append("  %-5s %8s %8s %8s %9s %6s %7s %-18s %-15s %6s %5s %8s  %s" % (
             t, fmt(g["eps"]["ttm"]), pct_s(g["eps"]["chg"]), pct_s(g["revenue"]["chg"]),
-            pct_s(g["q_eps"]["chg"]), fmt(ocfni), mgn(q["gross_margin"], q["gross_margin_year_ago"]),
-            mgn(q["op_margin"], q["op_margin_year_ago"]), fmt(le),
+            pct_s(g["q_eps"]["chg"]), fmt(ocfni), pct0(ocfm),
+            mgn(q["gross_margin"], q["gross_margin_year_ago"]),
+            mgn(q["op_margin"], q["op_margin_year_ago"]), fmt(le), pct0(la),
             ("%.1fB" % (b["cash"] / 1e9)) if b.get("cash") is not None else "—",
             "; ".join(notes)[:120]))
         c.update(under_hood=dict(fu, caveat=cav or None))
     L.append("      y/y: change against the same window a year earlier, signed by direction;")
     L.append("      beyond +/-300% the base is too small to read as a rate. OCF/NI: operating cash")
-    L.append("      flow over net income (below 1: profits not yet cash). L/E: liabilities / equity.")
+    L.append("      flow over net income (below 1: profits not yet cash). OCF/rev: operating cash")
+    L.append("      flow over revenue, defined through a loss. L/E: liabilities / equity. L/A:")
+    L.append("      liabilities / assets, defined when equity is negative (above 100%: a deficit).")
     L.append("")
 
     # ---- 2c. expectations (DP-V4) ---------------------------------------------
@@ -1162,26 +1232,12 @@ def _write_sheet(ws, snap):
          % EDGE_BORDERLINE], f_note)
     gap()
     put(["Under the hood -- SEC filings, last 12 months against the 12 months before"], f_sec)
-    put(["Ticker", "EPS 12m", "EPS y/y %", "Revenue y/y %", "Last quarter EPS y/y %", "OCF / NI",
-         "Gross margin %", "Gross margin a year ago %", "Operating margin %",
-         "Operating margin a year ago %", "Liabilities / equity", "Cash ($B)", "Notes"],
-        f_hdr, fill_hdr)
-
-    def p100(x):
-        return None if x is None else 100.0 * x
+    put(list(HOOD_SHEET_COLUMNS), f_hdr, fill_hdr)
     for c in snap["card"]:
         u = c.get("under_hood")
         if not u:
             continue
-        g, q, b = u["growth"], u["quality"], u["balance"]
-        bank = (u.get("caveat") or "").startswith("bank")
-        put([c["ticker"], g["eps"]["ttm"], p100(g["eps"]["chg"]), p100(g["revenue"]["chg"]),
-             p100(g["q_eps"]["chg"]), None if bank else q.get("ocf_to_ni"),
-             p100(q.get("gross_margin")), p100(q.get("gross_margin_year_ago")),
-             p100(q.get("op_margin")), p100(q.get("op_margin_year_ago")),
-             None if bank else b.get("liab_to_equity"),
-             None if b.get("cash") is None else b["cash"] / 1e9,
-             "; ".join(([u["caveat"]] if u.get("caveat") else []) + list(u.get("notes") or []))])
+        put(hood_sheet_row(c["ticker"], u))
     gap()
     put(["Expectations -- Finnhub's ADJUSTED (non-GAAP) consensus, on its own basis; "
          "'class if met' is approximate and never the class"], f_sec)
@@ -1193,7 +1249,7 @@ def _write_sheet(ws, snap):
         put([c["ticker"], c.get("next_report") or "", c.get("sessions_to_report"),
              e.get("eps_estimate"),
              ("%d of %d" % (e["beats"], e["reported"])) if e.get("beats") is not None else "",
-             e.get("adj_ttm"), e.get("adj_ttm_if_met"), p100(e.get("chg_if_met")),
+             e.get("adj_ttm"), e.get("adj_ttm_if_met"), _p100(e.get("chg_if_met")),
              e.get("cls_if_met") or "", e.get("ratio_if_met"),
              e.get("why") or e.get("history_why") or ""])
     gap()
@@ -1457,6 +1513,40 @@ def _selftest():
     check("2b opens the hood: NVDA's 12-month EPS and its growth against a year earlier",
           "UNDER THE HOOD" in txt and abs(cn["NVDA"]["under_hood"]["growth"]["eps"]["ttm"] - 7.91) < 1e-9
           and cn["NVDA"]["under_hood"]["growth"]["eps"]["chg"] > 1.0)
+    # ---- 2026-10-29: the cells the 10-28 sheet left blank ----
+    def _u(eps_chg=0.1, ocf_ni=1.2, ocfm=0.15, loss=False, eq=100e9, le=1.5, la=0.6, cav=None,
+           notes=()):
+        return dict(caveat=cav, notes=list(notes),
+                    growth=dict(eps=dict(ttm=2.0, chg=eps_chg), revenue=dict(chg=0.05),
+                                q_eps=dict(chg=0.02)),
+                    quality=dict(ocf_to_ni=ocf_ni, ocf_margin=ocfm, net_loss=loss, gross_margin=0.4,
+                                 gross_margin_year_ago=0.38, op_margin=0.2, op_margin_year_ago=0.18),
+                    balance=dict(equity=eq, negative_equity=eq is not None and eq <= 0,
+                                 liab_to_equity=le, liab_to_assets=la, cash=1e9))
+    rb = hood_sheet_row("BBWI", _u(eq=-1.056e9, le=None, la=1.2048,
+                                   notes=["liabilities: derived as assets minus equity"]))
+    check("sheet (BBWI): L/E blank, liabilities / assets 120%, and the note the sheet used to drop",
+          rb[HOOD_SHEET_COLUMNS.index("Liabilities / equity")] is None
+          and abs(rb[HOOD_SHEET_COLUMNS.index("Liabilities / assets %")] - 120.48) < 1e-9
+          and rb[-1].startswith("negative book equity (deficit $1.06B): L/E not defined, see L/A")
+          and rb[-1].endswith("liabilities: derived as assets minus equity"))
+    rd = hood_sheet_row("DOW", _u(ocf_ni=None, ocfm=0.107, loss=True))
+    check("sheet (DOW): a net loss leaves OCF/NI blank, shows OCF / revenue 10.7%, and says why",
+          rd[HOOD_SHEET_COLUMNS.index("OCF / NI")] is None
+          and abs(rd[HOOD_SHEET_COLUMNS.index("OCF / revenue %")] - 10.7) < 1e-9
+          and "12-month net loss: OCF/NI not defined" in rd[-1])
+    rs = hood_sheet_row("SND", _u(eps_chg=12.0))
+    check("sheet (SND): a change beyond +/-300% prints as the card does, not as 1200",
+          rs[HOOD_SHEET_COLUMNS.index("EPS y/y %")] == ">+300%" and growth_cell(-4.0) == "<-300%"
+          and abs(growth_cell(0.2026) - 20.26) < 1e-9 and growth_cell(None) is None)
+    rj = hood_sheet_row("JPM", _u(cav="bank: operating cash flow and liabilities/equity are not comparable"))
+    check("sheet (JPM): a bank's OCF ratios and leverage stay blank, the caveat leads the note",
+          all(rj[HOOD_SHEET_COLUMNS.index(k)] is None for k in
+              ("OCF / NI", "OCF / revenue %", "Liabilities / equity", "Liabilities / assets %"))
+          and rj[-1].startswith("bank:"))
+    check("the sheet row and its header have the same width", len(rb) == len(HOOD_SHEET_COLUMNS))
+    check("2b text carries the OCF/rev and L/A columns and their legend",
+          "OCF/rev" in txt and " L/A " in txt and "defined when equity is negative" in txt)
     check("2c: the consensus and the class if it is met (ratio / 1.10), labelled approximate",
           cn["NVDA"]["expectations"]["cls_if_met"] == "NEUTRAL"
           and abs(cn["NVDA"]["expectations"]["ratio_if_met"] - cn["NVDA"]["ratio"] / 1.10) < 1e-9
@@ -1504,6 +1594,11 @@ def _selftest():
     check("embed writes the sheet right after Monitor Strip",
           ok and names.index(VC_SHEET) == names.index("Monitor Strip") + 1)
     ok2, _ = embed(snap_j, copy)
+    _vs = openpyxl.load_workbook(copy)[VC_SHEET]
+    _hdr = [row for row in _vs.iter_rows(values_only=True) if row and row[0] == "Ticker"
+            and "Liabilities / assets %" in row]
+    check("the embedded sheet's 2b header carries the two new columns",
+          len(_hdr) == 1 and "OCF / revenue %" in _hdr[0] and _hdr[0][14] == "Notes")
     check("re-embedding replaces, never stacks",
           ok2 and openpyxl.load_workbook(copy).sheetnames.count(VC_SHEET) == 1)
     check("formulas in the copy survive the embed",
