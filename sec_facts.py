@@ -45,6 +45,7 @@ USAGE
     t = SF.ttm(rows)                 # dict(value, detail, end, quarters, ...)
     pit = SF.point_in_time(cf, date) # only what SEC had published by `date` (DP-V4)
     SF.ttm_roe(pit, date)            # the value card's class basis (DP-V4)
+    SF.ttm_roic(pit, date)           # 12-month ROIC, reporting only (DP-V6)
     SF.fundamentals(pit, date)       # growth, earnings quality, balance sheet
     python sec_facts.py --selftest   (offline, fixtures)
 
@@ -67,7 +68,10 @@ CACHE_DIR = "valuation_cache"
 # 4 (2026-10-29, DP-V5): also NetIncomeLossAttributableToNoncontrollingInterest,
 #   so shareholders' net income can be rebuilt where a filer does not tag it
 #   (DOW's 10-Ks, FY2019 onward). Every v3 cache is re-fetched once.
-SLIM_VERSION = 4
+# 5 (2026-10-30, DP-V6): the ROIC inputs (ROIC_TAGS: pretax income, tax,
+#   interest, the debt components, NCI-inclusive and partners' equity). Every
+#   older cache is re-fetched once.
+SLIM_VERSION = 5
 PERIODIC_FORMS = ("10-Q", "10-K", "10-Q/A", "10-K/A")
 RECOVERY_LOOKBACK_DAYS = 800          # two years of quarters, plus the YoY base
 
@@ -105,7 +109,48 @@ VALUE_LAYER_EXTRA = ("EarningsPerShareBasic",)   # beyond the prompt's lists
 # A component tag, never a candidate for any line, so it is cached but kept out
 # of METRICS (whose drift alarm against the prompt's map is unchanged).
 NCI_NI_TAG = "NetIncomeLossAttributableToNoncontrollingInterest"
-SLIM_EXTRA = (NCI_NI_TAG,)
+
+# DP-V6 (Rob, 2026-10-30): ROIC on the under-the-hood panel. Every list is in
+# PREFERENCE order and only ONE tag per list is ever used at a date, so a
+# component a filer tags twice (commercial paper inside short-term borrowings)
+# is never counted twice. Coverage read live on 2026-10-30 across the 22 filers
+# (claude/ROIC_Feasibility_2026-10-29.md).
+PRETAX_TAGS = (
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments")
+TAX_TAGS = ("IncomeTaxExpenseBenefit",)
+# Gross interest expense (positive = expense). DOW: InterestExpenseDebt.
+INTEREST_GROSS_TAGS = ("InterestExpense", "InterestExpenseNonoperating", "InterestExpenseDebt",
+                       "InterestExpenseNetOfCapitalizedInterest")
+# Net interest, credit balance: positive = net interest INCOME (NKE FY2026 +$50M,
+# its own "interest expense (income), net" of $(50)M), so EBIT = pretax - this.
+INTEREST_NET_TAGS = ("InterestIncomeExpenseNonoperatingNet",)
+# Debt. A long-term anchor is required; short-term lines alone never make a total.
+DEBT_NONCURRENT_TAGS = ("LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations",
+                        "ConvertibleDebtNoncurrent",    # SNOW: its only debt, $2,284M
+                        "OtherLongTermDebt")            # TWST: $15M, its only debt tag
+DEBT_CURRENT_TOTAL_TAGS = ("DebtCurrent",)              # includes short-term borrowings
+DEBT_CURRENT_MATURITY_TAGS = ("LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent")
+DEBT_SHORT_TAGS = ("ShortTermBorrowings", "CommercialPaper",
+                   "ShortTermBankLoansAndNotesPayable")  # DOW's notes payable
+DEBT_TOTAL_LT_TAGS = ("LongTermDebt",)                  # long-term debt INCLUDING current maturities
+DEBT_COMBINED_TAGS = ("DebtLongtermAndShorttermCombinedAmount",)
+# EBIT is before noncontrolling interest, so capital must include NCI equity.
+EQUITY_TOTAL_TAGS = ("StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+                     "PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest")
+EQUITY_PARENT_TAGS = ("StockholdersEquity", "PartnersCapital")
+MINORITY_TAGS = ("MinorityInterest",)
+PASS_THROUGH_EQUITY = ("PartnersCapital", "PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest")
+ROIC_TAGS = (PRETAX_TAGS + TAX_TAGS + INTEREST_GROSS_TAGS + INTEREST_NET_TAGS + DEBT_NONCURRENT_TAGS
+             + DEBT_CURRENT_TOTAL_TAGS + DEBT_CURRENT_MATURITY_TAGS + DEBT_SHORT_TAGS + DEBT_TOTAL_LT_TAGS
+             + DEBT_COMBINED_TAGS + EQUITY_TOTAL_TAGS + EQUITY_PARENT_TAGS + MINORITY_TAGS)
+# Ruled: Rob, 2026-10-30 - the average combined federal + state rate (Tax
+# Foundation, 2026: federal 21%, combined 25.5%). A FALLBACK only: a filer's
+# own effective rate always comes first, and a pass-through never gets it.
+STATUTORY_TAX_RATE = 0.255
+ETR_BOUNDS = (0.0, 0.50)            # an effective rate outside this is noise, not a rate
+ROIC_YEAR_DAYS = 365                # opening capital: the balance a year before the close
+SLIM_EXTRA = (NCI_NI_TAG,) + ROIC_TAGS
 # Filers report in millions, so three independently rounded figures can
 # disagree by up to $1M without the identity being false.
 REBUILD_TOL = 1.0e6
@@ -618,6 +663,287 @@ def ttm_roe(cf, today):
     return out
 
 
+# --------------------------------------------------------------------------- #
+# ROIC (DP-V6, Rob 2026-10-30): reporting-only, the under-the-hood panel
+# --------------------------------------------------------------------------- #
+def _ttm_on(cf, tags, end, unit="USD"):
+    """best_ttm over `tags` when its chain ends within STALE_TAG_DAYS of `end`, else None."""
+    t = best_ttm(cf, ("_", "_", "flow", unit, tuple(tags)))
+    if t["value"] is None or t["end"] is None or abs((t["end"] - end).days) > STALE_TAG_DAYS:
+        return None
+    return t
+
+
+def _first_at(cf, tags, at, unit="USD"):
+    """(tag, value) for the FIRST tag in preference order with an instant at
+    `at` (+-7 days), or (None, None). Only one tag per list is ever read, so a
+    filer that tags a component twice is never double-counted, and a fossil
+    (no instant at `at`) is never read at all."""
+    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
+    for t in tags:
+        v = instant_at(gaap.get(t, {}).get("units", {}).get(unit) or [], at)
+        if v is not None:
+            return t, v
+    return None, None
+
+
+def _at(cf, tag, at, unit="USD"):
+    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
+    return instant_at(gaap.get(tag, {}).get("units", {}).get(unit) or [], at)
+
+
+def invested_capital(cf, at, layout=None):
+    """Invested capital at one date: debt + equity including NCI - cash.
+
+    dict(ic, debt, debt_parts=[(tag, value)], equity, equity_parts, cash,
+    layout, notes, why). Debt needs a LONG-TERM anchor (short-term lines alone
+    never make a total), then:
+      noncurrent + DebtCurrent (which already includes short-term borrowings), or
+      noncurrent + current maturities + ONE short-term line, or
+      LongTermDebt (incl. current maturities) + ONE short-term line, or
+      DebtLongtermAndShorttermCombinedAmount.
+    Equity: the NCI-inclusive total; else parent equity + MinorityInterest when
+    tagged. With `layout` (from the closing call) the opening balance is built
+    the SAME way: the long-term debt anchor, the equity line and cash must carry
+    the closing tags, or there is no opening figure (why='...'). A SECONDARY
+    line (current maturities, current debt, short-term borrowings, minority
+    interest) is read from its closing tag, else from its own group, else as
+    zero with a note - a balance-sheet line shown as '-' is often not tagged
+    (NVDA 2025-07-27: total long-term debt equals the noncurrent line, so its
+    current debt was nil; NKE 2025-08-31: short-term borrowings tagged 0)."""
+    out = dict(ic=None, debt=None, debt_parts=[], equity=None, equity_parts=[], cash=None,
+               layout=None, notes=[], why=None)
+    groups = dict(anchor=DEBT_NONCURRENT_TAGS, lt_total=DEBT_TOTAL_LT_TAGS, combined=DEBT_COMBINED_TAGS,
+                  current_total=DEBT_CURRENT_TOTAL_TAGS, current_maturity=DEBT_CURRENT_MATURITY_TAGS,
+                  short=DEBT_SHORT_TAGS, equity_total=EQUITY_TOTAL_TAGS, equity_parent=EQUITY_PARENT_TAGS,
+                  minority=MINORITY_TAGS, cash=("CashAndCashEquivalentsAtCarryingValue",))
+    secondary = ("current_total", "current_maturity", "short", "minority")
+    if layout is not None:
+        debt, eq, cash = [], [], None
+        for role, t in layout:
+            v = _at(cf, t, at)
+            if v is None and role in secondary:
+                t2, v2 = _first_at(cf, groups[role], at)
+                if t2:
+                    t, v = t2, v2
+                else:
+                    v = 0.0
+                    out["notes"].append("opening: no %s line at %s, read as zero" % (t, at))
+            if v is None:
+                out["why"] = "%s not reported at %s" % (t, at)
+                return out
+            if role == "cash":
+                cash = v
+            elif role in ("equity_total", "equity_parent", "minority"):
+                eq.append((t, v))
+            else:
+                debt.append((t, v))
+    else:
+        debt = []                                   # (role, tag, value)
+        t, v = _first_at(cf, DEBT_NONCURRENT_TAGS, at)
+        if t:
+            debt.append(("anchor", t, v))
+            tc, vc = _first_at(cf, DEBT_CURRENT_TOTAL_TAGS, at)
+            if tc:
+                debt.append(("current_total", tc, vc))
+            else:
+                for role in ("current_maturity", "short"):
+                    tg, vg = _first_at(cf, groups[role], at)
+                    if tg:
+                        debt.append((role, tg, vg))
+            if t == "ConvertibleDebtNoncurrent":
+                out["notes"].append("debt: convertible notes are the only long-term debt tagged")
+            elif t == "OtherLongTermDebt":
+                out["notes"].append("debt: OtherLongTermDebt is the only long-term debt tagged")
+        else:
+            t, v = _first_at(cf, DEBT_TOTAL_LT_TAGS, at)
+            if t:
+                debt.append(("lt_total", t, v))
+                ts, vs = _first_at(cf, DEBT_SHORT_TAGS, at)
+                if ts:
+                    debt.append(("short", ts, vs))
+            else:
+                t, v = _first_at(cf, DEBT_COMBINED_TAGS, at)
+                if t:
+                    debt.append(("combined", t, v))
+        if not debt:
+            out["why"] = "no current debt tag at %s (absence is not zero)" % at
+            return out
+        te, ve = _first_at(cf, EQUITY_TOTAL_TAGS, at)
+        if te:
+            eqr = [("equity_total", te, ve)]
+        else:
+            tp, vp = _first_at(cf, EQUITY_PARENT_TAGS, at)
+            if not tp:
+                out["why"] = "no equity line at %s" % at
+                return out
+            eqr = [("equity_parent", tp, vp)]
+            tm, vm = _first_at(cf, MINORITY_TAGS, at)
+            if tm:
+                eqr.append(("minority", tm, vm))
+        tcash, cash = _first_at(cf, groups["cash"], at)
+        if tcash is None:
+            out["why"] = "no cash line at %s" % at
+            return out
+        layout = [(r, t) for r, t, _v in debt + eqr] + [("cash", tcash)]
+        # Cross-check against a combined total when one is tagged but not used.
+        # Filers mean two different things by it (WMT: long-term debt incl.
+        # current maturities, WITHOUT short-term borrowings), so either basis agrees.
+        tcomb, vcomb = _first_at(cf, DEBT_COMBINED_TAGS, at)
+        total = sum(v for _r, _t, v in debt)
+        no_short = sum(v for r, _t, v in debt if r != "short")
+        if tcomb and tcomb not in {t for _r, t, _v in debt} and vcomb and \
+                min(abs(total - vcomb), abs(no_short - vcomb)) > 0.02 * abs(vcomb):
+            out["notes"].append("debt cross-check: components %.2fB vs %s %.2fB"
+                                % (total / 1e9, tcomb, vcomb / 1e9))
+        debt = [(t, v) for _r, t, v in debt]
+        eq = [(t, v) for _r, t, v in eqr]
+    out.update(debt=sum(v for _t, v in debt), debt_parts=debt,
+               equity=sum(v for _t, v in eq), equity_parts=eq, cash=cash, layout=layout)
+    out["ic"] = out["debt"] + out["equity"] - cash
+    return out
+
+
+def _fy_tax_rate(cf, end):
+    """The filer's own effective rate over its last three fiscal years ending
+    on or before `end`: (rate, label) or (None, why)."""
+    _tp, prow = rows_for(cf, PRETAX_TAGS, "USD")
+    _tt, trow = rows_for(cf, TAX_TAGS, "USD")
+    P = {k: v["val"] for k, v in durations(prow).items() if bucket((k[1] - k[0]).days) == "FY" and k[1] <= end}
+    T = {k: v["val"] for k, v in durations(trow).items() if bucket((k[1] - k[0]).days) == "FY" and k[1] <= end}
+    common = sorted(set(P) & set(T), key=lambda k: k[1])[-3:]
+    if len(common) < 3:
+        return None, "fewer than three fiscal years of pretax income and tax"
+    sp, st = sum(P[k] for k in common), sum(T[k] for k in common)
+    if sp <= 0:
+        return None, "three-year pretax income is not positive"
+    r = st / sp
+    if not ETR_BOUNDS[0] <= r <= ETR_BOUNDS[1]:
+        return None, "three-year effective rate %.0f%% is outside 0-50%%" % (100 * r)
+    return r, "own 3-year effective rate (FY%s-FY%s)" % (common[0][1].year, common[-1][1].year)
+
+
+def ttm_roic(cf, today=None):
+    """12-month return on invested capital (DP-V6): NOPAT / average invested capital.
+
+    dict(roic (fraction; None when there is no read), nopat, ebit, ebit_route,
+    tax_rate, tax_basis, ic (the denominator), ic_close, ic_open, ic_basis,
+    end, debt, debt_parts, equity, equity_parts, cash, notes, why).
+
+      EBIT     12-month OperatingIncomeLoss; else pretax income + gross interest
+               expense; else pretax income - net interest income. Each route is
+               named. The window ends at the filer's latest 12-month end.
+      tax      the filer's own 12-month effective rate when pretax income is
+               positive and the rate is in 0-50%; else its own 3-year rate; else
+               STATUTORY_TAX_RATE (25.5%, ruled 2026-10-30), except that a
+               pass-through (partners' capital) is never given a statutory rate.
+               An operating loss gets no tax shield: NOPAT = EBIT.
+      capital  invested_capital() at the window's end and a year earlier, the
+               same tags both times; the average when both read, else the close.
+    Point in time: pass point_in_time(cf, d) and the read uses only what SEC had
+    published by d. Reporting only (DP-V1): it reaches no prompt, gate or class."""
+    out = dict(roic=None, nopat=None, ebit=None, ebit_route=None, tax_rate=None, tax_basis=None,
+               ic=None, ic_close=None, ic_open=None, ic_basis=None, end=None, debt=None,
+               debt_parts=[], equity=None, equity_parts=[], cash=None, notes=[], why=None)
+    sv = (cf or {}).get("slim_version")
+    if sv is not None and sv < 5:
+        # A pre-v5 cache holds SOME debt tags but not the current and short-term
+        # lines, so a read would silently understate debt (WMT on its v3 cache:
+        # 19.1% against 18.1% on the full feed, 2026-10-30). No read until re-fetched.
+        out["why"] = "cache predates the ROIC inputs (slim v%s); re-fetched on the next value run" % sv
+        return out
+    ends = [t["end"] for t in (best_ttm(cf, metric(k)) for k in ("net_income", "eps_diluted", "revenue"))
+            if t["value"] is not None]
+    if not ends:
+        out["why"] = "no 12-month figures"
+        return out
+    end = max(ends)
+    out["end"] = str(end)
+    # ---- EBIT
+    op = _ttm_on(cf, ("OperatingIncomeLoss",), end)
+    pre = _ttm_on(cf, PRETAX_TAGS, end)
+    if op:
+        e, route, used = op["value"], "operating income", [op]
+    elif pre and _ttm_on(cf, INTEREST_GROSS_TAGS, end):
+        gi = _ttm_on(cf, INTEREST_GROSS_TAGS, end)
+        e, used = pre["value"] + gi["value"], [pre, gi]
+        route = "pretax income + interest expense (%s)" % gi["tag"]
+    elif pre and _ttm_on(cf, INTEREST_NET_TAGS, end):
+        ni_ = _ttm_on(cf, INTEREST_NET_TAGS, end)
+        e, used = pre["value"] - ni_["value"], [pre, ni_]
+        route = "pretax income - net interest income (%s)" % ni_["tag"]
+    else:
+        out["why"] = "no 12-month operating income, and no pretax income with interest to rebuild it"
+        return out
+    out.update(ebit=e, ebit_route=route)
+    for t in used:
+        out["notes"] += ["EBIT input %s: %s" % (t["tag"], x) for x in _unusual(t)]
+    # ---- capital
+    close = invested_capital(cf, end)
+    out["notes"] += close["notes"]
+    if close["why"]:
+        out["why"] = close["why"]
+        return out
+    out.update(ic_close=close["ic"], debt=close["debt"], debt_parts=close["debt_parts"],
+               equity=close["equity"], equity_parts=close["equity_parts"], cash=close["cash"])
+    if close["ic"] <= 0:
+        out["why"] = "non-positive invested capital at %s (cash exceeds debt + equity)" % end
+        return out
+    opening = invested_capital(cf, end - dt.timedelta(days=ROIC_YEAR_DAYS), layout=close["layout"])
+    if opening["ic"] is not None and opening["ic"] > 0:
+        out.update(ic_open=opening["ic"], ic=(opening["ic"] + close["ic"]) / 2.0,
+                   ic_basis="average of opening and closing")
+        out["notes"] += opening["notes"]
+    else:
+        out.update(ic=close["ic"], ic_basis="closing only")
+        out["notes"].append("capital: closing only (%s)" % (opening["why"] or "opening capital not positive"))
+    # ---- tax
+    tax = _ttm_on(cf, TAX_TAGS, end)
+    rate, basis = None, None
+    if pre and tax and pre["value"] > 0:
+        r = tax["value"] / pre["value"]
+        if ETR_BOUNDS[0] <= r <= ETR_BOUNDS[1]:
+            rate, basis = r, "own 12-month effective rate"
+    if rate is None:
+        rate, why3 = _fy_tax_rate(cf, end)
+        basis = why3 if rate is not None else None
+        if rate is None:
+            if any(t in PASS_THROUGH_EQUITY for t, _v in close["equity_parts"]):
+                rate, basis = 0.0, "pass-through: no entity-level tax assumed"
+            else:
+                rate, basis = STATUTORY_TAX_RATE, "statutory fallback %.1f%%" % (100 * STATUTORY_TAX_RATE)
+            out["notes"].append("tax: %s (%s)" % (basis, why3))
+    out.update(tax_rate=rate, tax_basis=basis)
+    # ---- NOPAT and the ratio
+    if e > 0:
+        out["nopat"] = e * (1.0 - rate)
+    else:
+        out["nopat"] = e
+        out["notes"].append("operating loss: no tax shield assumed")
+    out["roic"] = out["nopat"] / out["ic"]
+    return out
+
+
+def roic_note(r):
+    """One compact line for a card's notes column: empty for the standard read
+    (operating income, own 12-month rate, average capital), else what differs."""
+    if not r:
+        return ""
+    if r.get("roic") is None:
+        return "ROIC: %s" % (r.get("why") or "no read")
+    bits = []
+    if r.get("ebit_route") and r["ebit_route"] != "operating income":
+        bits.append("EBIT = " + r["ebit_route"].split(" (")[0])
+    if r.get("ebit") is not None and r["ebit"] <= 0:
+        bits.append("operating loss, no tax shield")      # the tax basis is moot
+    elif r.get("tax_basis") and r["tax_basis"] != "own 12-month effective rate":
+        bits.append("tax " + r["tax_basis"])
+    if r.get("ic_basis") == "closing only":
+        bits.append("closing capital only")
+    bits += [n for n in r.get("notes") or [] if n.startswith("debt")]
+    return ("ROIC: " + "; ".join(bits)) if bits else ""
+
+
 def _chg(now, then):
     """Relative change, signed by direction: (now - then) / |then|."""
     if now is None or then is None or then == 0:
@@ -643,6 +969,7 @@ def fundamentals(cf, today):
       balance  at the latest period end: equity, liabilities (or assets minus
                equity, labelled), liabilities / equity, liabilities / assets
                (defined at any sign of equity), cash, long-term debt
+      roic     ttm_roic() on the same facts (DP-V6, 2026-10-30)
 
     2026-10-29: the balance date is the equity's; with no usable equity line it
     is the latest total-assets date, so cash and liabilities / assets still read
@@ -653,7 +980,7 @@ def fundamentals(cf, today):
                        for k in ("eps", "revenue", "net_income")},
                quality=dict(ocf_to_ni=None, gross_margin=None, gross_margin_year_ago=None,
                             op_margin=None, op_margin_year_ago=None),
-               balance=dict(end=None, equity=None, negative_equity=False))
+               balance=dict(end=None, equity=None, negative_equity=False), roic=None)
     out["growth"].update({k: dict(quarter=None, year_ago=None, chg=None)
                           for k in ("q_eps", "q_revenue")})
     tt = {k: best_ttm(cf, metric(k)) for k in
@@ -753,6 +1080,9 @@ def fundamentals(cf, today):
                    liab_to_assets=_div(liab, assets) if liab is not None else None,
                    cash=inst("cash"), lt_debt=inst("lt_debt"))
     out["balance"] = bal
+    # DP-V6 (2026-10-30): ROIC on the same point-in-time facts; it carries its
+    # own route, tax basis and reasons, and changes nothing above.
+    out["roic"] = ttm_roic(cf, today)
     return out
 
 
@@ -1228,7 +1558,111 @@ def selftest():
     check("DP-V5: a QUARTER the filer did not tag is rebuilt, counted unusual and labelled",
           abs(bq["value"] - (-7.0)) < 1e-9 and ("2026-04-01", "2026-06-30") in bq["rebuilt"]
           and qsrc and short_source(qsrc[0]) == "rebuilt (ProfitLoss minus NCI)" and bq["unusual"] >= 1)
-    check("slim cache v4 (re-fetches every v3 cache once, to pick up the NCI tag)", SLIM_VERSION == 4)
+    check("slim cache v5 (re-fetches every older cache once: the NCI tag and the ROIC inputs)",
+          SLIM_VERSION == 5 and NCI_NI_TAG in slim_tags() and all(t in slim_tags() for t in ROIC_TAGS))
+    # 11. DP-V6 (2026-10-30): ROIC. Four standalone quarters to 2026-06-30, balances
+    # at the close and a year earlier. Shapes are the live ones read 2026-10-30.
+    q11 = [("2025-04-01", "2025-06-30"), ("2025-07-01", "2025-09-30"), ("2025-10-01", "2025-12-31"),
+           ("2026-01-01", "2026-03-31"), ("2026-04-01", "2026-06-30")]
+
+    def flows(v):
+        return [_f(s, e, v, filed=filed_for(e), accn="r" + e) for s, e in q11]
+
+    def bal(close, opening=None):
+        out_ = [{"end": "2026-06-30", "val": close, "filed": "2026-08-04", "form": "10-Q"}]
+        if opening is not None:
+            out_.append({"end": "2025-06-30", "val": opening, "filed": "2025-08-04", "form": "10-Q"})
+        return out_
+
+    def rf(**over):
+        g = {"NetIncomeLoss": flows(60.0), "OperatingIncomeLoss": flows(100.0),
+             PRETAX_TAGS[0]: flows(90.0), "IncomeTaxExpenseBenefit": flows(18.0),
+             "LongTermDebtNoncurrent": bal(1000.0, 900.0), "LongTermDebtCurrent": bal(100.0),
+             "ShortTermBorrowings": bal(50.0, 50.0), "CommercialPaper": bal(40.0, 40.0),
+             "StockholdersEquity": bal(850.0, 760.0),
+             "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": bal(900.0, 800.0),
+             "CashAndCashEquivalentsAtCarryingValue": bal(250.0, 150.0)}
+        g.update(over)
+        return {"facts": {"us-gaap": {t: {"units": {"USD": rows}} for t, rows in g.items() if rows is not None}}}
+    T11 = dt.date(2026, 10, 30)
+    r1 = ttm_roic(rf(), T11)
+    check("DP-V6: NOPAT 400 x (1 - 20%) over average capital (1800 + 1600) / 2 = 18.8%",
+          r1["roic"] is not None and abs(r1["roic"] - 320.0 / 1700.0) < 1e-12
+          and r1["ebit_route"] == "operating income" and r1["tax_basis"] == "own 12-month effective rate"
+          and r1["ic_basis"] == "average of opening and closing" and roic_note(r1) == "")
+    check("DP-V6: one short-term line only (commercial paper sits inside short-term borrowings)",
+          [t for t, _v in r1["debt_parts"]] == ["LongTermDebtNoncurrent", "LongTermDebtCurrent",
+                                                 "ShortTermBorrowings"])
+    check("DP-V6: capital takes equity INCLUDING noncontrolling interest (EBIT is before NCI)",
+          r1["equity_parts"] == [("StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", 900.0)])
+    check("DP-V6: a secondary line missing at the opening date is read as zero, and says so (NVDA, NKE)",
+          abs(r1["ic_open"] - 1600.0) < 1e-9
+          and any(n.startswith("opening: no LongTermDebtCurrent") for n in r1["notes"]))
+    r2 = ttm_roic(rf(DebtCurrent=bal(130.0, 0.0)), T11)
+    check("DP-V6: DebtCurrent (which includes short-term borrowings) replaces both current lines",
+          [t for t, _v in r2["debt_parts"]] == ["LongTermDebtNoncurrent", "DebtCurrent"])
+    r3 = ttm_roic(rf(LongTermDebtNoncurrent=[{"end": "2024-12-31", "val": 5000.0, "filed": "2025-02-01"}],
+                     LongTermDebtAndCapitalLeaseObligations=bal(1000.0, 900.0)), T11)
+    check("DP-V6: a fossil debt tag (RTX's LongTermDebt, 2024) is never read; the current one is",
+          r3["debt_parts"][0] == ("LongTermDebtAndCapitalLeaseObligations", 1000.0) and r3["roic"] is not None)
+    r4 = ttm_roic(rf(OperatingIncomeLoss=None, InterestExpenseDebt=flows(10.0)), T11)
+    check("DP-V6: no operating income -> EBIT = pretax + gross interest (DOW: 360 + 40 = 400)",
+          abs(r4["ebit"] - 400.0) < 1e-9 and r4["ebit_route"].startswith("pretax income + interest expense")
+          and "EBIT = pretax income + interest expense" in roic_note(r4))
+    r5 = ttm_roic(rf(OperatingIncomeLoss=None, InterestIncomeExpenseNonoperatingNet=flows(5.0)), T11)
+    check("DP-V6: net interest is income-positive, so EBIT = pretax - it (NKE: 360 - 20 = 340)",
+          abs(r5["ebit"] - 340.0) < 1e-9 and r5["ebit_route"].startswith("pretax income - net interest income"))
+    fy3 = [_f("%d-01-01" % y, "%d-12-31" % y, v, filed="%d-02-01" % (y + 1), accn="k%d" % y, form="10-K")
+           for y, v in ((2023, 500.0), (2024, 500.0), (2025, 500.0))]
+    fyt = [_f("%d-01-01" % y, "%d-12-31" % y, v, filed="%d-02-01" % (y + 1), accn="k%d" % y, form="10-K")
+           for y, v in ((2023, 100.0), (2024, 120.0), (2025, 80.0))]
+    r6 = ttm_roic(rf(**{PRETAX_TAGS[0]: flows(-10.0) + fy3, "IncomeTaxExpenseBenefit": flows(2.0) + fyt}), T11)
+    check("DP-V6: a 12-month pretax loss -> the filer's own 3-year rate (300 / 1500 = 20%)",
+          abs(r6["tax_rate"] - 0.20) < 1e-12 and r6["tax_basis"].startswith("own 3-year effective rate"))
+    r7 = ttm_roic(rf(**{PRETAX_TAGS[0]: flows(-10.0), "IncomeTaxExpenseBenefit": flows(2.0)}), T11)
+    check("DP-V6: no meaningful own rate -> the ruled statutory fallback, 25.5%",
+          r7["tax_rate"] == STATUTORY_TAX_RATE == 0.255 and r7["tax_basis"].startswith("statutory")
+          and "tax statutory fallback 25.5%" in roic_note(r7))
+    r8 = ttm_roic(rf(**{PRETAX_TAGS[0]: flows(-10.0), "IncomeTaxExpenseBenefit": flows(2.0),
+                        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": None,
+                        "StockholdersEquity": None,
+                        "PartnersCapitalIncludingPortionAttributableToNoncontrollingInterest": bal(900.0, 800.0)}), T11)
+    check("DP-V6: a pass-through (partners' capital) is never given the statutory rate",
+          r8["tax_rate"] == 0.0 and r8["tax_basis"].startswith("pass-through"))
+    r9 = ttm_roic(rf(OperatingIncomeLoss=flows(-50.0)), T11)
+    check("DP-V6: an operating loss gets no tax shield (NOPAT = EBIT = -200)",
+          r9["nopat"] == -200.0 and r9["roic"] < 0 and "operating loss: no tax shield assumed" in r9["notes"])
+    r10 = ttm_roic(rf(CashAndCashEquivalentsAtCarryingValue=bal(5000.0, 5000.0)), T11)
+    check("NEGATIVE DP-V6: non-positive invested capital -> no read, and why",
+          r10["roic"] is None and "non-positive invested capital" in r10["why"])
+    r11 = ttm_roic(rf(LongTermDebtNoncurrent=None, LongTermDebtCurrent=None, ShortTermBorrowings=None), T11)
+    check("NEGATIVE DP-V6: commercial paper alone is not a debt total; absence is not zero (O, GM)",
+          r11["roic"] is None and "absence is not zero" in r11["why"])
+    r12 = ttm_roic(rf(**{"StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest": bal(900.0)}), T11)
+    check("DP-V6: an anchor line missing a year earlier -> closing capital only, labelled",
+          r12["ic_basis"] == "closing only" and abs(r12["ic"] - 1800.0) < 1e-9
+          and "closing capital only" in roic_note(r12))
+    r13 = ttm_roic(rf(OperatingIncomeLoss=None), T11)
+    check("NEGATIVE DP-V6: no operating income and no interest to rebuild it -> no read",
+          r13["roic"] is None and "no 12-month operating income" in r13["why"])
+    r14 = ttm_roic(rf(DebtLongtermAndShorttermCombinedAmount=bal(1100.0)), T11)
+    r15 = ttm_roic(rf(DebtLongtermAndShorttermCombinedAmount=bal(2000.0)), T11)
+    check("DP-V6: a combined-debt cross-check agreeing on either basis is silent (WMT: excludes "
+          "short-term); disagreeing on both is noted",
+          not any(n.startswith("debt cross-check") for n in r14["notes"])
+          and any(n.startswith("debt cross-check") for n in r15["notes"]))
+    pit11 = point_in_time(rf(), dt.date(2026, 8, 3))          # the 06-30 10-Q is filed 2026-08-04
+    rp = ttm_roic(pit11, dt.date(2026, 8, 3))
+    check("DP-V6 point in time: before the 10-Q is public the window ends a quarter earlier, where "
+          "no balance was filed -> no read, never the unpublished one",
+          rp["end"] == "2026-03-31" and rp["roic"] is None and "2026-03-31" in (rp["why"] or ""))
+    check("DP-V6: fundamentals carries the ROIC read beside the panels it does not change",
+          abs(fundamentals(rf(), T11)["roic"]["roic"] - 320.0 / 1700.0) < 1e-12)
+    old_cache = dict(rf(), slim_version=4)
+    check("NEGATIVE DP-V6: a pre-v5 cache (some debt tags, not all) gives no read rather than an "
+          "understated debt (WMT 19.1% vs 18.1%)",
+          ttm_roic(old_cache, T11)["roic"] is None and "predates the ROIC inputs" in ttm_roic(old_cache, T11)["why"]
+          and ttm_roic(point_in_time(old_cache, T11), T11)["roic"] is None)
     # 8. the map mirrors the prompt's (drift alarm)
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

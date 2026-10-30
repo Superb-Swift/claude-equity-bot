@@ -420,7 +420,27 @@ def hood_notes(u):
                    % ("" if eq is None else " (deficit $%.2fB)" % (abs(eq) / 1e9)))
     if q.get("net_loss"):
         out.append("12-month net loss: OCF/NI not defined, see OCF/rev")
-    return out + list(u.get("notes") or [])
+    rn = roic_note_for(u)
+    return out + list(u.get("notes") or []) + ([rn] if rn else [])
+
+
+def roic_note_for(u):
+    """DP-V6: the ROIC note for one name ('' for a standard read; a bank's ROIC
+    is not shown, and its caveat already says why)."""
+    if (u.get("caveat") or "").startswith("bank"):
+        return ""
+    try:
+        import sec_facts as SF
+        return SF.roic_note(u.get("roic"))
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
+def roic_value(u):
+    """DP-V6: the ROIC fraction to show, or None (no read, or a bank)."""
+    if (u.get("caveat") or "").startswith("bank"):
+        return None
+    return (u.get("roic") or {}).get("roic")
 
 
 def hood_sheet_row(t, u):
@@ -432,6 +452,7 @@ def hood_sheet_row(t, u):
             None if bank else _p100(q.get("ocf_margin")),
             _p100(q.get("gross_margin")), _p100(q.get("gross_margin_year_ago")),
             _p100(q.get("op_margin")), _p100(q.get("op_margin_year_ago")),
+            _p100(roic_value(u)),
             None if bank else b.get("liab_to_equity"),
             None if bank else _p100(b.get("liab_to_assets")),
             None if b.get("cash") is None else b["cash"] / 1e9,
@@ -441,8 +462,8 @@ def hood_sheet_row(t, u):
 HOOD_SHEET_COLUMNS = (
     "Ticker", "EPS 12m", "EPS y/y %", "Revenue y/y %", "Last quarter EPS y/y %", "OCF / NI",
     "OCF / revenue %", "Gross margin %", "Gross margin a year ago %", "Operating margin %",
-    "Operating margin a year ago %", "Liabilities / equity", "Liabilities / assets %", "Cash ($B)",
-    "Notes")
+    "Operating margin a year ago %", "ROIC %", "Liabilities / equity", "Liabilities / assets %",
+    "Cash ($B)", "Notes")
 
 
 def dividend_implied_g(yield_pct, r=R_BASE):
@@ -839,9 +860,9 @@ def build(date, root, log_path, quotes_path, tracker):
     # ---- 2b. under the hood (DP-V4) ------------------------------------------
     L.append("  2b. UNDER THE HOOD -- SEC filings, last 12 months against the 12 months before.")
     L.append("      Direction (are earnings growing?), quality (are they cash?), balance sheet.")
-    L.append("  %-5s %8s %8s %8s %9s %6s %7s %-18s %-15s %6s %5s %8s  %s" % (
+    L.append("  %-5s %8s %8s %8s %9s %6s %7s %-18s %-15s %5s %6s %5s %8s  %s" % (
         "tk", "EPS 12m", "EPS y/y", "rev y/y", "lastQ y/y", "OCF/NI", "OCF/rev", "gross mgn (yr ago)",
-        "op mgn (yr ago)", "L/E", "L/A", "cash", "note"))
+        "op mgn (yr ago)", "ROIC", "L/E", "L/A", "cash", "note"))
 
     def mgn(a, b):
         if a is None:
@@ -865,11 +886,12 @@ def build(date, root, log_path, quotes_path, tracker):
         le = None if bank else b.get("liab_to_equity")
         la = None if bank else b.get("liab_to_assets")
         notes = hood_notes(dict(fu, caveat=cav or None))
-        L.append("  %-5s %8s %8s %8s %9s %6s %7s %-18s %-15s %6s %5s %8s  %s" % (
+        L.append("  %-5s %8s %8s %8s %9s %6s %7s %-18s %-15s %5s %6s %5s %8s  %s" % (
             t, fmt(g["eps"]["ttm"]), pct_s(g["eps"]["chg"]), pct_s(g["revenue"]["chg"]),
             pct_s(g["q_eps"]["chg"]), fmt(ocfni), pct0(ocfm),
             mgn(q["gross_margin"], q["gross_margin_year_ago"]),
-            mgn(q["op_margin"], q["op_margin_year_ago"]), fmt(le), pct0(la),
+            mgn(q["op_margin"], q["op_margin_year_ago"]),
+            pct0(roic_value(dict(fu, caveat=cav or None))), fmt(le), pct0(la),
             ("%.1fB" % (b["cash"] / 1e9)) if b.get("cash") is not None else "—",
             "; ".join(notes)[:120]))
         c.update(under_hood=dict(fu, caveat=cav or None))
@@ -878,6 +900,10 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("      flow over net income (below 1: profits not yet cash). OCF/rev: operating cash")
     L.append("      flow over revenue, defined through a loss. L/E: liabilities / equity. L/A:")
     L.append("      liabilities / assets, defined when equity is negative (above 100%: a deficit).")
+    L.append("      ROIC (DP-V6): 12-month operating profit after tax / average invested capital")
+    L.append("      (debt + equity incl. minority interests - cash). Tax: the filer's own rate, else")
+    L.append("      its 3-year rate, else 25.5%; an operating loss gets no shield. Defined when equity")
+    L.append("      is negative; a bank's is not shown. The note says when a read is not standard.")
     L.append("")
 
     # ---- 2c. expectations (DP-V4) ---------------------------------------------
@@ -1545,6 +1571,30 @@ def _selftest():
               ("OCF / NI", "OCF / revenue %", "Liabilities / equity", "Liabilities / assets %"))
           and rj[-1].startswith("bank:"))
     check("the sheet row and its header have the same width", len(rb) == len(HOOD_SHEET_COLUMNS))
+    # ---- DP-V6 (2026-10-30): ROIC on 2b ----
+    ri = HOOD_SHEET_COLUMNS.index("ROIC %")
+    upm = dict(_u(eq=-7.94e9, le=None, la=1.2), roic=dict(
+        roic=0.366, ebit=16.66e9, ebit_route="operating income", tax_basis="own 12-month effective rate",
+        ic_basis="average of opening and closing", notes=[]))
+    rpm = hood_sheet_row("PM", upm)
+    check("ROIC (PM): 36.6% reads where ROE cannot (negative equity), with no note for a standard read",
+          abs(rpm[ri] - 36.6) < 1e-9 and "ROIC:" not in rpm[-1])
+    udw = dict(_u(), roic=dict(roic=0.010, ebit=0.43e9, ebit_route="pretax income + interest expense "
+                               "(InterestExpenseDebt)", tax_basis="statutory fallback 25.5%",
+                               ic_basis="average of opening and closing", notes=[]))
+    check("ROIC (DOW): the note names the EBIT route and the 25.5% fallback",
+          "ROIC: EBIT = pretax income + interest expense; tax statutory fallback 25.5%"
+          in hood_sheet_row("DOW", udw)[-1])
+    ujp = dict(_u(cav="bank: operating cash flow and liabilities/equity are not comparable"),
+               roic=dict(roic=None, why="no 12-month operating income, and no pretax income with "
+                         "interest to rebuild it"))
+    check("ROIC (JPM): a bank's ROIC stays blank and adds no note beside the bank caveat",
+          hood_sheet_row("JPM", ujp)[ri] is None and "ROIC:" not in hood_sheet_row("JPM", ujp)[-1])
+    ugm = dict(_u(), roic=dict(roic=None, why="no current debt tag at 2026-09-30 (absence is not zero)"))
+    check("ROIC (GM): no read is blank, and the note says why",
+          hood_sheet_row("GM", ugm)[ri] is None and "ROIC: no current debt tag" in hood_sheet_row("GM", ugm)[-1])
+    check("2b text carries the ROIC column and its legend",
+          " ROIC " in txt and "ROIC (DP-V6)" in txt and "25.5%" in txt)
     check("2b text carries the OCF/rev and L/A columns and their legend",
           "OCF/rev" in txt and " L/A " in txt and "defined when equity is negative" in txt)
     check("2c: the consensus and the class if it is met (ratio / 1.10), labelled approximate",
@@ -1598,7 +1648,8 @@ def _selftest():
     _hdr = [row for row in _vs.iter_rows(values_only=True) if row and row[0] == "Ticker"
             and "Liabilities / assets %" in row]
     check("the embedded sheet's 2b header carries the two new columns",
-          len(_hdr) == 1 and "OCF / revenue %" in _hdr[0] and _hdr[0][14] == "Notes")
+          len(_hdr) == 1 and "OCF / revenue %" in _hdr[0] and "ROIC %" in _hdr[0]
+          and _hdr[0][len(HOOD_SHEET_COLUMNS) - 1] == "Notes")
     check("re-embedding replaces, never stacks",
           ok2 and openpyxl.load_workbook(copy).sheetnames.count(VC_SHEET) == 1)
     check("formulas in the copy survive the embed",

@@ -352,6 +352,8 @@ def audit_name(tk, cf, src, today, prompt=None, vrec=None):
     a["roe"] = roe_bases(cf, vrec, today)
     if a["roe"] and a["roe"].get("flag"):
         a["flags"].append(a["roe"]["flag"])
+    # DP-V6 (2026-10-30): ROIC with every input named, so each read can be traced
+    a["roic"] = SF.ttm_roic(cf, today)
     r = a["roe"] or {}
     if r.get("class_on_ttm") and r["class_on_ttm"] != r.get("class_now"):
         a["flags"].append("CLASS-ON-TTM: %s today; %s on TTM ROE (ratio %.2f) - counterfactual, "
@@ -551,6 +553,25 @@ def reconcile_reference(ref, cf, prompt):
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
+def roic_lines(r):
+    """The per-name ROIC block (DP-V6): the figure, then every input and its tag."""
+    if not r:
+        return []
+    if r.get("roic") is None:
+        return ["", "**ROIC (DP-V6):** no read - %s" % (r.get("why") or "?")]
+    B = lambda v: "$%.2fB" % (v / 1e9)
+    parts = lambda ps: " + ".join("%s %s" % (t, B(v)) for t, v in ps)
+    out = ["", "**ROIC (DP-V6):** **%.1f%%** to %s · EBIT %s (%s) · tax %.1f%% (%s) · NOPAT %s · "
+           "capital %s (%s)" % (100 * r["roic"], r["end"], B(r["ebit"]), r["ebit_route"],
+                                100 * r["tax_rate"], r["tax_basis"], B(r["nopat"]), B(r["ic"]), r["ic_basis"]),
+           "", "- closing capital %s = debt %s [%s] + equity %s [%s] - cash %s%s" % (
+               B(r["ic_close"]), B(r["debt"]), parts(r["debt_parts"]), B(r["equity"]),
+               parts(r["equity_parts"]), B(r["cash"]),
+               (" · opening %s" % B(r["ic_open"])) if r.get("ic_open") is not None else "")]
+    out += ["- " + n for n in r.get("notes") or []]
+    return out
+
+
 def render(day, audits, refs, inputs_path, exhibit):
     L = ["# SEC data audit - %s" % day, "",
          "*sec_data_audit.py. Reporting only: nothing here reaches the prompt or any gate "
@@ -558,8 +579,8 @@ def render(day, audits, refs, inputs_path, exhibit):
          "block from `%s`; value-card ROE from `%s`.*" % (inputs_path or "-", exhibit or "-"), "",
          "## Summary", "",
          "| Ticker | Type | Latest quarter | Filing gaps | TTM EPS | TTM net income | Prompt block "
-         "| Class ROE vs TTM | Flags |",
-         "|---|---|---|---|---:|---:|---|---|---:|"]
+         "| Class ROE vs TTM | ROIC | Flags |",
+         "|---|---|---|---|---:|---:|---|---|---:|---:|"]
     for a in audits:
         ms = a.get("metrics", {})
         eps, ni = ms.get("eps_diluted", {}), ms.get("net_income", {})
@@ -575,11 +596,13 @@ def render(day, audits, refs, inputs_path, exhibit):
         fg = a.get("filing_gaps")
         fgs = ("—" if fg is None else ("%d open" % len(fg) if fg else "none")) + \
               (" · %d recovered" % len(a.get("recovered") or []) if a.get("recovered") else "")
-        L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %d |" % (
+        ro = a.get("roic") or {}
+        L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %d |" % (
             a["ticker"], a.get("type", "?"), a.get("latest_quarter_end", "—"), fgs,
             _fmt(eps.get("ttm"), "USD/shares") if eps.get("ttm") is not None else eps.get("status", "—"),
             _fmt(ni.get("ttm"), "USD") if ni.get("ttm") is not None else ni.get("status", "—"),
-            pv, rs, len(a["flags"])))
+            pv, rs, ("%.1f%%" % (100 * ro["roic"])) if ro.get("roic") is not None else "—",
+            len(a["flags"])))
     L += ["", "**Coverage codes** (oldest → newest, 8 quarters): R reported · q fiscal Q4 "
           "(FY minus 3 quarters, routine) · D derived from year-to-date · d the same for cash "
           "flow, where year-to-date reporting is the convention (routine) · C recovered from a "
@@ -627,6 +650,7 @@ def render(day, audits, refs, inputs_path, exhibit):
                           "counterfactual, not applied (DP-V3)" % (
                               roe["class_now"], roe["ratio_on_ttm"] * roe["ttm_roe"] / roe["class_roe"],
                               roe["class_on_ttm"], roe["ratio_on_ttm"]))
+        L += roic_lines(a.get("roic"))
         if a["flags"]:
             L += ["", "Flags:"] + ["- " + f for f in a["flags"]]
         L.append("")
@@ -992,6 +1016,31 @@ def selftest():
           ni_rec.get("ttm_tag") == "NetIncomeLoss" and abs(ni_rec["ttm"] - (-897e6)) < 1
           and any(x.startswith("REBUILT Net income") for x in ad["flags"])
           and not any(x.startswith("FALLBACK-TAG Net income") for x in ad["flags"]))
+    # DP-V6 (2026-10-30): the ROIC block names every input
+    q6 = (("2025-10-01", "2025-12-31"), ("2026-01-01", "2026-03-31"), ("2026-04-01", "2026-06-30"),
+          ("2026-07-01", "2026-09-30"))
+
+    def fq(v):
+        return [f(s, e, v, accn=e, filed="2026-11-01") for s, e in q6]
+
+    def b2(close, opening):
+        return [dict(inst("2026-09-30", close), filed="2026-11-01"),
+                dict(inst("2025-09-30", opening), filed="2025-11-01")]
+    rv6 = {"cik": 5, "entityName": "EEE CORP", "periodic": [], "facts": {"us-gaap": {
+        "NetIncomeLoss": {"units": {"USD": fq(60e6)}}, "OperatingIncomeLoss": {"units": {"USD": fq(100e6)}},
+        SF.PRETAX_TAGS[0]: {"units": {"USD": fq(90e6)}}, "IncomeTaxExpenseBenefit": {"units": {"USD": fq(18e6)}},
+        "LongTermDebtAndCapitalLeaseObligations": {"units": {"USD": b2(1000e6, 900e6)}},
+        "LongTermDebtAndCapitalLeaseObligationsCurrent": {"units": {"USD": b2(100e6, 100e6)}},
+        "LongTermDebt": {"units": {"USD": [dict(inst("2024-12-31", 5000e6), filed="2025-02-01")]}},
+        "StockholdersEquity": {"units": {"USD": b2(900e6, 800e6)}},
+        "CashAndCashEquivalentsAtCarryingValue": {"units": {"USD": b2(200e6, 100e6)}}}}}
+    a6 = audit_name("EEE", rv6, "test", dt.date(2026, 11, 2))
+    md6 = render("2026-11-02", [a6], [], None, None)
+    check("DP-V6: the audit shows ROIC (320 / avg(1800, 1700) = 18.3%) with every input and tag, never "
+          "the 2024 fossil LongTermDebt",
+          abs(a6["roic"]["roic"] - 320e6 / 1750e6) < 1e-12 and "**ROIC (DP-V6):** **18.3%**" in md6
+          and "LongTermDebtAndCapitalLeaseObligations $1.00B" in md6 and "LongTermDebt $5.00B" not in md6
+          and "| 18.3% |" in md6)
     print("  sec_data_audit selftest: %s" % ("ALL PASS" if not fails else "FAIL " + ", ".join(fails)))
     return 1 if fails else 0
 
