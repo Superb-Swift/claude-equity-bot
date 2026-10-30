@@ -28,6 +28,11 @@ THE GAP CLASSES IT HANDLES, each from a live case
       Company, CIK 29915; edgar_client.py, analyst note of 2026-08-26).
       Recovered on the SAME ACCESSION only, never merged across registrants,
       by edgar_client's own _facts_from_co_registrant.
+    * UNTAGGED SHAREHOLDERS' NET INCOME (DP-V5, 2026-10-29): a filer that tags
+      ProfitLoss and the noncontrolling-interest share but not NetIncomeLoss
+      for a period (DOW's 10-Ks, FY2019 on). Rebuilt as ProfitLoss minus NCI on
+      the same accession, only where that identity holds on every filing in
+      the window that carries all three (parent_ni_rebuild). Labelled.
     A recovered quarter beats a derived one; every derived one is labelled.
 
     A derived per-share figure (EPS) is approximate: share counts move between
@@ -59,7 +64,10 @@ CACHE_DIR = "valuation_cache"
 # 2 (2026-10-23): the slim cache records the filer's taxonomies.
 # 3 (2026-10-24): every audited metric's tags, the filer's periodic-filing
 #   list, and any co-registrant recovery. An older cache is re-fetched once.
-SLIM_VERSION = 3
+# 4 (2026-10-29, DP-V5): also NetIncomeLossAttributableToNoncontrollingInterest,
+#   so shareholders' net income can be rebuilt where a filer does not tag it
+#   (DOW's 10-Ks, FY2019 onward). Every v3 cache is re-fetched once.
+SLIM_VERSION = 4
 PERIODIC_FORMS = ("10-Q", "10-K", "10-Q/A", "10-K/A")
 RECOVERY_LOOKBACK_DAYS = 800          # two years of quarters, plus the YoY base
 
@@ -93,6 +101,18 @@ METRICS = (
 )
 VALUE_LAYER_EXTRA = ("EarningsPerShareBasic",)   # beyond the prompt's lists
 
+# DP-V5 (Rob, 2026-10-29): shareholders' net income is REBUILT, not swapped.
+# A component tag, never a candidate for any line, so it is cached but kept out
+# of METRICS (whose drift alarm against the prompt's map is unchanged).
+NCI_NI_TAG = "NetIncomeLossAttributableToNoncontrollingInterest"
+SLIM_EXTRA = (NCI_NI_TAG,)
+# Filers report in millions, so three independently rounded figures can
+# disagree by up to $1M without the identity being false.
+REBUILD_TOL = 1.0e6
+# The identity is checked, and periods rebuilt, over the window that a TTM and
+# its year-ago comparison can reach (the same two years plus the YoY base).
+REBUILD_WINDOW_DAYS = RECOVERY_LOOKBACK_DAYS
+
 
 def metric(key):
     for m in METRICS:
@@ -114,6 +134,9 @@ def slim_tags():
         for t in m[4]:
             if t not in out:
                 out.append(t)
+    for t in SLIM_EXTRA:
+        if t not in out:
+            out.append(t)
     return tuple(out)
 
 
@@ -135,19 +158,104 @@ def tag_ages(cf, tags, unit):
     return out
 
 
+def _by_period_accn(rows):
+    """{(start, end, accn): row} for duration rows, latest filed per key."""
+    out = {}
+    for r in rows:
+        if "start" not in r or "end" not in r or r.get("val") is None:
+            continue
+        k = (r["start"], r["end"], r.get("accn"))
+        if k not in out or r.get("filed", "") > out[k].get("filed", ""):
+            out[k] = r
+    return out
+
+
+def parent_ni_rebuild(cf):
+    """Shareholders' net income where the filer did not tag it (DP-V5).
+
+    (rows, periods, why_not). `rows` are synthetic NetIncomeLoss facts,
+    ProfitLoss minus NetIncomeLossAttributableToNoncontrollingInterest, one per
+    (period, accession) on which BOTH are filed and NetIncomeLoss is absent for
+    that period on any accession. `periods` lists the (start, end) strings
+    rebuilt. `why_not` says why nothing was rebuilt (None when rows exist).
+
+    Gated, never assumed: the identity ProfitLoss - NCI = NetIncomeLoss must
+    hold (within REBUILD_TOL) on EVERY filing in the window that carries all
+    three, and on at least one. One failure refuses the whole rebuild for this
+    filer - match exactly or report nothing. Same accession only: a ProfitLoss
+    from one filing is never netted against an NCI from another.
+
+    DOW (2026-10-29): its 10-Ks tag no FY NetIncomeLoss from FY2019 on, while
+    ProfitLoss and NCI are both there; the identity holds on all 79 filings
+    that carry all three. FY2025 = -2,444M - 179M = -2,623M."""
+    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
+
+    def series(t):
+        return gaap.get(t, {}).get("units", {}).get("USD") or []
+    ni, pl, nci = series("NetIncomeLoss"), series("ProfitLoss"), series(NCI_NI_TAG)
+    if not pl:
+        return [], [], "no ProfitLoss to rebuild from"
+    if not nci:
+        return [], [], "no %s to rebuild from" % NCI_NI_TAG
+    last = max(r["end"] for r in pl if r.get("end"))
+    floor = (_d(last) - dt.timedelta(days=REBUILD_WINDOW_DAYS)).isoformat()
+    P, N, I = _by_period_accn(pl), _by_period_accn(nci), _by_period_accn(ni)
+    checked = 0
+    for k in sorted(P):
+        if k[1] < floor or k not in N or k not in I:
+            continue
+        checked += 1
+        off = float(P[k]["val"]) - float(N[k]["val"]) - float(I[k]["val"])
+        if abs(off) > REBUILD_TOL:
+            return [], [], ("ProfitLoss minus NCI != NetIncomeLoss for %s..%s (accn %s, off by %.0f)"
+                            % (k[0], k[1], k[2], off))
+    if not checked:
+        return [], [], "the identity ProfitLoss - NCI = NetIncomeLoss could not be checked on any filing"
+    have = {(k[0], k[1]) for k in I}
+    rows, periods = [], []
+    for k in sorted(P):
+        s, e, a = k
+        if e < floor or (s, e) in have or k not in N:
+            continue
+        p, n = P[k], N[k]
+        row = dict(start=s, end=e, val=float(p["val"]) - float(n["val"]), accn=a,
+                   filed=max(p.get("filed", ""), n.get("filed", "")), form=p.get("form"),
+                   fy=p.get("fy"), fp=p.get("fp"), rebuilt="ProfitLoss minus %s" % NCI_NI_TAG)
+        if p.get("recovered_from"):
+            row["recovered_from"] = p["recovered_from"]
+        rows.append(row)
+        if (s, e) not in periods:
+            periods.append((s, e))
+    if not rows:
+        return [], [], "no period lacks NetIncomeLoss where ProfitLoss and NCI are both filed"
+    return rows, periods, None
+
+
+def series_for(cf, tag, unit):
+    """The rows a reader should use for one tag. Identical to the raw feed for
+    every tag but NetIncomeLoss in USD, which also carries the DP-V5 rebuilt
+    periods (each row labelled `rebuilt`)."""
+    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
+    rows = gaap.get(tag, {}).get("units", {}).get(unit) or []
+    if tag == "NetIncomeLoss" and unit == "USD" and rows:
+        extra, _p, _why = parent_ni_rebuild(cf)
+        if extra:
+            rows = list(rows) + extra
+    return rows
+
+
 def rows_for(cf, m_or_tags, unit=None):
     """(tag, rows) for the candidate whose LATEST fact is the most recent; a
     tie goes to the earlier tag (preference order). Accepts a METRICS entry or
     (tags, unit). The unit is matched EXACTLY, so 'USD' never picks up a
-    'USD/shares' series."""
+    'USD/shares' series. NetIncomeLoss rows include DP-V5 rebuilt periods."""
     if unit is None:
         tags, unit = m_or_tags[4], m_or_tags[3]
     else:
         tags = m_or_tags
-    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
     best = None
     for i, t in enumerate(tags):
-        rows = gaap.get(t, {}).get("units", {}).get(unit) or []
+        rows = series_for(cf, t, unit)
         if not rows:
             continue
         key = (max((r.get("end", "") for r in rows), default=""), -i)
@@ -183,10 +291,14 @@ def durations(rows):
         k = (_d(r["start"]), _d(r["end"]))
         filed = r.get("filed", "")
         if k not in out or filed > out[k]["filed"]:
+            if r.get("rebuilt"):
+                src = "rebuilt: %s (accn %s)" % (r["rebuilt"], r.get("accn"))
+            elif r.get("recovered_from"):
+                src = "recovered from CIK %s" % r["recovered_from"]
+            else:
+                src = "reported"
             out[k] = dict(val=float(r["val"]), filed=filed, accn=r.get("accn"),
-                          form=r.get("form"),
-                          src=("recovered from CIK %s" % r["recovered_from"])
-                          if r.get("recovered_from") else "reported")
+                          form=r.get("form"), src=src, rebuilt=bool(r.get("rebuilt")))
     return out
 
 
@@ -276,6 +388,10 @@ def short_source(src):
     """A compact label for a card or table: 'derived (9M minus 2 quarters)',
     'derived (9M minus H)', 'recovered (CIK 0000029915)', 'reported'."""
     k = source_kind(src)
+    if src.startswith("rebuilt"):
+        # DP-V5: a quarter that is itself rebuilt (kind 'derived', so it is
+        # counted unusual and flagged like any other hole that was filled)
+        return "rebuilt (ProfitLoss minus NCI)"
     if k == "recovered":
         return "recovered (CIK %s)" % src.rsplit(" ", 1)[-1]
     if k in ("derived", "fiscal-q4"):
@@ -329,28 +445,63 @@ def ttm(rows, as_of=None):
                 quarters=srcs, derived=len(derived), unusual=len(unusual), why=None)
 
 
+def _rebuilt_used(t_res, periods):
+    """The rebuilt (start, end) periods a TTM chain actually READS: a chain
+    quarter that is itself rebuilt, or one DERIVED from a rebuilt period (its
+    source names that period, e.g. 'derived: FY 2025-01-01..2025-12-31 minus 3
+    quarter(s)'). A reported quarter that merely lies inside a rebuilt year
+    reads nothing rebuilt and is not counted."""
+    used = []
+    for qs, qe, src in t_res.get("quarters") or []:
+        for s, e in periods:
+            hit = ((src.startswith("rebuilt") and str(qs) == s and str(qe) == e)
+                   or (src.startswith("derived") and ("%s..%s" % (s, e)) in src))
+            if hit and (s, e) not in used:
+                used.append((s, e))
+    return used
+
+
 def best_ttm(cf, m, as_of=None):
     """TTM for metric m, trying its candidate tags freshest first and taking the
-    first that builds a full four-quarter chain. dict as ttm() plus `tag` and
-    `note` (set when the tag is not the freshest one, so a fallback is never
-    silent). DOW's NetIncomeLoss has no FY2025 fact, so its Q4 2025 cannot be
-    derived; ProfitLoss (which includes noncontrolling interest) can."""
+    first that builds a full four-quarter chain. dict as ttm() plus `tag`,
+    `note` (set when the tag is not the freshest one, or a period was rebuilt,
+    so neither is ever silent) and `rebuilt` (the periods rebuilt, else []).
+
+    DP-V5 (Rob, 2026-10-29): NetIncomeLoss is read WITH its rebuilt periods
+    (parent_ni_rebuild), so DOW's missing FY figures are filled from its own
+    ProfitLoss and NCI and the TTM stays shareholders' net income. Only when the
+    rebuild is refused or impossible does ProfitLoss (which INCLUDES
+    noncontrolling interest) stand in, and the note then says so and why."""
     tags, unit = m[4], m[3]
     ages = sorted(((last or "", -i, t) for i, (t, last) in enumerate(tag_ages(cf, tags, unit))
                    if last), reverse=True)
     first, why = None, "no tag carries data"
-    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
     for n, (_last, _i, t) in enumerate(ages):
-        t_res = ttm(gaap[t]["units"][unit], as_of)
+        rows = series_for(cf, t, unit)
+        t_res = ttm(rows, as_of)
         if first is None:
             first, why = t, t_res["why"]
         if t_res["value"] is not None:
             t_res["tag"] = t
-            t_res["note"] = (None if n == 0 else "%s cannot build a TTM (%s); %s used"
-                             % (first, why, t))
+            t_res["rebuilt"] = []
+            notes = []
+            if t == "NetIncomeLoss" and unit == "USD":
+                _x, periods, _w = parent_ni_rebuild(cf)
+                t_res["rebuilt"] = _rebuilt_used(t_res, periods) if periods else []
+                if t_res["rebuilt"]:
+                    notes.append("NetIncomeLoss rebuilt for %s as ProfitLoss minus %s, same accession"
+                                 % (", ".join("%s..%s" % p for p in t_res["rebuilt"]), NCI_NI_TAG))
+            if n > 0:
+                fb = "%s cannot build a TTM (%s); %s used" % (first, why, t)
+                if t == "ProfitLoss" and unit == "USD":
+                    _x, _p, why_not = parent_ni_rebuild(cf)
+                    fb += " - includes noncontrolling interest (no rebuild: %s)" % (
+                        why_not or "the rebuilt series has the same gap")
+                notes.append(fb)
+            t_res["note"] = "; ".join(notes) or None
             return t_res
     return dict(value=None, detail=why, end=None, quarters=[], derived=0, unusual=0,
-                why=why, tag=first, note=None)
+                why=why, tag=first, note=None, rebuilt=[])
 
 
 def period_value(rows, end, b):
@@ -442,9 +593,14 @@ def ttm_roe(cf, today):
     notes = ["net income: " + x for x in _unusual(t)] if t["value"] is not None else []
     if t.get("note"):
         notes.append("net income: " + t["note"])
+    if t.get("tag") == "ProfitLoss" and eq_tag == "StockholdersEquity":
+        # DP-V5 residual: disclosed, not corrected. Reached only when the
+        # rebuild is refused or impossible (best_ttm's note says which).
+        notes.append("scope: ProfitLoss includes noncontrolling interest; "
+                     "StockholdersEquity does not - the ratio mixes the two")
     out = dict(roe=None, ni=t["value"], ni_end=str(t["end"]) if t["end"] else None,
-               ni_tag=t.get("tag"), notes=notes, equity=eq, equity_end=eq_end,
-               equity_tag=eq_tag, why=None)
+               ni_tag=t.get("tag"), ni_rebuilt=t.get("rebuilt") or [], notes=notes,
+               equity=eq, equity_end=eq_end, equity_tag=eq_tag, why=None)
     if t["value"] is None:
         out["why"] = "no 12-month net income (%s)" % t["why"]
     elif eq is None:
@@ -500,7 +656,6 @@ def fundamentals(cf, today):
                balance=dict(end=None, equity=None, negative_equity=False))
     out["growth"].update({k: dict(quarter=None, year_ago=None, chg=None)
                           for k in ("q_eps", "q_revenue")})
-    gaap = (cf or {}).get("facts", {}).get("us-gaap", {})
     tt = {k: best_ttm(cf, metric(k)) for k in
           ("revenue", "gross_profit", "operating_income", "net_income", "eps_diluted", "ocf")}
     ends = [t["end"] for k, t in tt.items()
@@ -523,8 +678,10 @@ def fundamentals(cf, today):
             out["notes"].append("%s: %s" % (lab, t["note"]))
 
     def rows(k):
+        # series_for, not the raw feed: the year-ago window must read the same
+        # rebuilt periods as the current one (DP-V5; DOW's FY2024 is rebuilt too)
         t = cur.get(k)
-        return gaap.get(t["tag"], {}).get("units", {}).get(metric(k)[3], []) if t else []
+        return series_for(cf, t["tag"], metric(k)[3]) if t else []
 
     def yago(k):
         t = cur.get(k)
@@ -533,6 +690,13 @@ def fundamentals(cf, today):
         y = ttm(rows(k), t["end"] - dt.timedelta(days=YEAR_BACK_DAYS))
         if y["value"] is None or not (350 <= (t["end"] - y["end"]).days <= 380):
             return None
+        if t["tag"] == "NetIncomeLoss" and metric(k)[3] == "USD":
+            _x, periods, _w = parent_ni_rebuild(cf)
+            used = _rebuilt_used(y, periods) if periods else []
+            if used:
+                out["notes"].append("%s (year ago): NetIncomeLoss rebuilt for %s as ProfitLoss minus "
+                                    "%s, same accession" % (metric(k)[1], ", ".join(
+                                        "%s..%s" % p for p in used), NCI_NI_TAG))
         return y["value"]
 
     def q_yoy(k):
@@ -963,6 +1127,108 @@ def selftest():
           and pb["liabilities"] is None and pb["liab_to_assets"] is None and pb["liab_to_equity"] is None)
     check("NEGATIVE: an assets date older than 400 days opens no balance sheet",
           fundamentals(pq, dt.date(2027, 9, 1))["balance"].get("cash") is None)
+    # 10. DP-V5 (2026-10-29): shareholders' net income rebuilt from ProfitLoss - NCI.
+    # DOW's shape: NetIncomeLoss quarters and 9M but NO full year; ProfitLoss and
+    # NCI carry the full year on the 10-K's accession. NCI is 1 a quarter, 4 a year.
+    QE = {1: ("01-01", "03-31"), 2: ("04-01", "06-30"), 3: ("07-01", "09-30")}
+
+    def p5(y, q=None, fy=False, ytd9=False):
+        if fy:
+            return "%d-01-01" % y, "%d-12-31" % y
+        if ytd9:
+            return "%d-01-01" % y, "%d-09-30" % y
+        return "%d-%s" % (y, QE[q][0]), "%d-%s" % (y, QE[q][1])
+
+    def filed_for(e):
+        return (_d(e) + dt.timedelta(days=35)).isoformat()
+    ni_q = {2024: (2.0, 3.0, 4.0), 2025: (-3.0, -8.0, 1.0), 2026: (-5.0, 7.0, 6.0)}
+    ni_fy = {2024: 10.0, 2025: -25.0}            # true Q4s: 1 and -15; never tagged
+    v5_ni, v5_pl, v5_nci = [], [], []
+    for y, qv in ni_q.items():
+        for i, v in enumerate(qv, 1):
+            s, e = p5(y, i)
+            a = "q%s" % e
+            v5_ni.append(_f(s, e, v, filed=filed_for(e), accn=a))
+            v5_pl.append(_f(s, e, v + 1.0, filed=filed_for(e), accn=a))
+            v5_nci.append(_f(s, e, 1.0, filed=filed_for(e), accn=a))
+        s, e = p5(y, ytd9=True)
+        a = "q%s" % e
+        v5_ni.append(_f(s, e, sum(qv), filed=filed_for(e), accn=a))
+        v5_pl.append(_f(s, e, sum(qv) + 3.0, filed=filed_for(e), accn=a))
+        v5_nci.append(_f(s, e, 3.0, filed=filed_for(e), accn=a))
+    for y, v in ni_fy.items():
+        s, e = p5(y, fy=True)
+        a, fd = "k%d" % y, "%d-02-03" % (y + 1)
+        v5_pl.append(_f(s, e, v + 4.0, filed=fd, accn=a, form="10-K"))
+        v5_nci.append(_f(s, e, 4.0, filed=fd, accn=a, form="10-K"))
+
+    def v5(ni=None, pl=None, nci=None, eq=100.0):
+        g = {"NetIncomeLoss": {"units": {"USD": ni if ni is not None else v5_ni}},
+             "ProfitLoss": {"units": {"USD": pl if pl is not None else v5_pl}},
+             "StockholdersEquity": {"units": {"USD": [
+                 {"end": "2026-09-30", "val": eq, "filed": "2026-11-04"}]}}}
+        n = nci if nci is not None else v5_nci
+        if n:
+            g[NCI_NI_TAG] = {"units": {"USD": n}}
+        return {"facts": {"us-gaap": g}}
+    good = v5()
+    b5 = best_ttm(good, metric("net_income"))
+    check("DP-V5: the FY gap is rebuilt and the TTM stays shareholders' (-15 - 5 + 7 + 6 = -7, "
+          "not ProfitLoss's -3)",
+          b5["value"] is not None and abs(b5["value"] - (-7.0)) < 1e-9 and b5["tag"] == "NetIncomeLoss"
+          and b5["rebuilt"] == [("2025-01-01", "2025-12-31")]
+          and "rebuilt" in (b5["note"] or "") and "cannot build" not in (b5["note"] or ""))
+    r5 = ttm_roe(good, dt.date(2026, 11, 10))
+    check("DP-V5: 12-month ROE pairs shareholders' net income with shareholders' equity (-7 / 100)",
+          r5["roe"] is not None and abs(r5["roe"] - (-0.07)) < 1e-12 and r5["ni_tag"] == "NetIncomeLoss"
+          and any("rebuilt" in x for x in r5["notes"]) and not any(x.startswith("scope") for x in r5["notes"]))
+    fu5 = fundamentals(good, dt.date(2026, 11, 10))
+    g5 = fu5["growth"]["net_income"]
+    check("DP-V5: the year-ago window reads the rebuilt FY2024 too, and says so (-9 -> -7, +22%)",
+          g5["ttm"] == -7.0 and g5["year_ago"] == -9.0 and abs(g5["chg"] - 2.0 / 9.0) < 1e-9
+          and any("(year ago)" in n and "2024-01-01..2024-12-31" in n for n in fu5["notes"]))
+    _rows, per, _w = parent_ni_rebuild(good)
+    check("DP-V5: the NCI tag is cached (slim) but is never a line (METRICS untouched)",
+          NCI_NI_TAG in slim_tags() and all(NCI_NI_TAG not in m[4] for m in METRICS))
+    rep = v5(ni=v5_ni + [_f("2024-01-01", "2024-12-31", 10.0, filed="2025-02-03",
+                             accn="k2024", form="10-K")])
+    check("DP-V5: a period the filer DID tag is never rebuilt over",
+          ("2024-01-01", "2024-12-31") in per
+          and ("2024-01-01", "2024-12-31") not in parent_ni_rebuild(rep)[1])
+    bad = [dict(r) for r in v5_nci]
+    for r in bad:
+        if r["start"] == "2026-07-01":
+            r["val"] = 1.0 + 2.0e6                  # off by $2M: beyond the $1M rounding tolerance
+    bb = best_ttm(v5(nci=bad), metric("net_income"))
+    rb = ttm_roe(v5(nci=bad), dt.date(2026, 11, 10))
+    check("NEGATIVE DP-V5: one filing breaks the identity -> no rebuild; ProfitLoss stands in, "
+          "its scope and the reason are stated",
+          bb["tag"] == "ProfitLoss" and abs(bb["value"] - (-3.0)) < 1e-9
+          and "includes noncontrolling interest" in bb["note"] and "!= NetIncomeLoss" in bb["note"]
+          and any(x.startswith("scope") for x in rb["notes"]))
+    xacc = [dict(r, accn="other") if r["form"] == "10-K" else r for r in v5_nci]
+    bx = best_ttm(v5(nci=xacc), metric("net_income"))
+    check("NEGATIVE DP-V5: a full-year NCI on a different accession is never netted",
+          bx["tag"] == "ProfitLoss" and "no period lacks NetIncomeLoss" in bx["note"])
+    bn = best_ttm(v5(nci=[]), metric("net_income"))
+    check("NEGATIVE DP-V5: no NCI tag -> the old fallback, now saying why there is no rebuild",
+          bn["tag"] == "ProfitLoss" and ("no %s" % NCI_NI_TAG) in bn["note"])
+    pit5 = point_in_time(good, dt.date(2026, 2, 3))          # the FY2025 10-K is filed that day
+    bp = best_ttm(pit5, metric("net_income"))
+    check("DP-V5 point in time: before the 10-K is public its rebuild does not exist "
+          "(TTM to 2025-09-30 on the rebuilt FY2024 = -9)",
+          str(bp["end"]) == "2025-09-30" and abs(bp["value"] - (-9.0)) < 1e-9
+          and bp["rebuilt"] == [("2024-01-01", "2024-12-31")])
+    check("DP-V5: a reported quarter inside a rebuilt year is not counted as reading the rebuild",
+          not any("2025-01-01..2025-12-31" in n for n in fu5["notes"] if "(year ago)" in n))
+    hole = [r for r in v5_ni if not (r["start"] == "2026-04-01" and r["end"] == "2026-06-30")]
+    hole = [r for r in hole if r["end"] != "2026-09-30" or r["start"] == "2026-07-01"]   # no 9M either
+    bq = best_ttm(v5(ni=hole), metric("net_income"))
+    qsrc = [src for qs, qe, src in bq["quarters"] if str(qe) == "2026-06-30"]
+    check("DP-V5: a QUARTER the filer did not tag is rebuilt, counted unusual and labelled",
+          abs(bq["value"] - (-7.0)) < 1e-9 and ("2026-04-01", "2026-06-30") in bq["rebuilt"]
+          and qsrc and short_source(qsrc[0]) == "rebuilt (ProfitLoss minus NCI)" and bq["unusual"] >= 1)
+    check("slim cache v4 (re-fetches every v3 cache once, to pick up the NCI tag)", SLIM_VERSION == 4)
     # 8. the map mirrors the prompt's (drift alarm)
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

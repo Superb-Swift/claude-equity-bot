@@ -325,7 +325,12 @@ def audit_name(tk, cf, src, today, prompt=None, vrec=None):
                     a["flags"].append("DERIVED %s: %s" % (label, "; ".join(
                         "Q ending %s %s" % (e, SF.short_source(s2)) for e, s2 in der_q)))
                 if t.get("note"):
-                    a["flags"].append("FALLBACK-TAG %s: %s" % (label, t["note"]))
+                    # DP-V5 (2026-10-29): a rebuilt period on the preferred tag is
+                    # not a fallback; it gets its own flag. A note that also
+                    # carries a fallback keeps FALLBACK-TAG.
+                    kind_ = ("REBUILT" if t.get("rebuilt") and "cannot build" not in t["note"]
+                             else "FALLBACK-TAG")
+                    a["flags"].append("%s %s: %s" % (kind_, label, t["note"]))
         else:
             cov = ["R" if SF.instant_at(rows, e) is not None else "-" for _s, e in slots]
             rec["coverage"] = "".join(reversed(cov))
@@ -532,8 +537,9 @@ def reconcile_reference(ref, cf, prompt):
     if kind == "flow":
         bt = SF.best_ttm(cf, m, as_of=asof)
         if bt.get("note"):
-            out["ours_basis"] += " [%s; %s]" % (bt["tag"], "includes noncontrolling interest"
-                                                if bt["tag"] == "ProfitLoss" else "fallback tag")
+            out["ours_basis"] += " [%s; %s]" % (
+                bt["tag"], "includes noncontrolling interest" if bt["tag"] == "ProfitLoss"
+                else "rebuilt: ProfitLoss minus NCI" if bt.get("rebuilt") else "fallback tag")
     if _agrees(stated[1], ref["value"], ref["half"]):
         out["verdict"] = "AGREES"
     else:
@@ -967,6 +973,25 @@ def selftest():
                    dt.date(2026, 11, 2))
     check("class on TTM is the card's own i9 / 12-month ROE (GM on the line, 10-27)",
           abs(rb["ratio_on_ttm"] - 9.66 / (400.0 / 62.2)) < 1e-9 and rb["class_on_ttm"] == "NEUTRAL")
+    # DP-V5 (2026-10-29): DOW's shape - no FY NetIncomeLoss; ProfitLoss and NCI carry it
+    q4 = (("2025-01-01", "2025-03-31"), ("2025-04-01", "2025-06-30"), ("2025-07-01", "2025-09-30"),
+          ("2026-01-01", "2026-03-31"), ("2026-04-01", "2026-06-30"), ("2026-07-01", "2026-09-30"))
+    niq = (-307e6, -835e6, 62e6, -533e6, 721e6, 458e6)
+    nciq = (17e6, 34e6, 62e6, 88e6, 81e6, 67e6)
+    dv5 = {"cik": 4, "entityName": "DDD INC", "facts": {"us-gaap": {
+        "NetIncomeLoss": {"units": {"USD": [f(s, e, v, accn=e) for (s, e), v in zip(q4, niq)]}},
+        "ProfitLoss": {"units": {"USD": [f(s, e, v + n, accn=e) for (s, e), v, n in zip(q4, niq, nciq)]
+                                 + [f("2025-01-01", "2025-12-31", -2444e6, accn="k25", form="10-K")]}},
+        SF.NCI_NI_TAG: {"units": {"USD": [f(s, e, n, accn=e) for (s, e), n in zip(q4, nciq)]
+                                  + [f("2025-01-01", "2025-12-31", 179e6, accn="k25", form="10-K")]}},
+        "StockholdersEquity": {"units": {"USD": [inst("2026-09-30", 16153e6)]}}}}, "periodic": []}
+    ad = audit_name("DDD", dv5, "test", dt.date(2026, 10, 29))
+    ni_rec = ad["metrics"]["net_income"]
+    check("DP-V5: DOW-shaped TTM net income is shareholders' -897M on NetIncomeLoss, flagged REBUILT "
+          "(not FALLBACK-TAG)",
+          ni_rec.get("ttm_tag") == "NetIncomeLoss" and abs(ni_rec["ttm"] - (-897e6)) < 1
+          and any(x.startswith("REBUILT Net income") for x in ad["flags"])
+          and not any(x.startswith("FALLBACK-TAG Net income") for x in ad["flags"]))
     print("  sec_data_audit selftest: %s" % ("ALL PASS" if not fails else "FAIL " + ", ".join(fails)))
     return 1 if fails else 0
 
