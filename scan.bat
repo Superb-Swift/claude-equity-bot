@@ -40,6 +40,13 @@ REM  (a settled session with blank closes) and Check I (K..N formulas and
 REM  cached returns), and Check F now GATES on MATERIAL items. Enter closes
 REM  with `python enter_closes.py --catch-up --apply`, which fills every
 REM  settled session still blank, not only tonight's. Saved as CRLF.
+REM
+REM  AMENDED 2026-11-03 (change E, approved by Rob 2026-11-03):
+REM    * feed_consistency - REPORTS ONLY. Counts names whose feed EPS contradicts
+REM      the feed's own P/E, the EPS-basis gap, and per-name data_quality flips
+REM      over the last 10 sessions. Writes feed_consistency_DATE.md. It NEVER
+REM      sets RC: the verdict below is the same with or without it. Nothing the
+REM      model sees changes (DP-3C-ai). See SPCX_RiskFlags_Review_2026-11-03.md.
 REM ============================================================================
 setlocal
 
@@ -116,6 +123,11 @@ echo.
 echo ### advisory guard - DP-T1: this system never places an order
 python advisory_guard.py --quiet
 if errorlevel 1 set "RC=1"
+
+echo.
+echo ### feed consistency - REPORTS ONLY, never changes the verdict below
+python feed_consistency.py --date %RUNDATE% --md "feed_consistency_%RUNDATE%.md"
+if errorlevel 2 echo   NOTE: feed_consistency could not run. The verdict below is unaffected.
 
 echo.
 echo ============================================================================

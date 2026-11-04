@@ -208,12 +208,22 @@ log = logging.getLogger(__name__)
 # prompt are untouched, so no parser changes and nothing the model sees moves
 # (not a DP-3C-ai change). Holdings are never written; logs/ is git-ignored.
 # FAIL-OPEN: any error here is a warning and the run carries on.
+#
+# AMENDED 2026-11-03 (change D, approved by Rob 2026-11-03; SPCX risk-flag
+# review s.4/s.5): the record now ALSO carries the quote line and the position
+# block exactly as the prompt renders them, the raw quote, and a fingerprint of
+# the whole user prompt (input_capture.py, capture_version 2). This SUPERSEDES
+# "Holdings are never written" above: the rendered position block (account
+# labels only, never account numbers) now reaches logs/inputs_<date>.jsonl,
+# which stays git-ignored. Still not a DP-3C-ai change: the section is built
+# from the same objects BEFORE get_signal, read-only, and its own try/except
+# leaves the version-1 record and the run untouched if it fails.
 INPUTS_PATH = os.path.join(LOG_DIR, f"inputs_{datetime.now().strftime('%Y-%m-%d')}.jsonl")
 _inputs_warned = False
 
 
 def capture_inputs(ticker: str, headlines, price_history, prior_signals,
-                   extra_context, quote) -> None:
+                   extra_context, quote, position=None) -> None:
     global _inputs_warned
     try:
         import hashlib
@@ -230,6 +240,14 @@ def capture_inputs(ticker: str, headlines, price_history, prior_signals,
             "extra_context_sha256": hashlib.sha256(ctx.encode("utf-8")).hexdigest() if ctx else None,
             "extra_context": ctx,
         }
+        # Change D (2026-11-03): quote line + position block as rendered.
+        # Own try: a failure here costs only these fields, never the record.
+        try:
+            from input_capture import prompt_sections
+            rec.update(prompt_sections(quote, position, headlines, price_history,
+                                       prior_signals, extra_context))
+        except Exception as e2:             # noqa: BLE001 - fail-open by design
+            rec["prompt_sections_error"] = f"{type(e2).__name__}: {e2}"
         with open(INPUTS_PATH, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
     except Exception as e:                      # noqa: BLE001 - fail-open by design
@@ -665,9 +683,10 @@ def process_ticker(ticker: str, portfolios: list,
             edgar_meta = last_meta(ticker)
 
         # Gap #5 (2026-10-22): record the inputs, fail-open. Same objects the
-        # call below receives; nothing is altered.
+        # call below receives; nothing is altered. Change D (2026-11-03): the
+        # position block the call below receives is recorded too.
         capture_inputs(ticker, headlines, price_history, prior_signals,
-                       extra_context, quote)
+                       extra_context, quote, position=position_context)
 
         for variant in variants:
             signal = get_signal(

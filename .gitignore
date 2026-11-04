@@ -58,6 +58,7 @@ band_price_*.md
 implied_return_*.md
 value_anchor_*.md
 signal_scan_*.md
+feed_consistency_*.md
 h1_lag_trace_*.md
 sweep_*.md
 monitor_strip.md
