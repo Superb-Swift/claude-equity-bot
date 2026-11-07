@@ -218,14 +218,20 @@ def summary(xs):
     return len(xs), len(ok), c
 
 
-def render(d2, wmt, through, d2_lines=None, dropped=()):
+def render(d2, wmt, through, d2_lines=None, dropped=(), since=None):
     import risk_engine as re_
     cfg = re_.DampingConfig
-    L = [f"# DP-3C-aw - damper re-basing: before/after table (rows through {through})", "",
+    title = (f"# DP-3C-aw - damper re-basing: before/after table (rows through {through})" if since is None
+             else f"# DP-3C-aw SHADOW (DP-3C-bs) - re-based damper, rows {since} through {through}")
+    L = [title, "",
          f"*THETA {cfg.THETA}%, K {cfg.K}, CAP {cfg.CAP}, FLOOR {cfg.FLOOR} (risk_engine.DampingConfig, "
          "unchanged). Before = the logged D tag, close(D-1)/close(D-5) - 1. After = the same rule on "
          "quote(D)/close(D-5) - 1. Reads no outcome. Descriptive; adoption is a dated ruling at the exit "
          "(DP-3C-aw). Uses no outcome of the rows it compares. Advisory-only - no orders - not financial advice.*", ""]
+    if since is not None:
+        L += ["*SHADOW: DP-3C-bs (2026-11-07) adopted the re-based rule effective at the first Phase 4b "
+              "go-live. Until then it reaches no gate, paste or daily view; the operative damp is the logged "
+              "D tag ('before').*", ""]
     if d2_lines is not None:
         L += [f"**Completeness: {len(d2)} D2 rows parsed of {d2_lines} D2 Signal JSON lines in the logs"
               + (" - COMPLETE.**" if len(d2) == d2_lines else f" - **INCOMPLETE: {d2_lines - len(d2)} missing.**"), ""]
@@ -273,6 +279,14 @@ def main(argv=None):
     ap.add_argument("--tracker", default=os.path.join("logs", "claude_equity_bot_tracker.xlsx"))
     ap.add_argument("--logs", default=os.path.join("logs", "signals_*.log"))
     ap.add_argument("--md", default=None)
+    ap.add_argument("--through", default=None,
+                    help="last signal date (YYYY-MM-DD). Default: the exit-review date "
+                         "(rulings.EXIT_CUT). ADDED 2026-11-07: DP-3C-bs keeps the re-based damper "
+                         "as an offline SHADOW until the 4b go-live; re-run with a later date to "
+                         "extend the table. Reads no outcome")
+    ap.add_argument("--since", default=None,
+                    help="first signal date to tabulate (default: every D2 row). Use the first "
+                         "Phase 4a session (2026-11-09) for the shadow's live rows")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args(argv)
     if a.selftest:
@@ -281,10 +295,11 @@ def main(argv=None):
         print("refused: read THE MASTER, not the generated report copy")
         return 2
     import rulings
-    through = rulings.EXIT_CUT["review_date"]
+    through = (dt.date.fromisoformat(a.through) if a.through else rulings.EXIT_CUT["review_date"])
+    since = dt.date.fromisoformat(a.since) if a.since else None
     dropped = []
-    rows = [r for r in load_rows(a.logs, dropped) if r["d"] <= through]
-    d2d = d2_logs(a.logs, through)
+    rows = [r for r in load_rows(a.logs, dropped) if r["d"] <= through and (since is None or r["d"] >= since)]
+    d2d = {d: n for d, n in d2_logs(a.logs, through).items() if since is None or d >= since}
     # Only the lines this table needs: every line on a D2 log, and WMT in its window.
     # (Logs from before the D tag existed are not part of DP-3C-aw.)
     dropped = keep_dropped(dropped, d2d, through)
@@ -293,8 +308,9 @@ def main(argv=None):
     d2 = [x for x in xs if is_d2(x)]
     wmt = [x for x in xs if x["tk"] == "WMT" and WMT_WINDOW[0] <= x["d"] <= WMT_WINDOW[1]]
     n_d2 = sum(d2d.values())
-    text = render(d2, wmt, through, d2_lines=n_d2, dropped=dropped)
-    md = a.md or f"damper_rebase_table_{through}.md"
+    text = render(d2, wmt, through, d2_lines=n_d2, dropped=dropped, since=since)
+    md = a.md or (f"damper_rebase_table_{through}.md" if since is None
+                  else f"damper_shadow_{since}_{through}.md")
     with open(md, "w", encoding="utf-8") as fh:
         fh.write(text + "\n")
     print(text)
@@ -384,6 +400,8 @@ def selftest():
                           {}, D(2026, 11, 7))
         check("a WMT-window decode failure is listed; other tickers' and out-of-window lines are not",
               [x[1] for x in kd], ["signal JSON did not decode", "WMT: no D tag"])
+        check("a shadow run is titled and labelled as the DP-3C-bs shadow",
+              "SHADOW (DP-3C-bs)" in render([], [], D(2026, 11, 13), since=D(2026, 11, 9)), True)
         check("the report copy is refused in any letter case",
               main(["--tracker", os.path.join(tmp, "Tracker_With_Registry.XLSX")]), 2)
         check("the D2 denominator counts every D2 Signal JSON line",

@@ -1294,14 +1294,28 @@ def console_digest(rows, eps, cohort_dates):
           + ", ".join(f"{k} {v}" for k, v in sorted(ec.items())))
     if post:
         share = ec.get("PARTIAL", 0) / len(post)
-        flag = ("  ** REVISIT CONDITION MET -- per-account scoring PRE-REGISTERED "
-                "2026-09-25 (DP-3C-av): counts only until the exit read" if share > 0.25 else "")
+        _avx = _exit_record(DP3CAV_INSTR)
+        flag = (("  ** REVISIT CONDITION MET -- per-account scoring PRE-REGISTERED "
+                 "2026-09-25 (DP-3C-av): " + (f"exit read recorded {_avx[0]['date']}" if _avx
+                                               else "counts only until the exit read"))
+                if share > 0.25 else "")
         print(f"  PARTIAL share {share*100:.1f}% of {len(post)} (revisit above 25%){flag}")
     for line in per_account_block(rows, eps):
         if line.startswith("| ") and not line.startswith("| Account"):
             c = [x.strip() for x in line.strip("|").split("|")]
             print(f"  DP-3C-av {c[0]:<12} rows APPROVED {c[1]:>3}   episodes opened "
                   f"APPROVED {c[2]:>3}   resolved {c[3]:>3}   readable at exit: {c[4]}")
+    # ADDED 2026-11-07: after the exit, the recorded per-account read is printed as
+    # recorded (never recomputed); the live counts above keep running beside it.
+    _avx = _exit_record(DP3CAV_INSTR)
+    if _avx:
+        pa = (_avx[0].get("detail") or {}).get("per_account") or {}
+        bits = []
+        for acct in sorted(pa):
+            v = pa[acct]
+            bits.append(f"{acct} {v.get('hits')}/{v.get('n')} = {100 * v['hits'] / v['n']:.1f}%"
+                        if v.get("readable") and v.get("n") else f"{acct} not readable ({v.get('n')})")
+        print(f"  DP-3C-av EXIT READ {_avx[0]['date']} (recorded, not recomputed): " + "; ".join(bits))
     erased = [x for x in rows if x.channel_margin.startswith("ERASED")]
     if erased:
         print(f"ChannelMargin ERASED (DP-3C-af; admitted on D.op, blend would not clear): "

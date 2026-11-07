@@ -634,6 +634,18 @@ THESIS_LABEL = ("THESIS BROKEN (Rob, 2026-10-22): off the scout list at the exit
                 "until then, measurement only (DP-3C-bk)")
 
 
+def conf_caveat():
+    """ADDED 2026-11-07 (Phase 4a, DP-3C-br): the DP-3C-w exit finding, printed
+    beside the confidence column so the card never presents a BUY's confidence
+    as a conviction ranking. One sentence, sourced from rulings.py; reporting
+    only -- no class, gate, flip or recorded figure reads it."""
+    try:
+        import rulings
+        return getattr(rulings, "BUY_CONFIDENCE_CAVEAT", "") or ""
+    except Exception:                                              # noqa: BLE001
+        return ""
+
+
 def thesis_label(t):
     """DP-3C-bk (2026-10-23): a name Rob removed from his watchlist because its
     thesis is broken, kept in the run until the exit for the measurement. The
@@ -704,6 +716,9 @@ def build(date, root, log_path, quotes_path, tracker):
         date, os.path.basename(exhibits[date]), prev_date or "none", os.path.basename(log_path)))
     L.append("class = implied ROE at 9%% / 12-MONTH ROE (DP-V4: SEC filings, point in time); "
              "lines %.2fx / %.2fx (DP-V2 memo 3.1, frozen)" % (DEMANDING_AT, NEUTRAL_AT))
+    caveat = conf_caveat()
+    if caveat:
+        L.append("conf  = " + caveat)
     L.append("")
 
     # ---- 0. coverage -------------------------------------------------------
@@ -1083,7 +1098,7 @@ def build(date, root, log_path, quotes_path, tracker):
     # ASCII only on the way out: the runners redirect stdout through the Windows
     # ANSI code page, and a stray non-ASCII dash should never cost an exhibit.
     L = [line.replace("—", "-") for line in L]
-    snapshot = dict(date=str(date), exhibit=os.path.basename(exhibits[date]),
+    snapshot = dict(date=str(date), exhibit=os.path.basename(exhibits[date]), conf_caveat=conf_caveat(),
                     log=os.path.basename(log_path), coverage=coverage, quiet=quiet,
                     basis=dict(name="12-month ROE (DP-V4)", since=str(DPV4_ON), line=basis_line,
                                differ=[dict(ticker=t, lastfy=rob[t]["lastfy"], now=rob[t]["base"])
@@ -1235,6 +1250,8 @@ def _write_sheet(ws, snap):
         put([line])
     gap()
     put(["Decision card -- today's directionals, then held names (class on 12-month ROE, DP-V4)"], f_sec)
+    if snap.get("conf_caveat"):
+        put([snap["conf_caveat"]], f_note)
     hdr = ["Ticker", "Held in", "Today", "Conf", "Executability", "Class (12-month)", "Ratio",
            "Edge to line", "Last-FY class", "Last-FY ratio", "P/E (12-month)", "Range low (r 7-11%)",
            "Range high", "Robust", "Why fragile", "Implied g %", "DP-V2 gate (not applied)",
@@ -1696,6 +1713,10 @@ def _selftest():
           not bk.get("open")
           or (thesis_label(mo) == THESIS_LABEL and THESIS_LABEL in _ctx_cells({}, mo)[4]))
     check("a name outside DP-3C-bk carries no label", thesis_label("AAPL") == "")
+    check("the card prints the DP-3C-w confidence caveat (Phase 4a)",
+          not conf_caveat() or ("conf  = " + conf_caveat()) in txt)
+    check("the caveat changes no class or flip: NVDA still NEUTRAL, FTI still flips",
+          cn["NVDA"]["cls"] == "NEUTRAL" and "FLIP REJECT->ADMIT" in txt)
     print("SELFTEST %s (%d failed)" % ("PASSED" if not fails else "FAILED", len(fails)))
     return 1 if fails else 0
 

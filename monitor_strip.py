@@ -672,6 +672,23 @@ def _h4_state(n_ok, r_ok):
             + (streak if (n_ok and r_ok) else ""))
 
 
+def _exit_reading(instrument):
+    """ADDED 2026-11-07: the first recorded Phase 3-C exit reading of
+    `instrument`, from the authoritative logs/exit_readings.json, else the
+    shared readings log's mirror; None if neither has it. Display only: the
+    strip never computes or records an exit reading."""
+    try:
+        import rulings
+        for p in (getattr(rulings, "EXIT_READINGS_PATH", None), rulings.READINGS_PATH):
+            if p:
+                got = rulings.readings(instrument, p)
+                if got:
+                    return got[0]
+    except Exception:                                              # noqa: BLE001
+        pass
+    return None
+
+
 def _dp3cw_row(m):
     """DP-3C-w's prospective arm — ADDED 2026-09-08, COUNTED 2026-09-16.
 
@@ -706,7 +723,16 @@ def _dp3cw_row(m):
                    + (" DP-3C-ar bridged (run-fault dropout, not a split): "
                       + ", ".join(f"{t} {d}" for t, d in arm["bridged"]) + "."
                       if arm.get("bridged") else ""))
-        if recorded:
+        ex = _exit_reading("DP-3C-w@exit")
+        if ex:
+            d = ex.get("detail") or {}
+            rho = d.get("rho")
+            state = (f"READ AT THE EXIT {ex['date']} (recorded, final): {d.get('verdict')}"
+                     + (f" — ρ {rho:+.3f}, {d.get('n')} episodes, "
+                        f"{len(d.get('tickers') or [])} tickers" if isinstance(rho, (int, float)) else "")
+                     + (f". First read {recorded[0]['date']}: {recorded[0]['detail'].get('verdict')}"
+                        if recorded else ""))
+        elif recorded:
             e = recorded[0]
             state = (f"READ {e['date']} (recorded): {e['detail'].get('verdict')}")
         elif arm.get("read_ready"):
@@ -917,8 +943,21 @@ def _e4_row(e4):
         f"outcome_sanity {e4.get('sanity', '[?]')}",
         "exit when E4-3 reaches 20 (backstop 2026-11-20, then INSUFFICIENT); every E4 "
         "endpoint read once at the exit (DP-3C-ay); reads are protected by DP-3C-bb",
-        ("E4-3 COLLECTING" if st.get("OBSERVABLE", 0) < 20 else "E4-3 AT 20 — exit review due")
-        + "; BLIND (counts only)")
+        _e4_state(st))
+
+
+def _e4_state(st):
+    """ADDED 2026-11-07: once both E4 exit readings are on the record, the row
+    says the phase is closed and prints the recorded dispositions; before that
+    it is the blind counter it always was."""
+    e2, e3 = _exit_reading("E4-2@exit"), _exit_reading("E4-3@exit")
+    if e2 and e3:
+        return (f"CLOSED AT THE EXIT {e2['date']} (DP-3C-bq): E4-2 "
+                f"{(e2.get('detail') or {}).get('disposition')} (recorded); E4-3 "
+                f"{(e3.get('detail') or {}).get('verdict')} (recorded); counts above are "
+                "context only")
+    return (("E4-3 COLLECTING" if st.get("OBSERVABLE", 0) < 20 else "E4-3 AT 20 — exit review due")
+            + "; BLIND (counts only)")
 
 
 def to_markdown(m):

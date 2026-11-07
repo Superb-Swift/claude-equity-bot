@@ -93,6 +93,14 @@ WHAT THIS MODULE IS, AND IS NOT
     build_actionable_registry.py --exit-read read it from here, so no exit
     read depends on the date it is run. Ruled before any E4 rate existed.
 
+2026-11-07 UPDATE
+    Phase 3-C EXIT. Rob ruled DP-3C-bp (the disclosure, option A) at 09:40 CT
+    and approved DP-3C-bq..bu "as recommended" at 10:17 CT, from
+    claude/Phase3C_ExitReview_2026-11-07.md. DP-3C-bk is APPLIED (open=False),
+    so value_card.py's "measurement only" labels end. Adds PHASE_4A_FROM,
+    WATCHLIST_ERA_W2 and BUY_CONFIDENCE_CAVEAT (DP-3C-w@exit, reporting only).
+    No tool's measurement changes.
+
 ADDING A RULING
     Transcribe it from the `claude/` ruling document. `doc` is mandatory and is
     the audit trail: a status here with no document behind it is exactly the
@@ -133,6 +141,21 @@ DOC_1022 = "claude/Phase3C_Rulings_Delegated_2026-10-22.md"
 
 # The 2026-11-06 exit-cut ruling set (DP-3C-bl..bo).
 DOC_1106 = "claude/Phase3C_Rulings_ExitCut_2026-11-06.md"
+DOC_1107 = "claude/Phase3C_ExitReview_2026-11-07.md"
+
+# Phase 3-C closed at Rob's exit ruling (DP-3C-bq, 2026-11-07); Phase 4a opened at
+# the same ruling with no prompt change (DP-3C-br). The watchlist era W2 (DP-3C-bt)
+# starts at the first session after the ruling. Any cohort statistic quoted across
+# WATCHLIST_ERA_W2 carries a composition split (DP-3C-ap).
+PHASE_4A_FROM = dt.date(2026, 11, 7)
+WATCHLIST_ERA_W2 = dt.date(2026, 11, 9)
+
+# DP-3C-w@exit read POSITIVE (2026-11-07). Shown beside the confidence column on
+# the decision card; it changes no gate, no prompt and no recorded figure.
+BUY_CONFIDENCE_CAVEAT = (
+    "Conf is the model's operative confidence. It is NOT a validated conviction ranking "
+    "for BUYs: DP-3C-w read POSITIVE at the Phase 3-C exit (2026-11-07; rho -0.517 over 18 "
+    "BUY episodes, 10 tickers) - higher opening confidence preceded worse +5d returns.")
 
 # DP-3C-bl (Rob, 2026-11-06): THE PHASE 3-C EXIT CUT. Fixed by date, so a read
 # taken later -- after more cohorts are pasted -- reads exactly the same rows.
@@ -764,13 +787,14 @@ RULINGS = {
     "DP-3C-bk": dict(
         dp="DP-3C-bk",
         question="Rob's 2026-10-22 watchlist edit to main.py (WATCHLIST_SCOUT)",
-        status=("RULED (Rob) - DEFERRED whole to the Phase 3-C exit review; main.py restored "
-                "to HEAD on 2026-10-22; re-examined 2026-10-23 on Rob's stated reason: the "
-                "deferral stands"),
-        open=True, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 10, 22),
+        status=("RULED (Rob) - DEFERRED whole to the Phase 3-C exit review; APPLIED at the exit "
+                "(DP-3C-bt, 2026-11-07): the post-exit list runs from 2026-11-09 (watchlist era W2)"),
+        open=False, ruled_on=dt.date(2026, 10, 22), effective=dt.date(2026, 11, 9),
         doc=DOC_1022,
         bar=("applied at the first session after the exit ruling (DP-3C-ay), as an era "
              "change, never inside DP-3C-ai"),
+        # APPLIED 2026-11-07 (DP-3C-bt): main.py carries the post-exit list from the
+        # 2026-11-09 run; open=False ends the value card's labels.
         # The names the edit removes. Until the change is applied, the value card
         # labels them "thesis broken (Rob)": kept in the run for measurement only.
         measurement_only=("BBWI", "CORN", "EFA", "GLD", "NTR", "SNOW", "TWST"),
@@ -841,6 +865,70 @@ RULINGS = {
         status="RULED (DELEGATED) - yes; descriptive, reads no outcome; DP-3C-aw adoption still waits on it",
         open=False, ruled_on=dt.date(2026, 11, 6), effective=dt.date(2026, 11, 6), doc=DOC_1106,
         bar="DP-3C-aw unchanged",
+    ),
+    "DP-3C-bp": dict(
+        dp="DP-3C-bp",
+        question="how to treat the builder having seen E4-3's counts before the official read",
+        status=("RULED (Rob) - option A: read as planned; the disclosure goes into the exit "
+                "record (rulings doc, readings commit 683b6e1, exit review)"),
+        open=False, ruled_on=dt.date(2026, 11, 7), effective=dt.date(2026, 11, 7), doc=DOC_1106,
+        bar="n/a",
+        note=("Rob, 2026-11-07 09:40 CT, verbatim: 'I choose A: read as planned and note the "
+              "disclosure in the exit record.' A scratch-copy rehearsal at ~09:20 ran the E4 read "
+              "for real; the builder saw E4-3's descriptive counts and nothing of E4-2. The "
+              "official read's provenance carries the same tool blob ids."),
+    ),
+    "DP-3C-bq": dict(
+        dp="DP-3C-bq",
+        question="exit Phase 3-C?",
+        status=("RULED (Rob) - EXIT. E4-1 VERDICT-descriptive INVALID; E4-2 VERDICT INSUFFICIENT "
+                "(dacc -1.61pt, LOCO 47/49; n 247/150, 12 of 13); E4-3 VERDICT-descriptive "
+                "(25 of 26; disclosure DP-3C-bp); SHAKEDOWN 1, PENDING VERIFICATION 0, DEGRADED 3; "
+                "DP-3C-w POSITIVE; DP-3C-av Roth IRA 7/15, Individual not readable"),
+        open=False, ruled_on=dt.date(2026, 11, 7), effective=dt.date(2026, 11, 7), doc=DOC_1107,
+        bar="pre-registration v1.3 section 7; DP-3C-ay; DP-3C-bb",
+        note=("Rob, 2026-11-07 10:17 CT, verbatim: 'Approve as recommended'. Reads recorded "
+              "2026-11-07 09:58-09:59 CT in logs/exit_readings.json (commit 683b6e1)."),
+    ),
+    "DP-3C-br": dict(
+        dp="DP-3C-br",
+        question="does Phase 4a open (DP-3C-bc)?",
+        status=("RULED (Rob) - Phase 4a opens at the exit ruling, NO prompt change; first "
+                "session 2026-11-09. 4b waits for its own pre-registration (E4-3 is now read)"),
+        open=False, ruled_on=dt.date(2026, 11, 7), effective=dt.date(2026, 11, 7), doc=DOC_1107,
+        bar="Phase 4 closes on the acceptance gates P4-1..P4-5 (DP-3C-bc); advisory-only (DP-T1)",
+    ),
+    "DP-3C-bs": dict(
+        dp="DP-3C-bs",
+        question="DP-3C-aw: adopt the re-based damper (signal-time trail, quote(D)/close(D-5) - 1)?",
+        status=("RULED (Rob) - ADOPTED, effective at the first Phase 4b go-live (where the PR arms "
+                "truncate under DP-3C-bf); until then a shadow, recomputed offline from the logs by "
+                "damper_rebase_table.py, reaching no gate, paste or daily view"),
+        open=False, ruled_on=dt.date(2026, 11, 7), effective=dt.date(2026, 11, 7), doc=DOC_1107,
+        bar="n/a - adoption ruling; the table read no outcome",
+        note=("Why not at once: PR-1, PR-3 and PR-5 read the master's operative (damped) "
+              "confidence; switching now changes ~1 row in 10 inside all three arms, a second "
+              "break before the 4b one. Table: 1,248/1,248 D2 rows; damp differs 118; "
+              "admissions 6 lost, 2 gained."),
+    ),
+    "DP-3C-bt": dict(
+        dp="DP-3C-bt",
+        question="applying DP-3C-bk (Rob's watchlist change) at the exit",
+        status=("RULED (Rob) - applied verbatim from 2026-11-09: scout list GM, UNH, VHT, XLV, O, "
+                "SPY, QQQ, VTI, IWM, VOE, USO, KRE, VXUS; run 28 -> 30 (BBWI stays, held); "
+                "watchlist era W2 by date, no prompt-variant change"),
+        open=False, ruled_on=dt.date(2026, 11, 7), effective=dt.date(2026, 11, 9), doc=DOC_1107,
+        bar=("departing names (CORN, EFA, GLD, NTR, SNOW, TWST): 210 outcome cells entered "
+             "UNGUARDED from the Schwab feed through 2026-12-07; S1 state pruned on or after "
+             "2026-12-07; T-C at its 4-of-8 floor (one more departure = UNREADABLE)"),
+    ),
+    "DP-3C-bu": dict(
+        dp="DP-3C-bu",
+        question="the analyst-notes master after the exit (DP-3C-be)",
+        status=("RULED (Rob) - docs/analyst_notes_2026-11-07.md opens, local only (in "
+                ".git/info/exclude); docs/analyst_notes_2026-10-09.md is frozen as the Phase 3-C master"),
+        open=False, ruled_on=dt.date(2026, 11, 7), effective=dt.date(2026, 11, 7), doc=DOC_1107,
+        bar="n/a",
     ),
     "DP-V4": dict(
         dp="DP-V4",

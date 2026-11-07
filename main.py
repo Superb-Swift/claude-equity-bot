@@ -117,18 +117,35 @@ EDGAR_ENABLED = os.environ.get("EQUITY_EDGAR", "0") == "1"
 PROMPT_VARIANT = "A-S1D2-B1-E1" if EDGAR_ENABLED else "A-S1D2-B1"
 
 WATCHLIST_SCOUT = [
+    "GM",
+    "UNH",
+    "VHT",
+    "XLV",
+    "O",
     "SPY",
     "QQQ",
     "VTI",
-    "SNOW",
-    "GLD",
-    "GM",
-    "NTR",
+    "IWM",
+    "VOE",
     "USO",
-    "CORN",
-    "BBWI",
-    "TWST",
-    "EFA",
+    "KRE",
+    "VXUS",
+    #  Cleaned up watchlist on 2026-10-22 with the aim to remove broken thesis tickers and to add new thesis sector gaps and flavorful ETFs
+    #
+    # WATCHLIST ERA W2 FROM 2026-11-09 (DP-3C-bk, deferred whole to the Phase 3-C exit and
+    # applied there by DP-3C-bt; rulings.WATCHLIST_ERA_W2). The prompt template is unchanged
+    # and PROMPT_VARIANT does not move: this is a POPULATION change, recorded by date. Any
+    # cohort statistic quoted across 2026-11-09 carries a composition split (DP-3C-ap).
+    #   ADDED to the scout list 2026-11-09: UNH, VHT, XLV, O, IWM, VOE, KRE, VXUS
+    #     (sector_map pre-mapped 2026-10-22).
+    #   REMOVED from the scout list 2026-11-09: SNOW, GLD, NTR, CORN, BBWI, TWST, EFA.
+    #   A held name stays in the run whatever this list says (the build below dedupes
+    #   sorted(all_held) + WATCHLIST_SCOUT); held/scout transitions are recorded in the
+    #   local decision journal, not here (DP-3C-bi).
+    #   Departing names' open outcome cells are entered UNGUARDED through 2026-12-07 and
+    #   their S1 state is pruned only after that (DP-3C-bt).
+    #
+    # ---- HISTORY, ERA W1 (kept: this block is the watchlist's only written record) ----
     # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
     # GM   — added 2026-08-18 to PREVENT AN E4 SUPPLY SHORTFALL.
     # NTR  — added 2026-08-25 to PREVENT AN E4 SUPPLY SHORTFALL.
