@@ -39,6 +39,16 @@ WHAT IT NEVER DOES - BLIND by construction (DP-3C-ah, DP-3C-ay):
   presence of a close, and "observable" is the presence of confidence_raw.
   No rate, IC, rho or accuracy is computed anywhere in this file.
 
+AMENDED 2026-11-06 (DP-3C-t (b), found by the exit-tool review): a row whose
+E tag reads `fin=degraded` did not receive the statements block, so it is
+"marked DEGRADED for E4" and "must not be counted as though it did". This file
+had never applied that ruling. Three SND ADJACENT rows (08-13, 08-14, 08-17)
+were counted; E4-2 now excludes DEGRADED rows (and prints how many), and an
+E4-3 event whose filing-date or next-session row is DEGRADED is UNOBSERVABLE.
+--reproduce-0902 keeps the 09-02 basis (DEGRADED rows in), because that is
+how the hand count was taken. MSFT's 10-29 and 11-05 possible-unseen flags
+are explained (two 8-Ks on one date each).
+
 Read-only. Refuses tracker_with_registry.xlsx. Exit 0 = counted, 2 = could not.
 Advisory-only - no orders - not financial advice.
 """
@@ -74,6 +84,11 @@ REFUSED = ("tracker_with_registry.xlsx",)
 UNSEEN_EXPLAINED = {
     ("JPM", dt.date(2026, 10, 13), 1): "two 8-Ks dated 2026-10-13 (accessions ...065582, ...065616)",
     ("PM", dt.date(2026, 9, 8), 1): "two 8-Ks dated 2026-09-08 (accessions ...060806, ...060822)",
+    # Added 2026-11-06, read from the 8-K documents in edgar_cache (items, not outcomes).
+    ("MSFT", dt.date(2026, 10, 29), 1): ("two 8-Ks dated 2026-10-28 (...436122 Items 2.02/9.01; "
+                                         "...436149 Items 8.01/9.01)"),
+    ("MSFT", dt.date(2026, 11, 5), 1): ("two 8-Ks filed 2026-11-05 (...447173 Items 8.01/9.01; "
+                                        "...448357 Item 5.02)"),
 }
 
 _TK = re.compile(r'Signal JSON: \{"ticker": "([A-Z][A-Z.\-]*)"')
@@ -108,6 +123,7 @@ def parse_log_lines(date, lines):
             k8_n=int(k8.group(1)) if k8 else None,
             k8_date=dt.date.fromisoformat(k8.group(2)) if k8 and k8.group(2) else None,
             f4_date=dt.date.fromisoformat(f4.group(1)) if f4 else None,
+            degraded="fin=degraded" in (etag or ""),          # DP-3C-t (b)
         ))
     return out
 
@@ -157,11 +173,17 @@ def is_adjacent(r):
     return False
 
 
-def count_e42(rows, resolved, as_of):
+def count_e42(rows, resolved, as_of, exclude_degraded=True):
+    """exclude_degraded=False only to reproduce a count taken before DP-3C-t (b)
+    was applied (the 09-02 standing)."""
     adm = [r for r in rows if admitted(r) and r["d"] <= as_of]
     cohorts = sorted({r["d"] for r in adm})
     hold = [r for r in adm if r["sig"] == "HOLD" and r["tk"] in E42_ELIGIBLE]
-    out = dict(cohorts=len(cohorts), hold=len(hold))
+    deg = [r for r in hold if r.get("degraded")]
+    if exclude_degraded:
+        hold = [r for r in hold if not r.get("degraded")]
+    out = dict(cohorts=len(cohorts), hold=len(hold),
+               degraded=len(deg) if exclude_degraded else 0)
     arm = {"ADJ": [], "QUIET": []}
     for r in hold:
         arm["ADJ" if is_adjacent(r) else "QUIET"].append(r)
@@ -186,7 +208,9 @@ def count_e43(rows, as_of):
     for r in rows:
         if r["tk"] in T_A and r["d"] <= as_of:
             by_tk[r["tk"]].append(r)
-    have_raw = {(r["d"], r["tk"]) for r in rows if admitted(r) and r["raw"] and r["d"] <= as_of}
+    have_raw = {(r["d"], r["tk"]) for r in rows if admitted(r) and r["raw"] and r["d"] <= as_of
+                and not r.get("degraded")}
+    degraded = {(r["d"], r["tk"]) for r in rows if r.get("degraded")}
     events, unseen, unseen_at = [], 0, []
     for tk, rs in by_tk.items():
         rs.sort(key=lambda r: r["d"])
@@ -216,6 +240,8 @@ def count_e43(rows, as_of):
                 s = "PENDING (next session not yet run)"
             elif (f, tk) in have_raw and (nxt, tk) in have_raw:
                 s = "OBSERVABLE"
+            elif (f, tk) in degraded or (nxt, tk) in degraded:
+                s = "UNOBSERVABLE (DEGRADED row, DP-3C-t (b))"
             elif f in cal.BOT_ABSENT or nxt in cal.BOT_ABSENT:
                 s = "UNOBSERVABLE (pre-registered no-run session)"
             else:
@@ -243,6 +269,7 @@ def report(e42, e43, as_of, log_info):
              f"{'n MET' if e42['adj_resolved'] >= E42_N else 'collecting'}")
     L.append(f"          ADJACENT rows {e42['adjacent']} ({e42['supply']:.2f}/cohort; "
              f"pre-registered ~7.6) | COVERED-QUIET resolved {e42['quiet_resolved']}")
+    L.append(f"          DEGRADED rows excluded (DP-3C-t (b), fin=degraded): {e42.get('degraded', 0)}")
     L.append(f"          primary qualifiers (>= {E42_MIN_PER_ARM} resolved per arm): "
              f"{len(e42['qualifiers'])} of {len(E42_ELIGIBLE)} "
              f"[{', '.join(e42['qualifiers'])}]; the rest read under the fallback")
@@ -265,7 +292,7 @@ def report(e42, e43, as_of, log_info):
         for tk, day, k in e43["unseen_at"]:
             why = UNSEEN_EXPLAINED.get((tk, day, k))
             L.append(f"            {tk} on the {day} run: {k} more 8-K(s) than new dates"
-                     + (f" - EXPLAINED: {why}; same event, no change to the count" if why else ""))
+                     + (f" - EXPLAINED: {why}; one event date, no change to the count" if why else ""))
     for tk, f, s in e43["detail"]:
         L.append(f"            {f}  {tk:<5} {s}")
     L.append("")
@@ -308,6 +335,12 @@ def selftest():
     check("not resolved before its +5d session (as-of guard)", e["adj_resolved"], 0)
     e = count_e42(rows, {(d, "GM"): True}, cal.shift_sessions(d, 5))
     check("resolved once the +5d session has passed", e["adj_resolved"], 1)
+    dg = row("GM", k8=five_back)
+    dg["degraded"] = True
+    e = count_e42([dg], {(d, "GM"): True}, cal.shift_sessions(d, 5))
+    check("a DEGRADED row is excluded from E4-2 (DP-3C-t (b))", (e["adj_resolved"], e["degraded"]), (0, 1))
+    e = count_e42([dg], {(d, "GM"): True}, cal.shift_sessions(d, 5), exclude_degraded=False)
+    check("...unless reproducing a pre-(b) count", e["adj_resolved"], 1)
     nxt = cal.next_session(d)
     ev = [row("NKE", k8=d, day=d), row("NKE", k8=d, day=nxt)]
     check("E4-3 event with rows on both sessions is OBSERVABLE",
@@ -321,6 +354,10 @@ def selftest():
           count_e43([row("SNOW", k8=d, day=d), row("SNOW", k8=d, day=nxt)], nxt)["events"], 0)
     old = [row("NKE", k8=dt.date(2026, 8, 28), day=d), row("NKE", k8=dt.date(2026, 8, 28), day=nxt)]
     check("E4-3 ignores 8-Ks before the 2026-09-01 restart", count_e43(old, nxt)["events"], 0)
+    evd = [row("NKE", k8=d, day=d), row("NKE", k8=d, day=nxt)]
+    evd[1]["degraded"] = True
+    check("an E4-3 event on a DEGRADED next-session row is UNOBSERVABLE",
+          count_e43(evd, nxt)["status"].get("OBSERVABLE", 0), 0)
     jump = [row("PM", k8=None, day=d, n=0), row("PM", k8=d, day=nxt, n=2)]
     check("a 30-day count rising by 2 on one new date flags 1 unseen", count_e43(jump, nxt)["unseen"], 1)
     src = open(__file__, encoding="utf-8").read()
@@ -333,7 +370,8 @@ def selftest():
 
 def reproduce_0902(rows, resolved):
     """The definitions must reproduce the hand count of the 2026-09-02 standing."""
-    e = count_e42(rows, resolved, dt.date(2026, 9, 2))
+    # The 09-02 hand count did not apply DP-3C-t (b); reproduce it on its own basis.
+    e = count_e42(rows, resolved, dt.date(2026, 9, 2), exclude_degraded=False)
     want = dict(cohorts=12, hold=141, adjacent=69, adj_resolved=57, quiet_resolved=50)
     got = {k: e[k] for k in want}
     ok = got == want and len(e["qualifiers"]) == 6

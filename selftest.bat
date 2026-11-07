@@ -32,7 +32,10 @@ REM AMENDED 2026-10-24: sec_facts (the shared SEC reader) and sec_data_audit.
 REM AMENDED 2026-11-03: feed_consistency (change E) and input_capture (change D;
 REM its selftest proves the captured prompt fingerprint equals what get_signal
 REM sends, with the API client stubbed - no network, no tokens).
-for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar sec_facts sec_data_audit feed_consistency input_capture) do (
+REM AMENDED 2026-11-06 (DP-3C-bn): the Phase 3-C exit read tools - exit_read_guard,
+REM e4_exit_read, build_actionable_registry (exit-read code) and
+REM damper_rebase_table. Synthetic data only; none of them reads an outcome here.
+for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar sec_facts sec_data_audit feed_consistency input_capture exit_read_guard e4_exit_read build_actionable_registry damper_rebase_table) do (
     python %%T.py --selftest >nul 2>&1
     if errorlevel 1 (
         echo   [FAIL] %%T --selftest   detail: python %%T.py --selftest

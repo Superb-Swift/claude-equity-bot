@@ -85,6 +85,14 @@ WHAT THIS MODULE IS, AND IS NOT
     `measurement_only` tuple that value_card.py reads to label those names on
     the decision card (reporting only).
 
+2026-11-06 UPDATE
+    Transcribed DP-3C-bl (Rob) and DP-3C-bm..bo (DELEGATED, Rob 2026-11-06
+    19:39 CT: "I authorize you to make the recommended decisions") from
+    claude/Phase3C_Rulings_ExitCut_2026-11-06.md. Adds EXIT_CUT, the one
+    place the Phase 3-C exit cut lives: e4_exit_read.py and
+    build_actionable_registry.py --exit-read read it from here, so no exit
+    read depends on the date it is run. Ruled before any E4 rate existed.
+
 ADDING A RULING
     Transcribe it from the `claude/` ruling document. `doc` is mandatory and is
     the audit trail: a status here with no document behind it is exactly the
@@ -96,7 +104,16 @@ import json
 import os
 import sys
 
-READINGS_PATH = os.path.join("logs", "instrument_readings.json")
+# Anchored to this file's folder (2026-11-06): a tool run from another folder
+# must not consult, or write, a different readings log. Identical to the old
+# relative path whenever the tools run from the repo root, as they always do.
+READINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs",
+                             "instrument_readings.json")
+# The one-time Phase 3-C exit readings (DP-3C-bn i) live in their OWN file, written
+# only by exit_read_guard.record_once, so no nightly writer can ever erase them.
+# They are mirrored into READINGS_PATH for display; this file is authoritative.
+EXIT_READINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs",
+                                  "exit_readings.json")
 
 # --------------------------------------------------------------------------- #
 # SETTLED DECISION POINTS
@@ -113,6 +130,35 @@ DISCOVERY_CUTOFF = dt.date(2026, 9, 16)
 
 # The 2026-10-22 delegated ruling set (DP-3C-az..bk).
 DOC_1022 = "claude/Phase3C_Rulings_Delegated_2026-10-22.md"
+
+# The 2026-11-06 exit-cut ruling set (DP-3C-bl..bo).
+DOC_1106 = "claude/Phase3C_Rulings_ExitCut_2026-11-06.md"
+
+# DP-3C-bl (Rob, 2026-11-06): THE PHASE 3-C EXIT CUT. Fixed by date, so a read
+# taken later -- after more cohorts are pasted -- reads exactly the same rows.
+# Every one-time exit read takes its cut from here and nowhere else.
+# `expected` holds the populations counted at the cut BEFORE any read (counts
+# only); a read whose inputs do not reproduce them refuses (gate 5). Corrected
+# the same day: E4-2 ADJACENT is 247, not the 250 first quoted, because three
+# SND ADJACENT rows are fin=degraded and DP-3C-t (b) keeps them out of E4.
+import types as _types
+EXIT_CUT = _types.MappingProxyType(dict(
+    review_date=dt.date(2026, 11, 7),          # DP-3C-ay (ii) "the exit-review date"
+    e42_resolved_through=dt.date(2026, 11, 5),  # +5d session on or before (signals <= 10-29)
+    e43_filed_from=dt.date(2026, 9, 1),         # DP-3C-ac restart
+    e43_filed_through=dt.date(2026, 11, 5),     # next-session row is the 11-06 cohort
+    episodes_resolved_through=dt.date(2026, 11, 5),  # DP-3C-w@exit, DP-3C-av: opening row's +5d
+    expected=_types.MappingProxyType(dict(
+        e42_adjacent=247, e42_quiet=295, e42_qualifiers=12, e42_degraded_excluded=3,
+        e43_events=26, e43_observable=25,
+    )),
+    # Registry exit reads at the same cut, counted blind 2026-11-06 (no rho, no hit rate):
+    # DP-3C-w resolved opening episodes; DP-3C-av resolved episodes per account.
+    # Individual (8) is below DP-3C-av's 10, so only Roth IRA is readable at the exit.
+    expected_registry=_types.MappingProxyType({
+        "dp3cw_resolved": 18, "dp3cav_Individual": 8, "dp3cav_Roth IRA": 15,
+    }),
+))
 
 RULINGS = {
     # ------------------------------------------------------------------ T1 --
@@ -745,6 +791,57 @@ RULINGS = {
               "CORRECTION to the 10-22 note: it named CORN and NTR only. Rob may apply the "
               "whole change, or the additions alone, at any time."),
     ),
+    "DP-3C-bl": dict(
+        dp="DP-3C-bl",
+        question="the Phase 3-C exit cut (DP-3C-ay (ii) and DP-3C-bb on a weekend review)",
+        status=("RULED (Rob) - exit-review date 2026-11-07; E4-2 rows whose +5d session is on or "
+                "before 2026-11-05; E4-3 8-Ks filed 2026-09-01..2026-11-05; episode reads on "
+                "opening rows resolved by 2026-11-05; fixed by date (EXIT_CUT)"),
+        open=False, ruled_on=dt.date(2026, 11, 6), effective=dt.date(2026, 11, 6), doc=DOC_1106,
+        bar="unchanged: E4-2 n >= 150 resolved ADJACENT; E4-3 20 events",
+        note=("Rob, 2026-11-06 19:39 CT, verbatim: 'I confirm the cut (drafted in section 3): "
+              "exit date 11-07; E4-2 counts rows that resolve by 11-05; E4-3 counts filings "
+              "through 11-05.' The 11-06 closes are excluded because no later log has carried "
+              "them (DP-3C-bb). Counts at the cut, none a rate: E4-2 247 resolved ADJACENT, 295 "
+              "COVERED-QUIET, 12 of 13 primary; E4-3 25 observable of 26. CORRECTION (Claude, "
+              "2026-11-06, found by the independent review before any read): the 250 quoted to "
+              "Rob came from e4_counter, which never applied DP-3C-t (b); three SND ADJACENT rows "
+              "(08-13, 08-14, 08-17) are fin=degraded and are excluded. The cut itself is "
+              "unchanged."),
+    ),
+    "DP-3C-bm": dict(
+        dp="DP-3C-bm",
+        question="what 'Friday scan clean' (exit plan step 13) requires before the reads",
+        status=("RULED (DELEGATED) - the OUTCOME gate clean (calendar, cross-check, outcome_sanity "
+                "A..I, trail audit); the WS1 gate-loss FAIL is recorded, does not hold the reads, "
+                "and is carried to Phase 4a beside P4-3"),
+        open=False, ruled_on=dt.date(2026, 11, 6), effective=dt.date(2026, 11, 6), doc=DOC_1106,
+        bar="n/a - read precondition",
+        note=("No row the WS1 check named in 11-02..11-06 can enter an exit read: each resolves "
+              "after the cut, DP-3C-w/-av score opening rows, E4-2 is HOLD-only, E4-3 is raw. "
+              "Also approved: Check C allowlist entries CBRS 2357, CBRS 2777, TWST 2801 and the "
+              "MATERIAL repairs AAPL 11-02 338.32, NVDA 11-04 200.13, SPCX 11-04 135.92 "
+              "(DP-3C-bd; log and external agree)."),
+    ),
+    "DP-3C-bn": dict(
+        dp="DP-3C-bn",
+        question="E4-2 / E4-3 read mechanics where pre-registration v1.3 is silent",
+        status=("RULED (DELEGATED, blind) - unweighted mean of d_ticker; disposition on the "
+                "primary read only; +/-5.0pt with both robustness conditions; adequate "
+                "qualifiers >= 7 of 13; four read gates; E4-3 date-keyed with every item code"),
+        open=False, ruled_on=dt.date(2026, 11, 6), effective=dt.date(2026, 11, 6), doc=DOC_1106,
+        bar="unchanged: >= 5pt accuracy-equivalent; sign survives leave-one-cohort-out and dropping the largest ticker",
+        note=("Ruled before any E4 rate was computed. The adequacy bar was set with the count "
+              "(12 of 13) in view; any bar from 1 to 12 gives the same answer. Implemented in "
+              "e4_exit_read.py."),
+    ),
+    "DP-3C-bo": dict(
+        dp="DP-3C-bo",
+        question="is DP-3C-aw's before/after damper table built for the exit review?",
+        status="RULED (DELEGATED) - yes; descriptive, reads no outcome; DP-3C-aw adoption still waits on it",
+        open=False, ruled_on=dt.date(2026, 11, 6), effective=dt.date(2026, 11, 6), doc=DOC_1106,
+        bar="DP-3C-aw unchanged",
+    ),
     "DP-V4": dict(
         dp="DP-V4",
         question=("the value card's class basis: Schwab's last-fiscal-year ROE, or 12-month ROE "
@@ -854,6 +951,19 @@ def _load(path=READINGS_PATH):
         return {}
 
 
+def _load_for_write(path):
+    """(data, readable). A missing file is ({}, True); a file that exists but
+    cannot be read or parsed is ({}, False) and must not be overwritten."""
+    if not os.path.exists(path):
+        return {}, True
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return (d, True) if isinstance(d, dict) else ({}, False)
+    except (OSError, ValueError):
+        return {}, False
+
+
 def record_reading(instrument, cohort_date, passed, detail=None,
                    path=READINGS_PATH):
     """Append one dated reading. Idempotent per (instrument, cohort_date), so
@@ -862,8 +972,18 @@ def record_reading(instrument, cohort_date, passed, detail=None,
     failure a streak counter must not have.
 
     Returns the stored list for this instrument, oldest first. Never raises:
-    a failed write costs the streak, not the run."""
-    data = _load(path)
+    a failed write costs the streak, not the run.
+
+    AMENDED 2026-11-06 (exit-tool review): the file is written ATOMICALLY (temp
+    file, then os.replace), and an existing file that cannot be read is never
+    overwritten - before, a corrupt or locked file was read as empty and the
+    next write erased every other instrument's history. A one-time "@exit"
+    reading that is already on record is never replaced."""
+    data, readable = _load_for_write(path)
+    if not readable:
+        return data.get(instrument, [])
+    if instrument.endswith("@exit") and data.get(instrument):
+        return data[instrument]
     series = data.setdefault(instrument, [])
     key = str(cohort_date)
     detail = dict(detail or {})
@@ -887,12 +1007,26 @@ def record_reading(instrument, cohort_date, passed, detail=None,
     else:
         series.append(entry)
     series.sort(key=lambda e: e.get("date", ""))
+    import tempfile
+    tmp = None
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        folder = os.path.dirname(os.path.abspath(path))
+        os.makedirs(folder, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".readings_", suffix=".json", dir=folder)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = None
     except OSError:
         pass
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     return series
 
 

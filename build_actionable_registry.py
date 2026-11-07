@@ -434,8 +434,22 @@ def _r1(arm, as_of):
     return _ru.read_protection(sess, as_of)
 
 
+def mask_resolved_through(master_rows, through):
+    """DP-3C-bl (2026-11-06): a copy of master_rows in which a +5d result counts
+    only when its +5d session is on or before `through` (rulings.EXIT_CUT). The
+    rows themselves are all kept, so episodes coalesce exactly as they do
+    nightly; only what has RESOLVED is pinned to the cut."""
+    import trading_calendar as _tc
+    out = []
+    for r in master_rows:
+        if r.get("ret5") is not None and _tc.shift_sessions(r["date"], 5) > through:
+            r = dict(r, ret5=None)
+        out.append(r)
+    return out
+
+
 def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None,
-                exit_read=False):
+                exit_read=False, resolved_through=None, exit_run=False):
     """Print the DP-3C-w arm. Records the FIRST read and prints it thereafter.
     dropouts: DP-3C-ar run-fault set (2026-09-25), bridged not split.
 
@@ -443,13 +457,21 @@ def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None,
     resolving closes have been log-verified; before that the block prints
     counts only and withholds rho. exit_read: the once-more read DP-3C-ah
     reserves for the Phase 3-C exit review, recorded as 'DP-3C-w@exit' under
-    the same protection. It is taken only when asked for (--exit-read)."""
+    the same protection. It is taken only when asked for (--exit-read).
+
+    AMENDED 2026-11-06 (DP-3C-bl): resolved_through pins the exit read to the
+    ruled cut, so it reads the same episodes whenever it is run."""
     import episodes
+    if resolved_through is not None:
+        master_rows = mask_resolved_through(master_rows, resolved_through)
     arm = episodes.dp3cw_arm(master_rows, cohort_dates, dropouts=dropouts)
     lines = ["DP-3C-w PROSPECTIVE ARM (episodes opening on/after 2026-09-03)",
              f"  episodes opened {arm['n_open']}   resolved +5d {arm['n_resolved']} of "
              f"{episodes.DP3CW_MIN_N} needed   tickers {len(arm['tickers'])} "
              f"({', '.join(arm['tickers']) or 'none'}) of {episodes.DP3CW_MIN_TICKERS} needed"]
+    if resolved_through is not None:
+        lines.append(f"  pinned: +5d results counted through {resolved_through} "
+                     "(rulings.EXIT_CUT, DP-3C-bl)")
     if arm.get("bridged"):
         lines.append("  DP-3C-ar bridged (run-fault dropout, not a split): "
                      + ", ".join(f"{t} {d:%Y-%m-%d}" for t, d in arm["bridged"]))
@@ -482,16 +504,21 @@ def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None,
         lines.append(f"  READ on {e['date']} (recorded, not recomputed): "
                      f"{e['detail'].get('verdict')}  rho {e['detail'].get('rho')}  "
                      f"n {e['detail'].get('n')}")
-        ex = rulings.readings("DP-3C-w@exit") if rulings is not None else []
+        ex = _exit_record("DP-3C-w@exit")
         if ex:
             x = ex[0]
             lines.append(f"  EXIT READ on {x['date']} (recorded): {x['detail'].get('verdict')}  "
                          f"rho {x['detail'].get('rho')}  n {x['detail'].get('n')}")
         elif exit_read and arm["read_ready"]:
             _take("DP-3C-w@exit", "EXIT READ")
+        elif exit_run:
+            lines.append("  exit read: taken below under PHASE 3-C EXIT READS (gated, pinned to the cut)")
         else:
             lines.append("  exit read: not taken (run with --exit-read at the Phase 3-C exit "
                          "review; protected by DP-3C-bb)")
+    elif exit_run:
+        lines.append("  no first reading on the record; an exit run takes no first read "
+                     "(the exit read below stops on this)")
     elif arm["read_ready"]:
         _take("DP-3C-w", "READ DATE")
     else:
@@ -812,6 +839,349 @@ def per_account_block(rows, eps):
     return out
 
 
+DP3CAV_MIN = 10   # DP-3C-av: readable only with >= 10 resolved episodes per account
+DP3CAV_INSTR = "DP-3C-av@exit"
+DP3CW_INSTR = "DP-3C-w@exit"
+EXIT_REQUIRED = ("build_actionable_registry.py", "episodes.py", "rulings.py", "trading_calendar.py",
+                 "exit_read_guard.py", "outcome_sanity.py", "signal_logs.py", "trail_basis_audit.py",
+                 "log_tracker_crosscheck.py", "e4_counter.py")
+
+
+def _exit_record(instrument):
+    """The first exit reading of `instrument`, from the authoritative exit file,
+    else the shared log's mirror; [] if neither has it. Display only."""
+    try:
+        import rulings
+    except ImportError:
+        return []
+    for p in (getattr(rulings, "EXIT_READINGS_PATH", None), rulings.READINGS_PATH):
+        if p:
+            got = rulings.readings(instrument, p)
+            if got:
+                return got
+    return []
+
+
+def log_coverage(logs_glob, cohort_dates):
+    """(ok, detail): every master cohort since the DP-3C-t clock has its own
+    dated signals log, so no episode or DP-3C-av row is silently missing."""
+    import signal_logs
+    import e4_counter as ec
+    paths, _ = signal_logs.discover(logs_glob)
+    have = set()
+    for p in paths:
+        m = _re.search(r"signals_(\d{4}-\d{2}-\d{2})\.log$", os.path.basename(p))
+        if m:
+            have.add(dt.date.fromisoformat(m.group(1)))
+    missing = sorted(d for d in set(cohort_dates) if d >= ec.CLOCK_START and d not in have)
+    if missing:
+        return False, "no log for master cohort(s) " + ", ".join(map(str, missing[:8]))
+    return True, "logs cover every master cohort since the clock"
+
+
+def _hit_from_prices(x):
+    """DP-3C-l's sign test from the PRICE columns (never column K's cache):
+    BUY paid if Price +5d > Price at Signal, SELL if below. None until filled."""
+    if not isinstance(x.p0, (int, float)) or not x.p0 or not isinstance(x.p5, (int, float)):
+        return None
+    r = (x.p5 - x.p0) / x.p0
+    return (r > 0) if x.signal == "BUY" else (r < 0)
+
+
+def _resolved_by_prices(x):
+    return isinstance(x.p0, (int, float)) and bool(x.p0) and isinstance(x.p5, (int, float))
+
+
+def av_exit_compute(rows, eps, through, counts_only=False):
+    """DP-3C-av (pre-registered 2026-09-25), computed for the ONE exit read.
+    Per account: post-era episodes whose OPENING row was APPROVED there,
+    resolved when the opening row's +5d session (trading_calendar) is on or
+    before `through` and its +5d price is filled. >= 10 resolved -> hit rate;
+    else 'not readable'. Never pooled. Returns (detail, sessions); prints nothing.
+    counts_only=True computes no hit at all (the blind count for gate 5)."""
+    import trading_calendar as _tc
+    heads = {x.episode_id: x for x in rows if x.episode_open}
+    post = [e for e in eps if e["era"] == ERA_POST]
+    accts = sorted({a for x in rows if x.era == ERA_POST for a in x.per_account})
+    detail, sessions = {}, []
+    for a in accts:
+        opened = [e for e in post if heads[e["episode_id"]].per_account.get(a) == "APPROVED"]
+        res = []
+        for e in opened:
+            h = heads[e["episode_id"]]
+            d5 = _tc.shift_sessions(h.date, 5)
+            if d5 <= through and _resolved_by_prices(h):
+                res.append((e["episode_id"], None if counts_only else _hit_from_prices(h)))
+                sessions.append(d5)
+        if counts_only:
+            detail[a] = dict(n=len(res), opened=len(opened))
+        elif len(res) >= DP3CAV_MIN:
+            hits = sum(1 for _, h in res if h)
+            detail[a] = dict(readable=True, hits=hits, n=len(res), opened=len(opened),
+                             episodes=[eid for eid, _ in res])
+        else:
+            detail[a] = dict(readable=False, n=len(res), opened=len(opened))
+    nofield = sum(1 for e in post if not heads[e["episode_id"]].per_account)
+    return dict(per_account=detail, no_field=nofield, post_episodes=len(post)), sessions
+
+
+def w_exit_compute(master_rows, cohort_dates, through, dropouts):
+    """DP-3C-w's once-more read at the exit, pinned: only +5d results whose
+    session is on or before `through` count. Prints nothing."""
+    import episodes
+    import trading_calendar as _tc
+    arm = episodes.dp3cw_arm(mask_resolved_through(master_rows, through), cohort_dates, dropouts=dropouts)
+    sessions = [_tc.shift_sessions(d, 5) for d in arm.get("resolved_open_dates", [])]
+    readable = arm["read_ready"]
+    return dict(readable=readable, verdict=arm["verdict"], rho=arm["rho"] if readable else None,
+                n=arm["n_resolved"], tickers=arm["tickers_resolved"], episodes=arm["episodes"]), sessions
+
+
+def w_exit_counts(master_rows, cohort_dates, through, dropouts):
+    """dp3cw_arm's population and coalescing, COUNTED: resolved opening rows at
+    the cut and their +5d sessions. Never computes rho (gate 5 and gate 1)."""
+    import episodes
+    import trading_calendar as _tc
+    rows = mask_resolved_through(master_rows, through)
+    pop = [r for r in rows if r["date"] >= episodes.DP3CW_ERA_START and r.get("signal") == "BUY"
+           and isinstance(r.get("conf"), (int, float)) and r["conf"] >= 60]
+    eps_ = [e for e in episodes.coalesce(pop, cohort_dates, dropouts=dropouts)
+            if e["opened"] >= episodes.DP3CW_OPENED]
+    res = [e["open_row"] for e in eps_ if e["open_row"].get("ret5") is not None]
+    return dict(n=len(res)), [_tc.shift_sessions(r["date"], 5) for r in res]
+
+
+def exit_counts(w, av):
+    """The counts gate 5 compares with rulings.EXIT_CUT['expected'] (counts only)."""
+    out = dict(dp3cw_resolved=w["n"])
+    for a, v in av["per_account"].items():
+        out[f"dp3cav_{a}"] = v["n"]
+    return out
+
+
+def exit_lines(w, av, through, recorded_on=None):
+    head = (f"  READ on {recorded_on} (recorded, not recomputed)" if recorded_on
+            else "  READ (recorded and verified just now)")
+    L = ["PHASE 3-C EXIT READS - DP-3C-w@exit and DP-3C-av@exit (pinned to rulings.EXIT_CUT)", head,
+         f"  pinned: +5d results on opening rows whose +5d session is on or before {through}",
+         "  DP-3C-w@exit: " + (f"rho = {w['rho']:+.3f} -> {w['verdict']}" if w.get("rho") is not None
+                               else f"{w['verdict']}")
+         + f"  (n {w['n']} resolved episodes; tickers {', '.join(w.get('tickers') or [])})"]
+    for a, v in sorted(av["per_account"].items()):
+        L.append(f"  DP-3C-av {a}: " + (f"{v['hits']}/{v['n']} = {v['hits'] / v['n']:.1%} of resolved episodes "
+                                        f"paid at +5d (opened APPROVED {v['opened']})" if v["readable"]
+                                        else f"not readable ({v['n']} resolved, fewer than {DP3CAV_MIN})"))
+    L.append(f"  post-era episodes with no per-account field: {av['no_field']} of {av['post_episodes']}")
+    L.append("  DP-3C-av is DESCRIPTIVE (DP-3C-l standard NONE); never pooled across accounts.")
+    return L
+
+
+def registry_exit_reads(tracker_copy, logs_glob, master_rows, cohort_dates, dropouts, rows, eps, snap=None,
+                        readings_path=None, gates_fn=None, exit_path=None):
+    """The two registry exit reads, taken together: compute both, gate, record
+    both in ONE verified write, then return the lines to print. Returns
+    (rc, lines). rc 0 = read and recorded (or already on record), 1 = a gate
+    stopped it, 2 = could not record or an anomaly."""
+    import exit_read_guard as guard
+    import rulings
+    cut = rulings.EXIT_CUT
+    through = cut["episodes_resolved_through"]
+    rp = readings_path or rulings.READINGS_PATH
+    ep = exit_path or (rulings.EXIT_READINGS_PATH if readings_path is None
+                       else os.path.join(os.path.dirname(rp), "exit_readings.json"))
+    try:
+        data = guard.load_readings_strict(rp)
+        have = guard.load_exit_records([DP3CW_INSTR, DP3CAV_INSTR], [ep, rp])
+    except (OSError, ValueError) as exc:
+        return 2, [f"  [STOP] a readings file is unreadable ({exc}); nothing read"]
+    hw, hav = bool(have.get(DP3CW_INSTR)), bool(have.get(DP3CAV_INSTR))
+    if hw and hav:
+        w, av = have[DP3CW_INSTR][0], have[DP3CAV_INSTR][0]
+        return 0, exit_lines(w["detail"], av["detail"], through, recorded_on=w["date"])
+    if hw != hav:
+        return 2, [f"  [STOP] ANOMALY: only one of {DP3CW_INSTR} / {DP3CAV_INSTR} is recorded; nothing recomputed"]
+    if not data.get("DP-3C-w"):
+        return 1, ["  [STOP] DP-3C-w has no first reading on the record; the exit read is the ONCE-MORE read "
+                   "(DP-3C-ah) and cannot be its first"]
+    wc, ws = w_exit_counts(master_rows, cohort_dates, through, dropouts)
+    avc, avs = av_exit_compute(rows, eps, through, counts_only=True)
+    counts = exit_counts(wc, avc)
+    as_of = cohort_dates[-1] if cohort_dates else None
+    if gates_fn is None:
+        import signal_logs
+        paths, _ = signal_logs.discover(logs_glob)
+        dated = [p for p in paths if _re.search(r"signals_\d{4}-\d{2}-\d{2}\.log$", os.path.basename(p))]
+        newest_log = max(dated, key=os.path.basename) if dated else ""
+        ok3, det3, blobs = guard.gate_git_strict(list(EXIT_REQUIRED))
+        gates = [("0 run from the repo folder", *guard.gate_cwd()),
+                 ("1 read protection (DP-3C-bb)", *guard.gate_read_protection(ws + avs, as_of)),
+                 ("2 integrity (DP-3C-bm)", *guard.gate_integrity(tracker_copy, logs_glob, newest_log)),
+                 ("3 committed code", ok3, det3),
+                 ("4 not already read", *guard.gate_not_recorded([DP3CW_INSTR, DP3CAV_INSTR], [ep, rp])),
+                 ("5 inputs as ruled", *guard.gate_inputs(dict(cut["expected_registry"]), counts,
+                                                         *log_coverage(logs_glob, cohort_dates)))]
+    else:
+        gates, blobs = gates_fn(ws + avs, as_of, counts)
+    lines = ["PHASE 3-C EXIT READS: gates"] + guard.gate_lines(gates)
+    if not guard.all_ok(gates):
+        return 1, lines + ["  EXIT READS NOT TAKEN: a gate stopped them. Counts only; nothing recorded."]
+    w, ws2 = w_exit_compute(master_rows, cohort_dates, through, dropouts)
+    av, avs2 = av_exit_compute(rows, eps, through)
+    if (w["n"], sorted(ws2), sorted(avs2)) != (wc["n"], sorted(ws), sorted(avs)):
+        return 2, lines + ["  [STOP] the read's population differs from the gated count; nothing recorded"]
+    if snap is not None:
+        okl, detl = guard.logs_unchanged(snap)
+        if not okl:
+            return 1, lines + [f"  EXIT READS NOT TAKEN: {detl}"]
+    prov = dict(master_sha=snap["master_sha"] if snap else None, blobs=blobs, git_head=guard.git_head(),
+                resolved_through=str(through))
+    ok, msg = guard.record_exit({
+        DP3CW_INSTR: (cut["review_date"], bool(w["readable"] and str(w["verdict"]).startswith("POSITIVE")),
+                      dict(prov, **w, verified_through=str(max(ws)) if ws else None)),
+        DP3CAV_INSTR: (cut["review_date"], False, dict(prov, **av, verified_through=str(max(avs)) if avs else None)),
+    }, ep, rp)
+    if not ok:
+        return 2, lines + [f"  *** RECORDING FAILED: {msg}. Nothing shown, nothing recorded. ***"]
+    return 0, lines + [""] + exit_lines(w, av, through) + [f"  {msg}"]
+
+
+def selftest():
+    """Synthetic data only: the cut mask, both exit computations, and the
+    gate -> compute -> record -> show order of the exit reads."""
+    import tempfile
+    import shutil
+    import exit_read_guard as guard
+    fails = []
+
+    def check(name, got, want):
+        ok = got == want
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}: got {got!r}, want {want!r}")
+        if not ok:
+            fails.append(name)
+
+    D = dt.date
+    mr = [dict(date=D(2026, 10, 29), ticker="X", signal="BUY", conf=72, ret5=0.01),
+          dict(date=D(2026, 10, 30), ticker="X", signal="BUY", conf=72, ret5=0.02)]
+    m = mask_resolved_through(mr, D(2026, 11, 5))
+    check("a +5d session on the cut counts (10-29 -> 11-05)", m[0]["ret5"], 0.01)
+    check("a +5d session after the cut is masked (10-30 -> 11-06)", m[1]["ret5"], None)
+    check("the mask never edits the caller's rows", mr[1]["ret5"], 0.02)
+
+    class R:
+        def __init__(s, eid, acct, p5, day, sig="BUY"):
+            s.episode_id, s.episode_open, s.era, s.per_account = eid, True, ERA_POST, acct
+            s.p0, s.p5, s.date, s.signal = 100.0, p5, day, sig
+
+    rows, eps = [], []
+    day = D(2026, 9, 14)
+    for i in range(12):
+        x = R(f"E{i}", {"Roth IRA": "APPROVED", "Individual": "APPROVED" if i < 9 else "REJECTED"},
+              101.0 if i % 3 else 99.0, day)
+        rows.append(x)
+        eps.append(dict(episode_id=x.episode_id, era=ERA_POST))
+        import trading_calendar as _tc
+        day = _tc.next_session(day)
+    late = R("LATE", {"Roth IRA": "APPROVED"}, 105.0, D(2026, 10, 30))
+    rows.append(late)
+    eps.append(dict(episode_id="LATE", era=ERA_POST))
+    sell = R("S", {"Roth IRA": "APPROVED"}, 95.0, D(2026, 9, 15), sig="SELL")
+    check("a SELL is paid when the price falls (sign test from prices)", _hit_from_prices(sell), True)
+    av, avs = av_exit_compute(rows, eps, D(2026, 11, 5))
+    check("Roth IRA readable at 12 resolved; the 10-30 episode is past the cut",
+          (av["per_account"]["Roth IRA"]["readable"], av["per_account"]["Roth IRA"]["n"],
+           av["per_account"]["Roth IRA"]["hits"]), (True, 12, 8))
+    check("Individual not readable at 9", (av["per_account"]["Individual"]["readable"],
+                                           av["per_account"]["Individual"]["n"]), (False, 9))
+
+    tmp = tempfile.mkdtemp(prefix="bar_")
+    try:
+        rp = os.path.join(tmp, "r.json")
+        w = dict(readable=True, verdict="NOT DECIDED", rho=-0.2, n=12, tickers=["A"], episodes=["E"])
+
+        def run(gates_ok=True, prior_first=True):
+            import rulings
+            if prior_first and not guard.load_readings_strict(rp).get("DP-3C-w"):
+                rulings.record_reading("DP-3C-w", D(2026, 10, 13), False, {"verdict": "first"}, path=rp)
+            orig_w, orig_wc = globals()["w_exit_compute"], globals()["w_exit_counts"]
+            orig_av = globals()["av_exit_compute"]
+            globals()["w_exit_compute"] = lambda *a, **k: (w, [D(2026, 11, 5)])
+            globals()["w_exit_counts"] = lambda *a, **k: (dict(n=w["n"]), [D(2026, 11, 5)])
+            try:
+                g = lambda s, a, c: ([("x", gates_ok, "")], {})
+                return registry_exit_reads("m", os.path.join(tmp, "signals_*.log"), [], [D(2026, 11, 6)], set(),
+                                           rows, eps, readings_path=rp, gates_fn=g)
+            finally:
+                globals()["w_exit_compute"], globals()["w_exit_counts"] = orig_w, orig_wc
+                globals()["av_exit_compute"] = orig_av
+
+        rc, lines = run(prior_first=False)
+        check("no DP-3C-w first reading -> refused", (rc, any("no first reading" in ln for ln in lines)), (1, True))
+        rc, lines = run(gates_ok=False)
+        check("a stopped gate records nothing and shows no rate",
+              (rc, "DP-3C-w@exit" in guard.load_readings_strict(rp), any("%" in ln for ln in lines)), (1, False, False))
+        rc, lines = run()
+        rec = guard.load_readings_strict(rp)
+        ep = os.path.join(tmp, "exit_readings.json")
+        xrec = guard.load_readings_strict(ep)
+        check("gates pass -> BOTH exit reads recorded in one write, in the exit file and mirrored",
+              (rc, DP3CW_INSTR in xrec, DP3CAV_INSTR in xrec, DP3CW_INSTR in rec, DP3CAV_INSTR in rec),
+              (0, True, True, True, True))
+        check("the result is shown only after the verified record", any("recorded and verified" in ln for ln in lines), True)
+        rows[0].p5 = 50.0
+        rc, lines = run()
+        check("a second run prints the record and never recomputes",
+              (rc, any("recorded, not recomputed" in ln for ln in lines),
+               guard.load_readings_strict(rp)[DP3CAV_INSTR][0]["detail"]["per_account"]["Roth IRA"]["hits"]),
+              (0, True, 8))
+        import json
+        import rulings
+        rulings.record_reading("DP-3C-w", D(2026, 11, 9), False, {"verdict": "nightly"}, path=rp)
+        check("a nightly write to the shared log keeps the exit mirror",
+              DP3CW_INSTR in guard.load_readings_strict(rp), True)
+        del rec[DP3CAV_INSTR], rec[DP3CW_INSTR]
+        with open(rp, "w") as fh:
+            json.dump(rec, fh)                              # the shared log loses both
+        rc, lines = run()
+        check("the exit file alone still answers: printed as recorded, never recomputed",
+              (rc, any("recorded, not recomputed" in ln for ln in lines)), (0, True))
+        x1 = guard.load_readings_strict(ep)
+        del x1[DP3CAV_INSTR]
+        with open(ep, "w") as fh:
+            json.dump(x1, fh)
+        rc, lines = run()
+        check("only one of the pair on record -> ANOMALY, nothing recomputed", rc, 2)
+        with open(ep, "w") as fh:
+            fh.write("corrupt")
+        rc, lines = run()
+        check("a corrupt exit file stops the read", rc, 2)
+        os.remove(ep)
+        with open(rp, "w") as fh:
+            fh.write("corrupt")
+        rc, lines = run(prior_first=False)
+        check("a corrupt readings log stops the read", rc, 2)
+        # log coverage (gate 5) on dated log names only
+        lg = os.path.join(tmp, "lg")
+        os.makedirs(lg)
+        for d in ("2026-11-04", "2026-11-05"):
+            open(os.path.join(lg, f"signals_{d}.log"), "w").close()
+        open(os.path.join(lg, "signals_2026-11-06_run1_coldstart.log"), "w").close()
+        okc, detc = log_coverage(os.path.join(lg, "signals_*.log"),
+                                 [D(2026, 8, 12), D(2026, 11, 4), D(2026, 11, 5), D(2026, 11, 6)])
+        check("a cohort with only an undated log fails coverage; pre-clock dates are ignored",
+              (okc, "2026-11-06" in detc, "2026-08-12" in detc), (False, True, False))
+        okc2, _ = log_coverage(os.path.join(lg, "signals_*.log"), [D(2026, 11, 4), D(2026, 11, 5)])
+        check("full coverage passes", okc2, True)
+        # an exit run's nightly block neither records nor points at --exit-read
+        bl = dp3cw_block([], [D(2026, 11, 6)], D(2026, 11, 6), record=False, exit_run=True)
+        check("an exit run's nightly block does not say 'run with --exit-read'",
+              any("run with --exit-read" in ln for ln in bl), False)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("build_actionable_registry selftest (synthetic data only): "
+          + ("ALL PASS" if not fails else f"{len(fails)} FAIL"))
+    return 0 if not fails else 1
+
+
 def write_markdown(rows, eps, md_path, tracker_path):
     rsum, es = summarize_rows(rows), summarize_episodes(eps)
 
@@ -996,9 +1366,16 @@ def main(argv=None):
     ap.add_argument("--no-record", action="store_true",
                     help="do not write the DP-3C-w reading to the readings log")
     ap.add_argument("--exit-read", action="store_true",
-                    help="take DP-3C-w's once-more read for the Phase 3-C exit review "
-                         "(recorded as DP-3C-w@exit, only when log-verified: DP-3C-bb)")
+                    help="take the Phase 3-C exit reads: DP-3C-w@exit and DP-3C-av@exit, "
+                         "pinned to rulings.EXIT_CUT and gated (DP-3C-bb, -bl, -bn)")
+    ap.add_argument("--selftest", action="store_true", help="synthetic tests of the exit-read code")
     args = ap.parse_args(argv)
+    if args.selftest:
+        sys.exit(selftest())
+    if args.exit_read and args.no_record:
+        print("ERROR: --exit-read cannot be combined with --no-record. A one-time read that is "
+              "printed but not recorded is a look, not a read (DP-3C-bn i).")
+        sys.exit(2)
 
     if not os.path.exists(args.tracker):
         sys.exit(f"ERROR: tracker not found: {args.tracker}")
@@ -1007,12 +1384,39 @@ def main(argv=None):
                  "master. Pass logs\\claude_equity_bot_tracker.xlsx. (exit 2)")
     os.makedirs(args.out_dir, exist_ok=True)
 
-    rows, cohort_dates = load_actionable(args.tracker)
+    # AMENDED 2026-11-06 (DP-3C-bn): with --exit-read, every input is read from ONE
+    # snapshot of the master, and the logs are hashed, so the recorded read is of
+    # the bytes that were gated. Without --exit-read nothing changes.
+    source, snap, work = args.tracker, None, None
+    if args.exit_read:
+        import tempfile
+        import exit_read_guard as guard
+        import signal_logs
+        log_paths, _ = signal_logs.discover(os.path.abspath(args.logs))
+        work = tempfile.mkdtemp(prefix="exit_read_registry_")
+        try:
+            snap = guard.snapshot(args.tracker, log_paths, work)
+        except Exception:
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
+            raise
+        source = snap["master"]
+    try:
+        rc = _build(args, source, snap)
+    finally:
+        if work:                                   # the master copy never outlives the run
+            import shutil
+            shutil.rmtree(work, ignore_errors=True)
+    sys.exit(rc)
+
+
+def _build(args, source, snap):
+    rows, cohort_dates = load_actionable(source)
     if not rows:
         print("No actionable directional signals found. Writing an EMPTY registry "
               "rather than exiting — an empty population is a real and reportable "
               "state for this instrument, unlike the near-miss registry.")
-    master_rows = load_master_rows(args.tracker)
+    master_rows = load_master_rows(source)
     dropouts = load_dropouts(args.logs, master_rows)
     assign_episodes(rows, cohort_dates, dropouts=dropouts)
     attach_log_fields(rows, load_log_fields(args.logs))
@@ -1027,11 +1431,20 @@ def main(argv=None):
     if dropouts:
         print("DP-3C-ar run-fault dropouts (bridged, never split): "
               + ", ".join(f"{t} {d:%Y-%m-%d}" for t, d in sorted(dropouts, key=lambda z: (z[1], z[0]))))
-    for line in dp3cw_block(master_rows, cohort_dates,
-                            cohort_dates[-1] if cohort_dates else dt.date.today(),
-                            record=not args.no_record, dropouts=dropouts,
-                            exit_read=args.exit_read):
+    as_of = cohort_dates[-1] if cohort_dates else dt.date.today()
+    # In an exit run the nightly block records nothing: the run writes only what
+    # the gated exit reads write (exit-tool review, 2026-11-07).
+    for line in dp3cw_block(master_rows, cohort_dates, as_of,
+                            record=not args.no_record and not args.exit_read, dropouts=dropouts,
+                            exit_run=args.exit_read):
         print(line)
+    exit_rc = 0
+    if args.exit_read:
+        print()
+        exit_rc, lines = registry_exit_reads(source, os.path.abspath(args.logs), master_rows, cohort_dates,
+                                             dropouts, rows, eps, snap=snap)
+        for line in lines:
+            print(line)
     print(f"\nWrote: {xlsx_path}\nWrote: {md_path}")
 
     if args.emit_into_copy:
@@ -1071,7 +1484,7 @@ def main(argv=None):
         print(f"Wrote: {args.copy}  (COPY — master untouched; open in Excel to "
               f"refresh the formula cache)")
 
-    sys.exit(0 if ok else 2)
+    return max(exit_rc, 0 if ok else 2)
 
 
 if __name__ == "__main__":

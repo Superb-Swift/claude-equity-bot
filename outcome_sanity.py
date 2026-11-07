@@ -190,6 +190,35 @@ VERIFIED_REAL_MOVES = {
         "-14.60% trail5d on 2026-08-26. MAG_PCT was calibrated for CBRS "
         "-34.8% at +20d, never for +46.6% at +10d.",
     ),
+    ("CBRS", 2357): (
+        "2026-10-08", "+20d", 81.71,
+        "2026-11-06 closing review (Claude); approved under Rob's delegation, DP-3C-bm. "
+        "Corroborated three times outside Check C: all three cohorts "
+        "resolving 2026-11-05 hold 81.71 (Check B clean); CBRS Px@signal "
+        "2026-11-05 = 80.05, a +2.1% quote-to-close gap (Check A clean); the "
+        "2026-11-06 log's H1 trace carries 81.71 (Check F agrees). Real move "
+        "in a MEDIUM-DQ high-vol name; the 2026-11-06 scan printed -25.16% "
+        "trail5d.",
+    ),
+    ("CBRS", 2777): (
+        "2026-10-29", "+5d", 81.71,
+        "2026-11-06 closing review (Claude); approved under Rob's delegation, DP-3C-bm. "
+        "Corroborated three times outside Check C: all three cohorts "
+        "resolving 2026-11-05 hold 81.71 (Check B clean); CBRS Px@signal "
+        "2026-11-05 = 80.05, a +2.1% quote-to-close gap (Check A clean); the "
+        "2026-11-06 log's H1 trace carries 81.71 (Check F agrees). Real move "
+        "in a MEDIUM-DQ high-vol name; the 2026-11-06 scan printed -25.16% "
+        "trail5d.",
+    ),
+    ("TWST", 2801): (
+        "2026-10-29", "+5d", 120.61,
+        "2026-11-06 closing review (Claude); approved under Rob's delegation, DP-3C-bm. "
+        "Corroborated three times outside Check C: all three cohorts "
+        "resolving 2026-11-05 hold 120.61 (Check B clean); TWST Px@signal "
+        "2026-11-05 = 118.72, a +1.6% quote-to-close gap (Check A clean); the "
+        "2026-11-06 log's H1 trace carries 120.61 (Check F agrees). The "
+        "2026-11-06 scan printed -21.06% trail5d.",
+    ),
 }
 
 # ------------------------------------------------------- Check F allowlist
