@@ -130,6 +130,7 @@ WATCHLIST_SCOUT = [
     "USO",
     "KRE",
     "VXUS",
+    "SPCX",
     #  Cleaned up watchlist on 2026-10-22 with the aim to remove broken thesis tickers and to add new thesis sector gaps and flavorful ETFs
     #
     # WATCHLIST ERA W2 FROM 2026-11-09 (DP-3C-bk, deferred whole to the Phase 3-C exit and
@@ -144,6 +145,11 @@ WATCHLIST_SCOUT = [
     #   local decision journal, not here (DP-3C-bi).
     #   Departing names' open outcome cells are entered UNGUARDED through 2026-12-07 and
     #   their S1 state is pruned only after that (DP-3C-bt).
+    #   ADDED to the scout list 2026-11-10: SPCX (Rob, 2026-11-10 09:17 CT). Exited from the
+    #     Individual account after the 2026-11-09 morning run to take profit and cut risk
+    #     while volatile; thesis intact; kept in the run to watch for re-entry. A HELD ->
+    #     SCOUT transition: the run stays at the same 30 names, so cohort membership is
+    #     unchanged and no outcome cell goes UNGUARDED. Recorded in the decision journal.
     #
     # ---- HISTORY, ERA W1 (kept: this block is the watchlist's only written record) ----
     # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
