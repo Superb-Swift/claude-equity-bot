@@ -101,6 +101,15 @@ WHAT THIS MODULE IS, AND IS NOT
     WATCHLIST_ERA_W2 and BUY_CONFIDENCE_CAVEAT (DP-3C-w@exit, reporting only).
     No tool's measurement changes.
 
+2026-11-10 UPDATE
+    Display fix (Rob, 2026-11-10 09:04 CT: "fix finding 1 now please"; F-1 of
+    claude/Phase4a_MonitoringReview_2026-11-09.md). DP-3C-w, DP-3C-av and
+    DP-3C-aw still printed as OPEN / PRE-REGISTERED in the nightly standing
+    block after the exit. Their status now carries the recorded exit
+    disposition (DP-3C-w, DP-3C-av) or the adoption (DP-3C-aw -> DP-3C-bs),
+    and open=False. Only H4 is tested with is_open(), so no tool's behaviour
+    or measurement changes; the old text is kept in each entry's note.
+
 ADDING A RULING
     Transcribe it from the `claude/` ruling document. `doc` is mandatory and is
     the audit trail: a status here with no document behind it is exactly the
@@ -233,8 +242,10 @@ RULINGS = {
     "DP-3C-w": dict(
         dp="DP-3C-w",
         question="the confidence inversion — prospective arm",
-        status="DISCOVERY QUARANTINED; PROSPECTIVE ARM OPEN",
-        open=True,
+        status=("READ AT THE EXIT 2026-11-07 (recorded, final; DP-3C-bq): POSITIVE — "
+                "rho -0.517, 18 episodes, 10 tickers, resolved through 2026-11-05; "
+                "the arm is closed and never re-read"),
+        open=False,
         ruled_on=dt.date(2026, 9, 3),
         effective=dt.date(2026, 9, 3),
         doc="claude/Phase3C_Rulings_2026-09-03.md",
@@ -259,7 +270,12 @@ RULINGS = {
             "close (BBWI 2026-10-13) had been carried by a later log; it was "
             "verified 2026-10-14 against that log (BBWI 18.00 = 18.00), so the "
             "reading stands. The exit re-read goes through read_protection() "
-            "(DP-3C-bb) and is recorded as instrument 'DP-3C-w@exit'."
+            "(DP-3C-bb) and is recorded as instrument 'DP-3C-w@exit'. "
+            # status updated 2026-11-10 (F-1, claude/Phase4a_MonitoringReview_2026-11-09.md)
+            "STATUS UPDATED 2026-11-10: the entry still read 'DISCOVERY QUARANTINED; "
+            "PROSPECTIVE ARM OPEN' (open=True) after the exit read; it now carries the "
+            "recorded disposition (logs/exit_readings.json, commit 683b6e1). Display "
+            "only: no tool gates on this entry's open flag."
         ),
     ),
     "H4": dict(
@@ -574,18 +590,27 @@ RULINGS = {
     "DP-3C-av": dict(
         dp="DP-3C-av",
         question="per-account executability (DP-3C-u revisit condition, met 2026-09-16)",
-        status="PRE-REGISTERED — per-account episode counts only; read ONCE at the Phase 3-C exit, descriptive, >= 10 resolved episodes per account",
-        open=True, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
+        status=("READ AT THE EXIT 2026-11-07 (recorded, final; DP-3C-bq): descriptive — "
+                "Roth IRA 7/15 resolved episodes; Individual not readable (8 of the 10 needed)"),
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25), doc="claude/Phase3C_Rulings_2026-09-25.md",
         bar="descriptive only (DP-3C-l standard NONE); never pooled across accounts",
+        note=("STATUS UPDATED 2026-11-10 (F-1, claude/Phase4a_MonitoringReview_2026-11-09.md): "
+              "the entry still read 'PRE-REGISTERED - per-account episode counts only; read "
+              "ONCE at the Phase 3-C exit' (open=True) after the exit read; it now carries the "
+              "recorded reading 'DP-3C-av@exit' (logs/exit_readings.json, commit 683b6e1)."),
     ),
     "DP-3C-aw": dict(
         dp="DP-3C-aw",
         question="re-basing the damper's trailing move (owed since 2026-09-17)",
-        status="PRE-REGISTERED — lands only after the Phase 3-C exit (DP-3C-ai); nothing changes before it",
-        open=True, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25),
+        status=("ADOPTED by DP-3C-bs (2026-11-07), effective at the first Phase 4b go-live; "
+                "until then a shadow only (damper_rebase_table.py --since/--through)"),
+        open=False, ruled_on=dt.date(2026, 9, 25), effective=dt.date(2026, 9, 25),
         doc="claude/Phase3C_Rulings_2026-09-25.md",
         bar=("adopt only if the before/after table (every D2 row; WMT 2026-07-23..08-26 "
              "window shown separately) is presented at the exit review and ruled on"),
+        note=("STATUS UPDATED 2026-11-10 (F-1, claude/Phase4a_MonitoringReview_2026-11-09.md): "
+              "the entry still read 'PRE-REGISTERED - lands only after the Phase 3-C exit' "
+              "(open=True) after the table was presented and ruled on at the exit (DP-3C-bs)."),
     ),
     "DP-3C-ax": dict(
         dp="DP-3C-ax",
