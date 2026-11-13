@@ -131,6 +131,7 @@ WATCHLIST_SCOUT = [
     "KRE",
     "VXUS",
     "SPCX",
+    "WMT",
     #  Cleaned up watchlist on 2026-10-22 with the aim to remove broken thesis tickers and to add new thesis sector gaps and flavorful ETFs
     #
     # WATCHLIST ERA W2 FROM 2026-11-09 (DP-3C-bk, deferred whole to the Phase 3-C exit and
@@ -150,6 +151,11 @@ WATCHLIST_SCOUT = [
     #     while volatile; thesis intact; kept in the run to watch for re-entry. A HELD ->
     #     SCOUT transition: the run stays at the same 30 names, so cohort membership is
     #     unchanged and no outcome cell goes UNGUARDED. Recorded in the decision journal.
+    #   ADDED to the scout list 2026-11-12: WMT (Rob, 2026-11-12 19:07 CT: "I exited WMT in the
+    #     roth and individual account so it needs to be added to the watchlist"). Sold from both
+    #     accounts after the 2026-11-12 morning run (HOLD 58). Another HELD -> SCOUT transition:
+    #     the run stays at 30 names. WMT is also a G1 / WS2 tracer (h1_lag_trace_WMT), so keeping
+    #     it in the run keeps that series unbroken. The reason goes in the decision journal.
     #
     # ---- HISTORY, ERA W1 (kept: this block is the watchlist's only written record) ----
     # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
