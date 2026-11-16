@@ -632,6 +632,12 @@ def load_cik_map(caches=None):
                 mapping[str(row["ticker"]).upper()] = str(row["cik_str"]).zfill(10)
             except (KeyError, TypeError):
                 continue
+        # ADDED 2026-11-16: SEC spells class shares with a hyphen ("BRK-B");
+        # the repo's ticker is the dot form ("BRK.B", see schwab_client's
+        # CLASS-SHARE SYMBOLS). Add the dot spelling as an alias; never
+        # overwrite a ticker SEC already lists.
+        for k in [k for k in mapping if "-" in k]:
+            mapping.setdefault(k.replace("-", "."), mapping[k])
     else:
         log.warning("[EDGAR] CIK map unavailable — every ticker degrades to "
                     "no-EDGAR this run.")

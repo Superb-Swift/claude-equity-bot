@@ -15,9 +15,35 @@
 # =============================================================================
 
 import os
+import re
 import schwab
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+
+# CLASS-SHARE SYMBOLS (ADDED 2026-11-16). Schwab spells a class share with a
+# slash ("BRK/B"). Every log parser in this repo, Finnhub, and the SEC alias in
+# edgar_client read the dot form ("BRK.B"), so the repo's ticker is the dot form
+# and only Schwab requests see the slash. schwab-py's get_quote() puts the
+# symbol in the URL path, where "BRK/B" became /marketdata/v1/BRK/B/quotes and
+# 404'd on 2026-11-16; class shares therefore go through get_quotes(), which
+# sends the symbol as a query value. Only the one-letter class pattern below is
+# translated, so no existing name's request changes.
+_CLASS_SHARE_DOT = re.compile(r"^[A-Z]{1,5}\.[A-Z]$")
+_CLASS_SHARE_SLASH = re.compile(r"^[A-Z]{1,5}/[A-Z]$")
+
+
+def schwab_symbol(ticker):
+    """Repo ticker -> Schwab symbol ("BRK.B" -> "BRK/B"); anything else unchanged."""
+    if isinstance(ticker, str) and _CLASS_SHARE_DOT.match(ticker):
+        return ticker.replace(".", "/")
+    return ticker
+
+
+def repo_symbol(symbol):
+    """Schwab symbol -> repo ticker ("BRK/B" -> "BRK.B"); anything else unchanged."""
+    if isinstance(symbol, str) and _CLASS_SHARE_SLASH.match(symbol):
+        return symbol.replace("/", ".")
+    return symbol
 
 # H1 WINDOW FIX (proposed 2026-08-26): Schwab stamps daily candles in a
 # zone east of this machine. Converting with local-time fromtimestamp()
@@ -117,10 +143,16 @@ def get_quote(ticker: str) -> dict:
     """
     try:
         client = get_client()
-        response = client.get_quote(ticker)
+        sym = schwab_symbol(ticker)
+        if sym != ticker:
+            # Class share: the multi-symbol endpoint takes the slash as a
+            # query value (see CLASS-SHARE SYMBOLS above).
+            response = client.get_quotes([sym])
+        else:
+            response = client.get_quote(ticker)
         data = response.json()
 
-        ticker_block = data.get(ticker, {})
+        ticker_block = data.get(sym, {}) or data.get(ticker, {})
         quote        = ticker_block.get("quote", {})
         fundamental  = ticker_block.get("fundamental", {})
         reference    = ticker_block.get("reference", {})
@@ -216,7 +248,7 @@ def get_price_history(ticker: str, days: int = 5) -> list:
     try:
         client = get_client()
         # schwab-py daily-candle convenience method (returns ~1y of candles).
-        response = client.get_price_history_every_day(ticker)
+        response = client.get_price_history_every_day(schwab_symbol(ticker))
         candles = response.json().get("candles", [])
 
         today = datetime.now(_MARKET_TZ).date()
@@ -340,6 +372,16 @@ def get_account_portfolio(account_number: str, account_hash: str) -> dict:
     try:
         balances  = account_data["securitiesAccount"]["currentBalances"]
         positions = account_data["securitiesAccount"].get("positions", [])
+
+        # Class shares arrive as "BRK/B"; every consumer (main.py, risk_engine,
+        # extract_held_tickers, get_position_detail) compares against the repo
+        # ticker "BRK.B". Rewrite once here and keep Schwab's spelling beside it.
+        for p in positions:
+            ins = p.get("instrument") or {}
+            s = ins.get("symbol")
+            if s and repo_symbol(s) != s:
+                ins["schwab_symbol"] = s
+                ins["symbol"] = repo_symbol(s)
 
         return {
             "account_number"  : account_number,

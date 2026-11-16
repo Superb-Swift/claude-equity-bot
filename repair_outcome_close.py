@@ -221,7 +221,9 @@ def fetch_daily_closes(ticker, quiet=False):
         return {}
     try:
         client = schwab_client.get_client()
-        resp = client.get_price_history_every_day(ticker)
+        # ADDED 2026-11-16: class shares ("BRK.B") are spelled "BRK/B" at Schwab.
+        sym = getattr(schwab_client, "schwab_symbol", lambda t: t)(ticker)
+        resp = client.get_price_history_every_day(sym)
         candles = resp.json().get("candles", [])
     except Exception as e:                                    # noqa: BLE001
         print("  [schwab] fetch failed for %s: %s" % (ticker, e))

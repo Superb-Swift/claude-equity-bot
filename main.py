@@ -132,6 +132,7 @@ WATCHLIST_SCOUT = [
     "VXUS",
     "SPCX",
     "WMT",
+    "BRK.B",
     #  Cleaned up watchlist on 2026-10-22 with the aim to remove broken thesis tickers and to add new thesis sector gaps and flavorful ETFs
     #
     # WATCHLIST ERA W2 FROM 2026-11-09 (DP-3C-bk, deferred whole to the Phase 3-C exit and
@@ -156,6 +157,13 @@ WATCHLIST_SCOUT = [
     #     accounts after the 2026-11-12 morning run (HOLD 58). Another HELD -> SCOUT transition:
     #     the run stays at 30 names. WMT is also a G1 / WS2 tracer (h1_lag_trace_WMT), so keeping
     #     it in the run keeps that series unbroken. The reason goes in the decision journal.
+    #   ADDED to the scout list 2026-11-16: BRK.B (Rob). A NEW name, so this is a population
+    #     change: on its first written session the scan reads membership CHANGED 30 -> 31
+    #     (added BRK.B) with an S1 cold start, both expected. First entered as "BRK/B" at
+    #     09:23 CT; that run's quote request became /marketdata/v1/BRK/B/quotes, returned 404,
+    #     and the row was dropped (ROW DROPPED, a run fault, not a watchlist change). The repo
+    #     spells class shares with a dot, which every log parser reads; schwab_client
+    #     translates to Schwab's "BRK/B" (CLASS-SHARE SYMBOLS, 2026-11-16).
     #
     # ---- HISTORY, ERA W1 (kept: this block is the watchlist's only written record) ----
     # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
