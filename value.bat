@@ -290,6 +290,10 @@ REM  AMENDED 2026-11-18 (DP-V8; claude/DP-V8_HeadlineRate_2026-11-18.md): it als
 REM  writes valuation_cache\dgs10.json, the 10-year series the headline class now
 REM  reads (r = the yield dated before the session + 5.0%%). It must stay BEFORE
 REM  step 5. A failed FRED fetch leaves the cached series in place.
+REM  AMENDED 2026-11-18 (DP-V7 step 3): it also caches the rating-band spreads
+REM  (valuation_cache\spreads.json, ICE BofA OAS from FRED, 7 series) for panel
+REM  2e's cost of debt. Step 7 (ttm_eps) re-fetches every SEC filer ONCE on the
+REM  first run after sec_facts' slim cache moved to v6 (the credit inputs).
 echo.
 echo ### 7c. cost of equity - beta, rRF and CAPM r per name (DP-V7 step 2, context only)
 python cost_of_equity.py --date %RUNDATE% --log "%LOGFILE%"

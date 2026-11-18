@@ -88,6 +88,24 @@ DP-V8, 2026-11-18 (Rob, 13:56 CT; claude/DP-V8_HeadlineRate_2026-11-18.md): THE
     AMENDS DP-V7 step 2 above: '@beta-1' is now the headline itself, so panel
     2d prints @9%, the headline class and @own r.
 
+DP-V7 step 3, 2026-11-18 (claude/DP-V7_Step3_CapitalCredit_2026-11-18.md):
+    PANEL 2e, CAPITAL AND CREDIT -- two questions the card did not ask. CONTEXT
+    ONLY: nothing in 2e enters the class, a gate or the prompt (DP-V1).
+      credit  can operating profit carry the debt? EBIT / interest and EBITDA /
+              interest (Ch 3 s.40-42); Altman Z and its zone (Web 24A, eq.
+              24A-1); the ratings-median band, the WORSE of a return-on-capital
+              band and a debt-to-capital band against S&P's medians (Ch 5 s.45),
+              with its 5-year default rate (s.42)
+      value   does it earn its cost of capital? WACC = w_d r_d (1 - T) + w_s r_s
+              (Ch 9 s.40): r_d = rRF + the band's live spread (ICE BofA OAS),
+              r_s = own CAPM r (2d), debt at book and equity at market (s.60),
+              T = 25.5% marginal (DP-V6's statutory rate; 0 for a pass-through).
+              ROIC - WACC and EVA = (ROIC - WACC) x capital (Ch 2 s.29-30); the
+              growth hurdle WACC / (1 + WACC) (Ch 7 s.51)
+      shares  the share-count part of EPS growth: (1 + NI y/y) / (1 + EPS y/y)
+              - 1 (Brav 2005: buybacks raise EPS)
+    Bars fixed in capital_read()'s docstring before the first live run.
+
 WHAT IT DOES NOT DO
     It reads no return, breach, hit or +Nd cell. It modifies no gate, admits
     and rejects nothing, touches no workbook, no prompt, no endpoint, no
@@ -132,6 +150,12 @@ RPM_PCT = 5.0                  # DP-V7 (Rob, 2026-11-18); DP-V8: headline r = rR
 R_STEP = 2.0                   # DP-V8: the robustness grid is r -/+ 2 points (7/9/11 at r = 9)
 RRF_SERIES = os.path.join("valuation_cache", "dgs10.json")   # written by cost_of_equity.py
 RRF_STALE_DAYS = 7             # an rRF older than this before the date is a FINDING
+# DP-V7 step 3 (2026-11-18): live spreads by rating band for r_d = rRF + spread.
+# ICE BofA option-adjusted spreads on FRED; cost_of_equity.py caches them.
+SPREADS = os.path.join("valuation_cache", "spreads.json")
+SPREAD_SERIES = (("AAA", "BAMLC0A1CAAA"), ("AA", "BAMLC0A2CAA"), ("A", "BAMLC0A3CA"),
+                 ("BBB", "BAMLC0A4CBBB"), ("BB", "BAMLH0A1HYBB"), ("B", "BAMLH0A2HYB"),
+                 ("CCC", "BAMLH0A3HYC"))
 G_BASE = 3.0                   # implied_return's g
 DEMANDING_AT = 2.00            # DP-V2 memo 3.1, frozen at first run, never re-cut
 NEUTRAL_AT = 1.50
@@ -374,6 +398,30 @@ def rrf_before(series, d):
             best = (od, v)
         else:
             break
+    return best
+
+
+def load_spreads(root):
+    """valuation_cache\\spreads.json (DP-V7 step 3), or None."""
+    try:
+        with open(os.path.join(root, SPREADS), encoding="utf-8") as fh:
+            js = json.load(fh)
+        return js if isinstance(js.get("series"), dict) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def spread_before(spreads, band, d):
+    """(date, percent): the band's latest spread dated BEFORE d, the rRF rule."""
+    rows = (((spreads or {}).get("series") or {}).get(band) or {}).get("obs") or []
+    best = None
+    for od, v in rows:
+        try:
+            od = dt.date.fromisoformat(od)
+        except (TypeError, ValueError):
+            continue
+        if od < d and (best is None or od > best[0]):
+            best = (od, float(v))
     return best
 
 
@@ -668,6 +716,141 @@ def dividend_implied_g(yield_pct, r=R_BASE):
         return None
     y, rr = yield_pct / 100.0, r / 100.0
     return (rr - y) / (1.0 + y) * 100.0
+
+
+# --------------------------------------------------------------------------- #
+# DP-V7 step 3 (2026-11-18): capital and credit. Context only.
+# --------------------------------------------------------------------------- #
+
+MIN_ABS_EPS = 0.05             # a 12-month EPS closer to zero gives no share count
+WACC_TAX = 0.255               # marginal rate: DP-V6's ruled statutory rate (Rob, 2026-10-30)
+
+
+def capital_read(fu, px, cn, rrf_pct, spreads, d, mb=None, bank=False):
+    """Panel 2e for one name, from the under-the-hood facts `fu` (sec_facts.
+    fundamentals: growth, balance, roic, credit), the price, the name's
+    cost-of-equity record `cn`, the headline rRF and the spread cache.
+
+    BARS (fixed 2026-11-18, before the first live run):
+      coverage   12-month EBIT (DP-V6's route) / 12-month GROSS interest expense;
+                 EBITDA coverage adds 12-month D&A. A filer tagging only NET
+                 interest: coverage on the net expense when it is a net cost
+                 (labelled 'net'); none when it is net interest income.
+      market cap price x diluted shares, shares = 12-month net income / 12-month
+                 diluted EPS (same filer, same window); used only when |EPS| >=
+                 0.05, both have one sign and |price / EPS| >= 1 (else the price
+                 and the EPS are on different share classes: BRK.B). Fallback:
+                 the exhibit's M/B x book equity.
+      Altman Z   X1 (current assets - current liabilities) / total assets, X2
+                 retained earnings / TA, X3 EBIT / TA, X4 market cap / TOTAL
+                 liabilities (Web 24A note 5), X5 revenue / TA. Zones as Web 24A.
+      band       return on capital = 12-month EBIT / (debt + equity incl. NCI),
+                 pretax; debt to capital = debt / (debt + equity), both at book
+                 at the ROIC close (corpfin.rating_band: the worse side). Debt +
+                 equity not positive -> no band. NEGATIVE book equity (buybacks:
+                 PM, BBWI) -> book D/C is an artifact, so the band reads the ROC
+                 side alone, flagged.
+      r_d        rRF + the band's ICE BofA OAS dated before the session. No
+                 spread -> no WACC (never the course's 2016 table).
+      WACC       w_d = debt / (debt + market cap); r_s = own CAPM r; T = 25.5%,
+                 0 for a pass-through (DP-V6's tax basis). A name with no debt
+                 has WACC = r_s.
+      EVA        spread = ROIC - WACC; EVA = spread x DP-V6's average invested
+                 capital; hurdle = WACC / (1 + WACC).
+      shares     (1 + NI y/y) / (1 + EPS y/y) - 1, both defined and above -100%.
+    A bank (sector caveat) reads none of it: interest is its cost of goods."""
+    import corpfin as CF
+    out = dict(cov=None, ebitda_cov=None, z=None, zone=None, z_x5=None, roc=None, dc=None, band=None,
+               roc_band=None, dc_band=None, default_5y=None, spread=None, spread_date=None, r_d=None,
+               e_mkt=None, e_route=None, debt=None, w_d=None, r_s=None, tax=None, wacc=None, roic=None,
+               eva_spread=None, eva=None, hurdle=None, creates=None, growth_ok=None, ni_chg=None,
+               eps_chg=None, shares_chg=None, notes=[], why=None)
+    if bank:
+        out["why"] = "bank: interest is its cost of goods; coverage, Altman, band and WACC are not comparable"
+        return out
+    fu = fu or {}
+    ro, cr, bal, gr = (fu.get("roic") or {}), (fu.get("credit") or {}), (fu.get("balance") or {}), \
+        (fu.get("growth") or {})
+    ni = gr.get("net_income") or {}
+    ep = gr.get("eps") or {}
+    out.update(ni_chg=ni.get("chg"), eps_chg=ep.get("chg"))
+    if ni.get("chg") is not None and ep.get("chg") is not None and ni["chg"] > -1 and ep["chg"] > -1:
+        out["shares_chg"] = (1 + ni["chg"]) / (1 + ep["chg"]) - 1
+    ebit = ro.get("ebit")
+    if ebit is None:
+        out["why"] = ro.get("why") or cr.get("why") or "no 12-month EBIT"
+        return out
+    out["notes"] += [n for n in (cr.get("notes") or []) if not n.startswith("interest: only net")]
+    interest = cr.get("interest")
+    if interest is None and cr.get("interest_net") is not None and cr["interest_net"] < 0:
+        interest = -cr["interest_net"]                  # a net interest COST (credit balance < 0)
+        out["notes"].append("coverage on NET interest expense (%s)" % cr.get("interest_tag"))
+    elif interest is None and cr.get("interest_net") is not None:
+        out["notes"].append("net interest INCOME: no interest cost to cover")
+    out["cov"] = CF.interest_coverage(ebit, interest)
+    if out["cov"] is not None and cr.get("da") is not None:
+        out["ebitda_cov"] = (ebit + cr["da"]) / interest
+    # market cap
+    ni12, eps12 = ni.get("ttm"), ep.get("ttm")
+    if px and ni12 and eps12 and abs(eps12) >= MIN_ABS_EPS and (ni12 > 0) == (eps12 > 0) \
+            and abs(px / eps12) >= 1.0:
+        out.update(e_mkt=px * ni12 / eps12, e_route="price x (12-month NI / diluted EPS)")
+    elif mb and bal.get("equity") and bal["equity"] > 0:
+        out.update(e_mkt=mb * bal["equity"], e_route="M/B x book equity")
+    elif px and eps12 and abs(px / eps12) < 1.0:
+        out["notes"].append("market cap: price and EPS are on different share classes (|P/E| < 1)")
+    else:
+        out["notes"].append("market cap: no usable share count (no 12-month EPS, EPS near zero, or NI "
+                            "and EPS of different signs) and no M/B")
+    # Altman Z
+    ta, tl, sales = bal.get("assets"), bal.get("liabilities"), (gr.get("revenue") or {}).get("ttm")
+    ca, cl, re_ = cr.get("current_assets"), cr.get("current_liabilities"), cr.get("retained_earnings")
+    if None not in (ta, tl, sales, ca, cl, re_, out["e_mkt"]) and ta > 0 and tl > 0:
+        out["z"] = CF.altman_z(ca - cl, re_, ebit, out["e_mkt"], tl, sales, ta)
+        out["zone"] = CF.altman_zone(out["z"])
+        out["z_x5"] = sales / ta
+    # ratings band
+    debt, eq = ro.get("debt"), ro.get("equity")
+    out["debt"] = debt
+    if debt is not None and eq is not None:
+        cap = debt + eq
+        if cap > 0:
+            out.update(roc=100.0 * ebit / cap, dc=100.0 * debt / cap)
+            if eq < 0:
+                out["notes"].append("band: book equity is negative, so D/C %.0f%% is not used; ROC side alone"
+                                    % out["dc"])
+            rb = CF.rating_band(out["roc"], out["dc"] if eq >= 0 else None)
+            out.update(band=rb["band"], roc_band=rb["roc_band"], dc_band=rb["dc_band"],
+                       default_5y=rb["default_5y"])
+            out["notes"] += rb["beyond"]
+        else:
+            out["notes"].append("band: debt + equity %.1fB is not positive" % (cap / 1e9))
+    # r_d, WACC, EVA
+    if out["band"]:
+        sb = spread_before(spreads, out["band"], d)
+        if sb:
+            out.update(spread=sb[1], spread_date=str(sb[0]))
+            if rrf_pct is not None:
+                out["r_d"] = rrf_pct + sb[1]
+        else:
+            out["notes"].append("no %s spread dated before %s" % (out["band"], d))
+    out["r_s"] = (cn or {}).get("r_capm_pct")
+    out["tax"] = 0.0 if str(ro.get("tax_basis") or "").startswith("pass-through") else WACC_TAX
+    if out["e_mkt"] and out["e_mkt"] > 0 and debt is not None and out["r_s"] is not None \
+            and (out["r_d"] is not None or debt == 0):
+        w_d = debt / (debt + out["e_mkt"])
+        out["w_d"] = w_d
+        out["wacc"] = CF.wacc(w_d, out["r_d"] or 0.0, out["tax"], 0.0, 0.0, 1.0 - w_d, out["r_s"])
+    if ro.get("roic") is not None:
+        out["roic"] = 100.0 * ro["roic"]
+    if out["wacc"] is not None and out["roic"] is not None:
+        out["eva_spread"] = out["roic"] - out["wacc"]
+        out["hurdle"] = 100.0 * CF.growth_hurdle(out["wacc"] / 100.0)
+        out["creates"] = out["roic"] > out["wacc"]
+        out["growth_ok"] = out["roic"] > out["hurdle"]
+        if ro.get("ic"):
+            out["eva"] = out["eva_spread"] / 100.0 * ro["ic"]
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1278,6 +1461,67 @@ def build(date, root, log_path, quotes_path, tracker):
                         differ_own=[c["ticker"] for c in dif], differ_level=[c["ticker"] for c in dif_l])
     L.append("")
 
+    # ---- 2e. capital and credit (DP-V7 step 3) --------------------------------
+    spreads = load_spreads(root)
+    L.append("  2e. CAPITAL AND CREDIT (DP-V7 step 3) -- can it carry its debt, and does it earn its cost")
+    L.append("      of capital? CONTEXT ONLY: nothing here enters the class, a gate or the prompt.")
+    if not spreads:
+        L.append("      no %s yet: r_d and WACC need cost_of_equity.py (step 7c) online once." % SPREADS)
+    L.append("  %-5s %7s %7s %-22s %6s %6s %-14s %6s | %7s %6s %5s %-13s %6s %6s %6s %7s %7s %6s %-7s %s" % (
+        "tk", "EBIT/i", "EBITDA", "Altman Z (zone)", "ROC", "D/C", "band (ROC/DC)", "5y def", "mkt $B",
+        "debt", "w_d", "r_d (spread)", "r_s", "WACC", "ROIC", "spread", "EVA $B", "hurdle", "growth",
+        "shares y/y; note"))
+    zl = {"SAFE": "SAFE", "ZONE OF IGNORANCE": "GREY", "DISTRESS": "DISTRESS"}
+    cap_rows = []
+    for c in card:
+        t = c["ticker"]
+        u = c.get("under_hood")
+        if not u:
+            c.update(capital=None)
+            continue
+        f = rec.get(t)
+        px = f.get("px") if f else (sig[t].get("px") or (quotes.get(t) or {}).get("lastPrice"))
+        k = capital_read(u, px, coe_names.get(t), hr["rrf"], spreads, date,
+                         mb=mb_from_i9(f) if f else None,
+                         bank=str(u.get("caveat") or "").startswith("bank"))
+        c.update(capital=k)
+        cap_rows.append((t, k))
+        if k["why"]:
+            L.append("  %-5s %s" % (t, k["why"][:150]))
+            continue
+        sh = ("%+.1f%% (NI %s, EPS %s)" % (100 * k["shares_chg"], pct_s(k["ni_chg"]), pct_s(k["eps_chg"]))
+              if k["shares_chg"] is not None else "-")
+        note = "; ".join([sh] + k["notes"])
+        L.append("  %-5s %7s %7s %-22s %6s %6s %-14s %6s | %7s %6s %5s %-13s %6s %6s %6s %7s %7s %6s %-7s %s" % (
+            t, fmt(k["cov"], "{:.1f}x"), fmt(k["ebitda_cov"], "{:.1f}x"),
+            ("%.2f %s" % (k["z"], zl.get(k["zone"], ""))) if k["z"] is not None else "-",
+            fmt(k["roc"], "{:.1f}%"), fmt(k["dc"], "{:.0f}%"),
+            ("%s (%s/%s)" % (k["band"], k["roc_band"], k["dc_band"])) if k["band"] else "-",
+            fmt(k["default_5y"], "{:.2f}%"),
+            fmt(None if k["e_mkt"] is None else k["e_mkt"] / 1e9, "{:.1f}"),
+            fmt(None if k["debt"] is None else k["debt"] / 1e9, "{:.1f}"), fmt(k["w_d"], "{:.2f}"),
+            ("%.2f%% (%.2f)" % (k["r_d"], k["spread"])) if k["r_d"] is not None else "-",
+            fmt(k["r_s"], "{:.1f}%"), fmt(k["wacc"], "{:.1f}%"), fmt(k["roic"], "{:.1f}%"),
+            fmt(k["eva_spread"], "{:+.1f}"), fmt(None if k["eva"] is None else k["eva"] / 1e9, "{:+.2f}"),
+            fmt(k["hurdle"], "{:.1f}%"),
+            "-" if k["growth_ok"] is None else ("adds" if k["growth_ok"] else "DESTROYS"), note[:170]))
+    read_v = [(t, k) for t, k in cap_rows if k["wacc"] is not None and k["roic"] is not None]
+    L.append("      EBIT/i, EBITDA: 12-month EBIT (DP-V6) and EBIT + D&A over gross interest (Ch 3 s.40-42).")
+    L.append("      Altman Z: Web 24A eq. 24A-1; DISTRESS < 1.81, GREY 1.81-2.99, SAFE above; X5 (sales /")
+    L.append("      assets) carries the largest weight, so high-turnover retailers read safe by construction.")
+    L.append("      ROC: pretax EBIT / (debt + equity); D/C: debt / (debt + equity), book; band: the worse")
+    L.append("      of the two against S&P's medians (Ch 5 s.45), 5y def its default rate (s.42). Book")
+    L.append("      leverage misreads a negative-equity name (buybacks): its D/C runs past 100%.")
+    L.append("      r_d = rRF + the band's ICE BofA OAS (FRED, dated before the session). WACC = w_d r_d (1 -")
+    L.append("      25.5%) + w_s r_s at market weights, r_s = own r (2d). spread = ROIC - WACC; EVA = spread x")
+    L.append("      average capital; growth adds value only if ROIC > hurdle = WACC/(1+WACC) (Ch 7 s.51).")
+    L.append("      shares y/y = (1 + NI y/y)/(1 + EPS y/y) - 1: negative when buybacks lifted EPS.")
+    L.append("      ROIC above WACC: %d of %d read (%s). Growth below the hurdle: %s." % (
+        sum(1 for _t, k in read_v if k["creates"]), len(read_v),
+        ", ".join(t for t, k in read_v if k["creates"]) or "none",
+        ", ".join(t for t, k in read_v if not k["growth_ok"]) or "none"))
+    L.append("")
+
     # ---- 3. robustness, every classed name ---------------------------------
     L.append("-" * 100)
     L.append("3. ROBUSTNESS -- every classed name: the cost-of-equity grid on the 12-month basis")
@@ -1496,6 +1740,9 @@ def build(date, root, log_path, quotes_path, tracker):
                                         ratio_own_r=own[t]["ratio"] if own.get(t) else None,
                                         own_r_classes=own[t]["classes"] if own.get(t) else None,
                                         own_r_tag=own[t]["tag"] if own.get(t) else None) for t in rec},
+                    capital=dict(spreads=(spreads or {}).get("fetched"), read=len(read_v),
+                                 creates=[t for t, k in read_v if k["creates"]],
+                                 growth_below_hurdle=[t for t, k in read_v if not k["growth_ok"]]),
                     cost_of_equity=dict(coe_info or {}, available=bool(coe),
                                         differ_own_all=sorted(own_dif)),
                     changes=[c.strip() for c in changes],
@@ -1721,6 +1968,27 @@ def _write_sheet(ws, snap):
                  x.get("ratio_own"), "/".join(CLASS_LETTER.get(k, "-") for k in (x.get("own_classes") or [])),
                  x.get("own_tag") or "", " ".join(x.get("flags") or []),
                  ("DCF: " + dg["why"]) if dg.get("why") else ""])
+    gap()
+    put(["Capital and credit (DP-V7 step 3) -- can it carry its debt, and does it earn its cost of "
+         "capital? CONTEXT ONLY"], f_sec)
+    put(["Ticker", "EBIT / interest", "EBITDA / interest", "Altman Z", "Zone", "Return on capital %",
+         "Debt / capital %", "Band", "ROC band", "D/C band", "5-yr default %", "Market cap $B", "Debt $B",
+         "w_d", "Spread %", "r_d %", "r_s %", "WACC %", "ROIC %", "ROIC - WACC", "EVA $B", "Hurdle %",
+         "Growth adds value", "Shares y/y %", "Note"], f_hdr, fill_hdr)
+    for c in snap["card"]:
+        k = c.get("capital")
+        if not k:
+            continue
+        if k.get("why"):
+            put([c["ticker"]] + [""] * 23 + [k["why"]])
+            continue
+        put([c["ticker"], k["cov"], k["ebitda_cov"], k["z"], k["zone"] or "", k["roc"], k["dc"],
+             k["band"] or "", k["roc_band"] or "", k["dc_band"] or "", k["default_5y"],
+             None if k["e_mkt"] is None else k["e_mkt"] / 1e9, None if k["debt"] is None else k["debt"] / 1e9,
+             k["w_d"], k["spread"], k["r_d"], k["r_s"], k["wacc"], k["roic"], k["eva_spread"],
+             None if k["eva"] is None else k["eva"] / 1e9, k["hurdle"],
+             "" if k["growth_ok"] is None else ("yes" if k["growth_ok"] else "NO"),
+             _p100(k["shares_chg"]), "; ".join(k.get("notes") or [])])
     gap()
     put(["Robustness -- every classed name: the cost-of-equity grid on the 12-month basis"], f_sec)
     put(["Ticker", "Class (rRF + RPM)", "Ratio", "Last-FY class", "Last-FY ratio", "r - 2", "r",
@@ -2314,6 +2582,72 @@ def _selftest():
           ok8 and len(_dc8) == 1 and "Class (12-month, rRF + RPM)" in _dc8[0]
           and [x for x in _dc8[0] if x][-2:] == ["Class @9%", "Ratio @9%"]
           and any(str(r_[0]).startswith("CLOSED by DP-V8") for r_ in _rows8))
+    # ---- DP-V7 step 3 (2026-11-18): capital and credit ----------------------------
+    import corpfin as CF
+    md_fu = dict(growth=dict(net_income=dict(ttm=1960.0 / 31.0 * 10.0, chg=0.10), eps=dict(ttm=10.0, chg=0.15),
+                             revenue=dict(ttm=5000.0)),
+                 balance=dict(assets=3610.0, liabilities=670.0, equity=1500.0),
+                 roic=dict(ebit=400.0, debt=1000.0, equity=1500.0, roic=0.12, ic=2300.0,
+                           tax_basis="own 12-month effective rate", end="2026-06-30"),
+                 credit=dict(interest=50.0, da=100.0, current_assets=1610.0, current_liabilities=750.0,
+                             retained_earnings=1740.0, notes=[]))
+    sp_fx = {"series": {"BBB": {"obs": [["2026-10-13", 1.10], ["2026-10-14", 9.99]]}}}
+    k1 = capital_read(md_fu, 31.0, {"r_capm_pct": 10.0}, 4.00, sp_fx, dt.date(2026, 10, 14))
+    check("step 3: coverage 400/50 = 8.0x, EBITDA (400+100)/50 = 10.0x",
+          k1["cov"] == 8.0 and k1["ebitda_cov"] == 10.0 and k1["why"] is None)
+    check("step 3: Altman Z reproduces the course's MicroDrive (Web 24A: 4.465, SAFE) through the card's wiring",
+          abs(k1["z"] - CF.altman_z(860.0, 1740.0, 400.0, 1960.0, 670.0, 5000.0, 3610.0)) < 1e-9
+          and abs(k1["z"] - 4.465) < 0.001 and k1["zone"] == "SAFE"
+          and abs(k1["e_mkt"] - 1960.0) < 1e-6 and k1["e_route"].startswith("price x"))
+    check("step 3: ROC 400/2500 = 16% -> BBB, D/C 1000/2500 = 40% -> BBB; band BBB, 5y default 1.72%",
+          abs(k1["roc"] - 16.0) < 1e-12 and abs(k1["dc"] - 40.0) < 1e-12 and k1["band"] == "BBB"
+          and k1["default_5y"] == 1.72)
+    w_hand = (1000.0 / 2960.0) * 5.10 * (1 - 0.255) + (1960.0 / 2960.0) * 10.0
+    check("step 3: r_d = 4.00 + BBB 1.10 (dated BEFORE 10-14, not 10-14's 9.99); WACC by hand %.3f%%" % w_hand,
+          abs(k1["r_d"] - 5.10) < 1e-12 and k1["spread_date"] == "2026-10-13" and abs(k1["wacc"] - w_hand) < 1e-9)
+    check("step 3: ROIC 12% - WACC = spread; EVA = spread x capital; hurdle WACC/(1+WACC); both verdicts",
+          abs(k1["eva_spread"] - (12.0 - w_hand)) < 1e-9 and abs(k1["eva"] - (12.0 - w_hand) / 100 * 2300.0) < 1e-9
+          and abs(k1["hurdle"] - 100 * w_hand / 100 / (1 + w_hand / 100)) < 1e-9 and k1["creates"]
+          and k1["growth_ok"])
+    check("step 3: shares y/y = 1.10 / 1.15 - 1 = -4.35% (EPS grew faster than NI: buybacks)",
+          abs(k1["shares_chg"] - (1.10 / 1.15 - 1)) < 1e-12)
+    kb = capital_read(md_fu, 31.0, {"r_capm_pct": 10.0}, 4.00, sp_fx, dt.date(2026, 10, 14), bank=True)
+    check("NEGATIVE step 3: a bank reads none of it, and says why", kb["why"].startswith("bank") and kb["cov"] is None)
+    brk = dict(md_fu, growth=dict(md_fu["growth"], eps=dict(ttm=40000.0, chg=0.1), net_income=dict(ttm=9.0e10, chg=0.1)))
+    kk = capital_read(brk, 586.0, {"r_capm_pct": 8.0}, 4.00, sp_fx, dt.date(2026, 10, 14))
+    check("NEGATIVE step 3: price and EPS on different share classes (BRK.B) -> no market cap, no Z, no WACC",
+          kk["e_mkt"] is None and kk["z"] is None and kk["wacc"] is None
+          and any("different share classes" in n for n in kk["notes"]))
+    kn = capital_read(md_fu, 31.0, {"r_capm_pct": 10.0}, 4.00, {"series": {}}, dt.date(2026, 10, 14))
+    check("NEGATIVE step 3: no spread for the band -> no r_d and no WACC (never the 2016 table)",
+          kn["r_d"] is None and kn["wacc"] is None and any("no BBB spread" in n for n in kn["notes"]))
+    k0 = capital_read(dict(md_fu, roic=dict(md_fu["roic"], debt=0.0)), 31.0, {"r_capm_pct": 10.0}, 4.00,
+                      {"series": {}}, dt.date(2026, 10, 14))
+    check("step 3: no debt -> WACC = r_s even without a spread", k0["w_d"] == 0.0 and k0["wacc"] == 10.0)
+    kp = capital_read(dict(md_fu, roic=dict(md_fu["roic"], tax_basis="pass-through: no entity-level tax assumed")),
+                      31.0, {"r_capm_pct": 10.0}, 4.00, sp_fx, dt.date(2026, 10, 14))
+    check("step 3: a pass-through gets no tax shield in WACC (PAA)", kp["tax"] == 0.0
+          and abs(kp["wacc"] - ((1000.0 / 2960.0) * 5.10 + (1960.0 / 2960.0) * 10.0)) < 1e-9)
+    kneg = capital_read(dict(md_fu, roic=dict(md_fu["roic"], debt=100.0, equity=-300.0)), 31.0,
+                        {"r_capm_pct": 10.0}, 4.00, sp_fx, dt.date(2026, 10, 14))
+    knet = capital_read(dict(md_fu, credit=dict(md_fu["credit"], interest=None, interest_net=-50.0,
+                                                 interest_tag="InterestIncomeExpenseNonoperatingNet")),
+                        31.0, {"r_capm_pct": 10.0}, 4.00, sp_fx, dt.date(2026, 10, 14))
+    knin = capital_read(dict(md_fu, credit=dict(md_fu["credit"], interest=None, interest_net=20.0)),
+                        31.0, {"r_capm_pct": 10.0}, 4.00, sp_fx, dt.date(2026, 10, 14))
+    check("step 3: only net interest -> coverage on a net COST (8.0x, labelled); none on net INCOME (NKE)",
+          knet["cov"] == 8.0 and any("NET interest expense" in n for n in knet["notes"])
+          and knin["cov"] is None and any("net interest INCOME" in n for n in knin["notes"]))
+    kpm = capital_read(dict(md_fu, roic=dict(md_fu["roic"], debt=1000.0, equity=-200.0)), 31.0,
+                       {"r_capm_pct": 10.0}, 4.00, sp_fx, dt.date(2026, 10, 14))
+    check("step 3: negative book equity (PM) -> D/C 125% not used; the band reads ROC 50% alone (AAA)",
+          kpm["band"] == "AAA" and kpm["dc_band"] is None and abs(kpm["dc"] - 125.0) < 1e-9
+          and any("book equity is negative" in n for n in kpm["notes"]))
+    check("NEGATIVE step 3: debt + equity not positive -> no band, said so",
+          kneg["band"] is None and any("not positive" in n for n in kneg["notes"]))
+    check("step 3 e2e: 2e prints, and a v3 slim cache says why instead of guessing",
+          "2e. CAPITAL AND CREDIT (DP-V7 step 3)" in txt3 and "no valuation_cache" in txt3
+          and c3["NVDA"]["capital"]["why"] and "slim v3" in c3["NVDA"]["capital"]["why"])
     print("SELFTEST %s (%d failed)" % ("PASSED" if not fails else "FAILED", len(fails)))
     return 1 if fails else 0
 

@@ -71,7 +71,10 @@ CACHE_DIR = "valuation_cache"
 # 5 (2026-10-30, DP-V6): the ROIC inputs (ROIC_TAGS: pretax income, tax,
 #   interest, the debt components, NCI-inclusive and partners' equity). Every
 #   older cache is re-fetched once.
-SLIM_VERSION = 5
+# 6 (2026-11-18, DP-V7 step 3): the credit inputs (CREDIT_TAGS: current assets
+#   and liabilities, retained earnings, depreciation and amortization) for
+#   Altman Z and EBITDA coverage. Every older cache is re-fetched once.
+SLIM_VERSION = 6
 PERIODIC_FORMS = ("10-Q", "10-K", "10-Q/A", "10-K/A")
 RECOVERY_LOOKBACK_DAYS = 800          # two years of quarters, plus the YoY base
 
@@ -150,7 +153,15 @@ ROIC_TAGS = (PRETAX_TAGS + TAX_TAGS + INTEREST_GROSS_TAGS + INTEREST_NET_TAGS + 
 STATUTORY_TAX_RATE = 0.255
 ETR_BOUNDS = (0.0, 0.50)            # an effective rate outside this is noise, not a rate
 ROIC_YEAR_DAYS = 365                # opening capital: the balance a year before the close
-SLIM_EXTRA = (NCI_NI_TAG,) + ROIC_TAGS
+# DP-V7 step 3 (2026-11-18): Altman Z (Web 24A) and EBITDA coverage (Ch 3 s.42).
+# Reporting only (DP-V1); preference order as above, one tag per list per date.
+CURRENT_ASSETS_TAGS = ("AssetsCurrent",)
+CURRENT_LIAB_TAGS = ("LiabilitiesCurrent",)
+RETAINED_TAGS = ("RetainedEarningsAccumulatedDeficit",)
+DA_TAGS = ("DepreciationDepletionAndAmortization", "DepreciationAndAmortization",
+           "DepreciationAmortizationAndAccretionNet")
+CREDIT_TAGS = CURRENT_ASSETS_TAGS + CURRENT_LIAB_TAGS + RETAINED_TAGS + DA_TAGS
+SLIM_EXTRA = (NCI_NI_TAG,) + ROIC_TAGS + CREDIT_TAGS
 # Filers report in millions, so three independently rounded figures can
 # disagree by up to $1M without the identity being false.
 REBUILD_TOL = 1.0e6
@@ -924,6 +935,57 @@ def ttm_roic(cf, today=None):
     return out
 
 
+def credit_inputs(cf, roic, bal_end):
+    """DP-V7 step 3 (2026-11-18): the SEC inputs for coverage and Altman Z.
+
+    dict(end, interest, interest_tag, interest_net, da, da_tag, at,
+    current_assets, current_liabilities, retained_earnings, notes, why).
+      interest   12-month GROSS interest expense on the ROIC window (the same
+                 tags and preference as DP-V6); a filer tagging only NET interest
+                 gets interest_net (credit balance: positive = net income) and no
+                 gross figure, so no coverage
+      da         12-month depreciation and amortization (DA_TAGS), for EBITDA
+      balance    current assets, current liabilities and retained earnings at
+                 the balance date `bal_end` (the panel's own), one tag each
+    A pre-v6 cache has no balance or D&A tags: those read None with a note, and
+    interest (a v5 tag) still reads. Reporting only (DP-V1)."""
+    out = dict(end=None, interest=None, interest_tag=None, interest_net=None, da=None, da_tag=None,
+               at=bal_end, current_assets=None, current_liabilities=None, retained_earnings=None,
+               notes=[], why=None)
+    end = (roic or {}).get("end")
+    if not end:
+        out["why"] = (roic or {}).get("why") or "no 12-month window"
+        return out
+    end = _d(end)
+    out["end"] = str(end)
+    gi = _ttm_on(cf, INTEREST_GROSS_TAGS, end)
+    if gi:
+        out.update(interest=gi["value"], interest_tag=gi["tag"])
+    else:
+        ni_ = _ttm_on(cf, INTEREST_NET_TAGS, end)
+        if ni_:
+            out.update(interest_net=ni_["value"], interest_tag=ni_["tag"])
+            out["notes"].append("interest: only net interest is tagged (%s); no gross coverage" % ni_["tag"])
+        else:
+            out["notes"].append("interest: no 12-month interest expense tag")
+    sv = (cf or {}).get("slim_version")
+    if sv is not None and sv < 6:
+        out["notes"].append("slim v%s: Altman and EBITDA inputs after the next re-fetch (v6)" % sv)
+        return out
+    da = _ttm_on(cf, DA_TAGS, end)
+    if da:
+        out.update(da=da["value"], da_tag=da["tag"])
+    if bal_end:
+        at = _d(bal_end)
+        for key, tags in (("current_assets", CURRENT_ASSETS_TAGS), ("current_liabilities", CURRENT_LIAB_TAGS),
+                          ("retained_earnings", RETAINED_TAGS)):
+            _t, v = _first_at(cf, tags, at)
+            out[key] = v
+            if v is None:
+                out["notes"].append("%s: not tagged at %s" % (key.replace("_", " "), bal_end))
+    return out
+
+
 def roic_note(r):
     """One compact line for a card's notes column: empty for the standard read
     (operating income, own 12-month rate, average capital), else what differs."""
@@ -1083,6 +1145,9 @@ def fundamentals(cf, today):
     # DP-V6 (2026-10-30): ROIC on the same point-in-time facts; it carries its
     # own route, tax basis and reasons, and changes nothing above.
     out["roic"] = ttm_roic(cf, today)
+    # DP-V7 step 3 (2026-11-18): the credit inputs, on the ROIC window and the
+    # panel's balance date. Reporting only; changes nothing above.
+    out["credit"] = credit_inputs(cf, out["roic"], bal_end)
     return out
 
 
@@ -1558,8 +1623,9 @@ def selftest():
     check("DP-V5: a QUARTER the filer did not tag is rebuilt, counted unusual and labelled",
           abs(bq["value"] - (-7.0)) < 1e-9 and ("2026-04-01", "2026-06-30") in bq["rebuilt"]
           and qsrc and short_source(qsrc[0]) == "rebuilt (ProfitLoss minus NCI)" and bq["unusual"] >= 1)
-    check("slim cache v5 (re-fetches every older cache once: the NCI tag and the ROIC inputs)",
-          SLIM_VERSION == 5 and NCI_NI_TAG in slim_tags() and all(t in slim_tags() for t in ROIC_TAGS))
+    check("slim cache v6 (re-fetches every older cache once: NCI, ROIC and the credit inputs)",
+          SLIM_VERSION == 6 and NCI_NI_TAG in slim_tags() and all(t in slim_tags() for t in ROIC_TAGS)
+          and all(t in slim_tags() for t in CREDIT_TAGS))
     # 11. DP-V6 (2026-10-30): ROIC. Four standalone quarters to 2026-06-30, balances
     # at the close and a year earlier. Shapes are the live ones read 2026-10-30.
     q11 = [("2025-04-01", "2025-06-30"), ("2025-07-01", "2025-09-30"), ("2025-10-01", "2025-12-31"),
@@ -1658,6 +1724,27 @@ def selftest():
           rp["end"] == "2026-03-31" and rp["roic"] is None and "2026-03-31" in (rp["why"] or ""))
     check("DP-V6: fundamentals carries the ROIC read beside the panels it does not change",
           abs(fundamentals(rf(), T11)["roic"]["roic"] - 320.0 / 1700.0) < 1e-12)
+    # 12. DP-V7 step 3 (2026-11-18): the credit inputs on the ROIC window
+    cr = credit_inputs(rf(InterestExpense=flows(10.0), DepreciationDepletionAndAmortization=flows(25.0),
+                          AssetsCurrent=bal(700.0), LiabilitiesCurrent=bal(400.0),
+                          RetainedEarningsAccumulatedDeficit=bal(1200.0)), r1, "2026-06-30")
+    check("DP-V7 step 3: 12-month gross interest 40 and D&A 100; balance lines at the panel date",
+          cr["interest"] == 40.0 and cr["interest_tag"] == "InterestExpense" and cr["da"] == 100.0
+          and cr["current_assets"] == 700.0 and cr["current_liabilities"] == 400.0
+          and cr["retained_earnings"] == 1200.0 and cr["why"] is None)
+    cn_ = credit_inputs(rf(InterestIncomeExpenseNonoperatingNet=flows(5.0)), r1, "2026-06-30")
+    check("DP-V7 step 3: only NET interest tagged -> no gross figure, and it says so (NKE)",
+          cn_["interest"] is None and cn_["interest_net"] == 20.0
+          and any("only net interest" in n for n in cn_["notes"]))
+    old = rf(InterestExpense=flows(10.0), AssetsCurrent=bal(700.0))
+    old["slim_version"] = 5
+    co = credit_inputs(old, r1, "2026-06-30")
+    check("DP-V7 step 3: a v5 cache still reads interest, but not the v6 balance lines (labelled)",
+          co["interest"] == 40.0 and co["current_assets"] is None
+          and any("after the next re-fetch (v6)" in n for n in co["notes"]))
+    check("DP-V7 step 3: fundamentals carries the credit inputs; no ROIC window -> why",
+          fundamentals(rf(InterestExpense=flows(10.0)), T11)["credit"]["interest"] == 40.0
+          and credit_inputs(rf(), dict(end=None, why="x"), None)["why"] == "x")
     old_cache = dict(rf(), slim_version=4)
     check("NEGATIVE DP-V6: a pre-v5 cache (some debt tags, not all) gives no read rather than an "
           "understated debt (WMT 19.1% vs 18.1%)",

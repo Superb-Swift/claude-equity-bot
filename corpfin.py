@@ -196,6 +196,61 @@ def altman_zone(z):
     return "SAFE"
 
 
+# ---------------------------------------------------------------- credit (DP-V7 step 3)
+# Ch 5 slide 45, "Bond Ratings Median Ratios (S&P)": return on capital and debt
+# to capital, percent, best rating first. The course does not print S&P's
+# definitions [?]; the card reads return on capital PRETAX (EBIT / (debt +
+# equity)), as S&P's ratio is pretax, and debt to capital at book.
+RATING_MEDIANS = (("AAA", 27.6, 12.4), ("AA", 27.0, 28.3), ("A", 17.5, 37.5), ("BBB", 13.4, 42.5),
+                  ("BB", 11.3, 53.7), ("B", 8.7, 75.9), ("CCC", 3.2, 113.5))
+RATINGS = tuple(r for r, _roc, _dc in RATING_MEDIANS)
+# Ch 5 slide 42: percent defaulting within 1 and 5 years.
+DEFAULT_RATES = {"AAA": (0.13, 0.68), "AA": (0.00, 0.00), "A": (0.09, 0.96), "BBB": (0.07, 1.72),
+                 "BB": (0.62, 6.35), "B": (2.06, 11.68), "CCC": (21.36, 35.38)}
+# Ch 5 slide 43 (October 2016): spreads over the 10-year T-bond, percent. Shown for
+# reference ONLY: the card uses live spreads (the course says current spreads
+# must come from a live source).
+COURSE_SPREADS_2016 = {"AAA": 0.49, "AA": 0.55, "A": 0.70, "BBB": 1.74, "BB": 3.44, "B": 4.86, "CCC": 6.65}
+
+
+def interest_coverage(ebit, interest):
+    """Times interest earned = EBIT / interest expense (Ch 3 slides 40-41)."""
+    if interest is None or interest <= 0 or ebit is None:
+        return None
+    return ebit / interest
+
+
+def rating_band(roc_pct, dc_pct):
+    """The ratings-median read (Ch 5 slide 45). ROC band: the best rating whose
+    median return on capital the name meets or beats. D/C band: the best rating
+    whose median debt to capital the name is at or below. The band is the
+    WORSE of the two: credit is limited by the weaker side. Beyond CCC's median
+    on either side reads CCC, flagged 'beyond'. dict(roc_band, dc_band, band,
+    beyond, default_5y) or None when neither input is given."""
+    if roc_pct is None and dc_pct is None:
+        return None
+    beyond = []
+
+    def by_roc(x):
+        for r, roc, _dc in RATING_MEDIANS:
+            if x >= roc:
+                return r
+        beyond.append("return on capital below CCC's %.1f%% median" % RATING_MEDIANS[-1][1])
+        return "CCC"
+
+    def by_dc(x):
+        for r, _roc, dc in RATING_MEDIANS:
+            if x <= dc:
+                return r
+        beyond.append("debt to capital above CCC's %.1f%% median" % RATING_MEDIANS[-1][2])
+        return "CCC"
+    rb = by_roc(roc_pct) if roc_pct is not None else None
+    db = by_dc(dc_pct) if dc_pct is not None else None
+    band = max((b for b in (rb, db) if b), key=RATINGS.index)
+    return dict(roc_band=rb, dc_band=db, band=band, beyond=beyond,
+                default_5y=DEFAULT_RATES[band][1], default_1y=DEFAULT_RATES[band][0])
+
+
 # ---------------------------------------------------------------- options
 def norm_cdf(x):
     return 0.5 * (1 + math.erf(x / math.sqrt(2)))
@@ -295,6 +350,19 @@ def selftest():
     ok("Web24A MicroDrive Z 4.465 (text prints 4.46)", _close(z, 4.4651, 0.001), "%.4f" % z)
     ok("Web24A zone SAFE", altman_zone(z) == "SAFE")
     ok("Web24A zone edges", altman_zone(1.80) == "DISTRESS" and altman_zone(2.5) == "ZONE OF IGNORANCE")
+    # DP-V7 step 3: the ratings-median read and coverage (Ch 5 s.42, 45; Ch 3 s.40-41)
+    ok("Ch5 s.45 BBB medians (13.4%, 42.5%) read BBB on both sides",
+       rating_band(13.4, 42.5)["band"] == "BBB" and rating_band(13.4, 42.5)["roc_band"] == "BBB"
+       and rating_band(13.4, 42.5)["dc_band"] == "BBB")
+    rb_ = rating_band(20.0, 60.0)
+    ok("Ch5 ratings band is the WORSE side: ROC 20% -> A, D/C 60% -> B, band B",
+       rb_["roc_band"] == "A" and rb_["dc_band"] == "B" and rb_["band"] == "B" and rb_["default_5y"] == 11.68)
+    ok("Ch5 beyond CCC's medians reads CCC, flagged", rating_band(1.0, 150.0)["band"] == "CCC"
+       and len(rating_band(1.0, 150.0)["beyond"]) == 2 and rating_band(30.0, 10.0)["band"] == "AAA")
+    ok("Ch5 s.42 5-year default rates (BBB 1.72%, CCC 35.38%)",
+       DEFAULT_RATES["BBB"][1] == 1.72 and DEFAULT_RATES["CCC"][1] == 35.38)
+    ok("Ch3 coverage 8x; no interest gives no ratio", interest_coverage(80.0, 10.0) == 8.0
+       and interest_coverage(80.0, 0) is None and rating_band(None, None) is None)
 
     # Ch 8 Build-a-Model P08: P 65, X 70, t 0.5, rRF 5%, sigma 0.5
     c, p, nd1, nd2 = black_scholes(65, 70, 0.5, .05, .5)

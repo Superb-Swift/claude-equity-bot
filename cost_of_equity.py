@@ -48,6 +48,13 @@ BARS - fixed here on 2026-11-18, before the first run (DP-V7)
                  valuation_cache\\dgs10.json; a failed fetch reads the cache
                  (a FINDING). The $TNX fallback is REMOVED: a live quote is not
                  a yield dated before the session.
+      spreads    ADDED 2026-11-18 (DP-V7 step 3): ICE BofA option-adjusted
+                 spreads on FRED, one series per rating band (value_card.
+                 SPREAD_SERIES: AAA BAMLC0A1CAAA ... CCC BAMLH0A3HYC), cached in
+                 valuation_cache\\spreads.json, read by the rRF rule (latest
+                 dated before the session). They feed panel 2e's r_d = rRF +
+                 spread. A series that fails keeps its cached copy (FINDING);
+                 no series -> no r_d, never the course's October-2016 table.
       CAPM r     rRF + adjusted beta x RPM, in percent.
       95% CI     the raw beta's +/- 1.96 SE carried through Blume (x 0.67) and
                  RPM: half-width = 5.0 x 0.67 x 1.96 x SE points of r.
@@ -133,16 +140,60 @@ def parse_fred_series(text, since=SERIES_FROM):
     return sorted(out.items())
 
 
-def fetch_fred_text(timeout=20):
+def fred_url(series_id="DGS10"):
+    return FRED_URL.replace("id=DGS10", "id=" + series_id)
+
+
+def fetch_fred_text(timeout=20, series_id="DGS10"):
+    url = fred_url(series_id)
     try:
         import requests
     except ImportError:             # pragma: no cover - beta_probe.fetch_fred's fallback
         import urllib.request
-        with urllib.request.urlopen(FRED_URL, timeout=timeout) as r:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
-    resp = requests.get(FRED_URL, timeout=timeout)
+    resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     return resp.text
+
+
+def fetch_spread_text(series_id):
+    return fetch_fred_text(series_id=series_id)
+
+
+def get_spreads(date, root, spread_text_fn=fetch_spread_text):
+    """DP-V7 step 3 (2026-11-18): the live spread for each rating band, ICE BofA
+    option-adjusted spreads on FRED (value_card.SPREAD_SERIES), the latest dated
+    BEFORE `date` -- the headline rRF's own rule. Each series that answers is
+    rewritten into valuation_cache\\spreads.json; one that does not keeps its
+    cached copy (noted). Returns ({band: {pct, date, id}}, notes)."""
+    import value_card as VC
+    cache = VC.load_spreads(root) or {}
+    series = dict(cache.get("series") or {})
+    notes = []
+    for band, sid in VC.SPREAD_SERIES:
+        try:
+            obs = parse_fred_series(spread_text_fn(sid))
+            if obs:
+                series[band] = {"id": sid, "obs": [[str(d), v] for d, v in obs]}
+            else:
+                notes.append("%s (%s): FRED answered with no numeric row" % (band, sid))
+        except Exception as e:      # noqa: BLE001
+            notes.append("%s (%s): %s: %s%s" % (band, sid, type(e).__name__, e,
+                                               "; the cached series is used" if band in series else ""))
+    if series:
+        path = os.path.join(root, VC.SPREADS)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump({"source": "ICE BofA option-adjusted spreads via FRED", "fetched":
+                       dt.datetime.now().isoformat(timespec="seconds"), "series": series}, fh, indent=0)
+        os.replace(path + ".tmp", path)
+    got = VC.load_spreads(root)
+    out = {}
+    for band, sid in VC.SPREAD_SERIES:
+        b = VC.spread_before(got, band, date)
+        out[band] = {"pct": b[1], "date": str(b[0]), "id": sid} if b else {"pct": None, "date": None, "id": sid}
+    return out, notes
 
 
 def series_path(root):
@@ -272,7 +323,7 @@ def tickers_from_log(path):
 
 
 def build(date, today, tickers, root, refresh=False, fetch_fn=None, fred_text_fn=fetch_fred_text,
-          log=print):
+          log=print, spread_text_fn=fetch_spread_text):
     """Returns (result dict, findings, cache_written) or raises SystemExit((msg, 2))."""
     fetch_fn = fetch_fn or BP.fetch_all
     want = sorted(set(tickers) | {BP.MARKET})
@@ -305,6 +356,13 @@ def build(date, today, tickers, root, refresh=False, fetch_fn=None, fred_text_fn
     if BP.MARKET not in betas:
         raise SystemExit(("no %s beta in the cache or the fetch" % BP.MARKET, 2))
     rrf = get_rrf(date, root, fred_text_fn)
+    spreads, spread_notes = get_spreads(date, root, spread_text_fn)
+    for n in spread_notes:
+        findings.append("spread " + n)
+    missing = [b for b, x in spreads.items() if x["pct"] is None]
+    if missing:
+        findings.append("no spread dated before %s for %s: WACC reads no r_d for those bands" % (
+            date, ", ".join(missing)))
     if rrf["pct"] is None:
         findings.append("no rRF (%s): no CAPM r, and the value card's headline class is NO READ (DP-V8)"
                         % rrf["why"])
@@ -330,6 +388,7 @@ def build(date, today, tickers, root, refresh=False, fetch_fn=None, fred_text_fn
             names[t] = {"r_capm_pct": None, "flags": [], "why": "no beta: %s" % errors.get(t, "no candles")}
     mkt = CF.capm(rrf["pct"], RPM_PCT, 1.0) if rrf["pct"] is not None else None
     res = {"coe_version": COE_VERSION, "date": str(date), "rpm_pct": RPM_PCT, "rrf": rrf, "mkt_r_pct": mkt,
+           "spreads": spreads,
            "rrf_for_9pct": 9.0 - RPM_PCT, "beta_source": src, "bars": dict(bars(), rpm_pct=RPM_PCT,
            rrf_stale_days=RRF_STALE_DAYS, beta_max_age_days=BETA_MAX_AGE_DAYS, wide_half_pp=WIDE_HALF_PP),
            "feed_sanity": fs, "fetch_errors": errors, "names": names, "findings": findings}
@@ -363,6 +422,10 @@ def render_md(res):
     if src.get("note"):
         L.append("       " + src["note"])
     L.append("method: %s; 2y daily primary, 3y weekly cross-check (beta_probe.name_betas)" % CF.BLUME_LABEL)
+    sp = res.get("spreads") or {}
+    if sp:
+        L.append("spreads (ICE BofA OAS, FRED, latest before the date; DP-V7 step 3): " + "  ".join(
+            "%s %s" % (b, _f(x.get("pct"), "%.2f%%")) for b, x in sp.items()))
     L.append("feed sanity: SPY on itself %s; VTI %s (beta %s, R^2 %s)" % (
         fs["spy_self"], fs["vti"], _f(fs.get("vti_beta"), "%.3f"), _f(fs.get("vti_r2"), "%.2f")))
     L.append("")
@@ -396,7 +459,8 @@ def render_md(res):
     return "# cost_of_equity exhibit\n\n```\n" + "\n".join(L) + "\n```\n"
 
 
-def run(args, log=print, fetch_fn=None, fred_text_fn=fetch_fred_text, today=None):
+def run(args, log=print, fetch_fn=None, fred_text_fn=fetch_fred_text, today=None,
+        spread_text_fn=fetch_spread_text):
     today = today or BP.market_today()
     date = dt.date.fromisoformat(args.date) if args.date else today
     if date > today:
@@ -418,7 +482,7 @@ def run(args, log=print, fetch_fn=None, fred_text_fn=fetch_fred_text, today=None
             return 2
     try:
         res, findings, wrote = build(date, today, tickers, args.root, args.refresh, fetch_fn,
-                                     fred_text_fn, log)
+                                     fred_text_fn, log, spread_text_fn)
     except SystemExit as e:
         msg = e.code[0] if isinstance(e.code, tuple) else str(e.code)
         log("COULD NOT RUN: %s" % msg)
@@ -559,6 +623,8 @@ def selftest():
         for t in errs:
             out[t] = []
         return None, out, errs
+    def fake_spreads(sid):                    # never the network in a selftest
+        return "observation_date,%s\n2026-11-13,1.00\n2026-11-17,1.01\n2026-11-18,1.50\n" % sid
     root = tempfile.mkdtemp(prefix="coe_selftest_")
     try:
         os.makedirs(os.path.join(root, "logs"))
@@ -569,7 +635,7 @@ def selftest():
                          "Risk: APPROVED | Reason: x | H1[]\n" % t)
         ns = argparse.Namespace(date="2026-11-18", log=logp, tickers=None, root=root, refresh=False, out=None)
         quiet = []
-        rc1 = run(ns, quiet.append, fake_fetch, lambda: csv_a, today=today)
+        rc1 = run(ns, quiet.append, fake_fetch, lambda: csv_a, today=today, spread_text_fn=fake_spreads)
         with open(os.path.join(root, "cost_of_equity_2026-11-18.json"), encoding="utf-8") as fh:
             j = json.load(fh)
         aaa = j["names"]["AAA"]
@@ -587,12 +653,31 @@ def selftest():
            all(k in j for k in ("rrf", "mkt_r_pct", "rpm_pct", "names")) and abs(j["mkt_r_pct"] - 10.12) < 1e-12
            and all(k in aaa for k in ("r_capm_pct", "r_ci_pct", "flags", "beta_adj", "beta_raw", "se", "r2", "n")))
         ok("e2e: today's run writes the cache", os.path.exists(cache_path(root)))
+        ok("e2e (step 3): every band's spread is the latest dated before 11-18 (1.01, not 11-18's 1.50)",
+           all(x["pct"] == 1.01 and x["date"] == "2026-11-17" for x in j["spreads"].values())
+           and len(j["spreads"]) == 7 and j["spreads"]["BBB"]["id"] == "BAMLC0A4CBBB")
+
+        def half_down(sid):
+            if sid == "BAMLC0A4CBBB":
+                raise OSError("blocked")
+            return fake_spreads(sid)
+        sp2, n2 = get_spreads(today, root, half_down)
+        ok("step 3: a series that fails keeps its cached copy, and says so",
+           sp2["BBB"]["pct"] == 1.01 and any("BBB" in x and "cached series is used" in x for x in n2))
+        empty_sp = tempfile.mkdtemp(prefix="coe_sp0_")
+
+        def all_down(sid):
+            raise OSError("blocked")
+        sp3, n3 = get_spreads(today, empty_sp, all_down)
+        ok("NEGATIVE step 3: no series and no cache -> no spread for any band", all(
+            x["pct"] is None for x in sp3.values()) and len(n3) == 7)
+        shutil.rmtree(empty_sp, ignore_errors=True)
         with open(os.path.join(root, "cost_of_equity_2026-11-18.md"), encoding="utf-8") as fh:
             md = fh.read()
         ok("e2e: the exhibit states the rRF, the 9% identity and the method",
            "rRF 5.12% (FRED DGS10, observed 2026-11-16)" in md and "rRF 4.00%" in md and "Blume 0.67" in md
            and os.path.exists(series_path(root)))
-        rc2 = run(ns, quiet.append, fake_fetch, lambda: csv_a, today=today)
+        rc2 = run(ns, quiet.append, fake_fetch, lambda: csv_a, today=today, spread_text_fn=fake_spreads)
         with open(os.path.join(root, "cost_of_equity_2026-11-18.json"), encoding="utf-8") as fh:
             j2 = json.load(fh)
         ok("e2e: a second run the same day reuses the cache (no fetch), same r",
@@ -600,7 +685,7 @@ def selftest():
            and abs(j2["names"]["AAA"]["r_capm_pct"] - aaa["r_capm_pct"]) < 1e-12)
         mtime = os.path.getmtime(cache_path(root))
         ns_past = argparse.Namespace(date="2026-11-10", log=logp, tickers=None, root=root, refresh=False, out=None)
-        rc3 = run(ns_past, quiet.append, fake_fetch, lambda: csv_a, today=today)
+        rc3 = run(ns_past, quiet.append, fake_fetch, lambda: csv_a, today=today, spread_text_fn=fake_spreads)
         with open(os.path.join(root, "cost_of_equity_2026-11-10.json"), encoding="utf-8") as fh:
             j3 = json.load(fh)
         ok("e2e: a PAST date refuses the later cache, fetches candles before it, writes no cache",
@@ -609,7 +694,7 @@ def selftest():
         ok("e2e: the past date finds no yield dated before 11-10 in the series (it starts 11-13): none",
            j3["rrf"]["pct"] is None and "dated before 2026-11-10" in j3["rrf"]["why"])
         ns_ref = argparse.Namespace(date="2026-11-18", log=logp, tickers=None, root=root, refresh=True, out=None)
-        run(ns_ref, quiet.append, fake_fetch, lambda: csv_a, today=today)
+        run(ns_ref, quiet.append, fake_fetch, lambda: csv_a, today=today, spread_text_fn=fake_spreads)
         ok("e2e: --refresh fetches even with a fresh cache", len(calls) == 3)
 
         def no_spy(tickers, asof, log):
@@ -617,21 +702,21 @@ def selftest():
         nos = argparse.Namespace(date="2026-11-18", log=logp, tickers=None, root=root, refresh=True,
                                  out=os.path.join(root, "nospy"))
         ok("NEGATIVE: no SPY history -> exit 2, nothing written",
-           run(nos, quiet.append, no_spy, lambda: csv_a, today=today) == 2
+           run(nos, quiet.append, no_spy, lambda: csv_a, today=today, spread_text_fn=fake_spreads) == 2
            and not os.path.exists(os.path.join(root, "nospy.md")))
         nolog = argparse.Namespace(date="2026-11-18", log=os.path.join(root, "none.log"), tickers=None,
                                    root=root, refresh=False, out=None)
         ok("NEGATIVE: no signals log -> exit 2", run(nolog, quiet.append, fake_fetch, lambda: csv_a,
-                                                    today=today) == 2)
+                                                    today=today, spread_text_fn=fake_spreads) == 2)
         fut = argparse.Namespace(date="2026-11-19", log=logp, tickers=None, root=root, refresh=False, out=None)
         ok("NEGATIVE: a date after today -> exit 2", run(fut, quiet.append, fake_fetch, lambda: csv_a,
-                                                        today=today) == 2)
+                                                        today=today, spread_text_fn=fake_spreads) == 2)
         shutil.copy(logp, os.path.join(root, REFUSED))     # exists and parses: only the name refuses it
         rep = argparse.Namespace(date="2026-11-18", log=os.path.join(root, REFUSED), tickers=None, root=root,
                                  refresh=False, out=None)
         said = []
         ok("NEGATIVE: the report copy is refused as an input, by name",
-           run(rep, said.append, fake_fetch, lambda: csv_a, today=today) == 2
+           run(rep, said.append, fake_fetch, lambda: csv_a, today=today, spread_text_fn=fake_spreads) == 2
            and said and said[0].startswith("REFUSED"))
     finally:
         shutil.rmtree(root, ignore_errors=True)
