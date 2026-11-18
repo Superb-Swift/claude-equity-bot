@@ -108,10 +108,14 @@ valuation_cache/
 # reference file kept beside it (a third party's figures; keep it local)
 sec_data_audit_*.md
 sec_data_audit_*.json
+reference_*.csv
 # ADDED 2026-11-18 (DP-V7): the read-only beta probe's dated outputs
 beta_probe_*.md
 beta_probe_*.json
-reference_*.csv
+# ADDED 2026-11-18 (DP-V7 step 2): the cost-of-equity exhibit and snapshot, rewritten
+# by value.bat step 7c. Its beta cache lives in valuation_cache/ (ignored above).
+cost_of_equity_*.md
+cost_of_equity_*.json
 # 2026-10-27: console captures of a day's run hold account positions and
 # balances. They stay local (logs\ is ignored as well).
 docs/TODAYS RUN*.txt

@@ -52,6 +52,24 @@ DP-V4 (2026-10-24, claude/DP-V4_ValueCard_TTM_2026-10-24.md): THE CLASS
     list (hood_notes) and one +/-300% cap. Display only: the class, its
     robustness and the DP-V2 ledger are unchanged.
 
+DP-V7 step 2, 2026-11-18 (claude/DP-V7_Step2_CostOfEquity_2026-11-18.md): A
+    COST OF EQUITY PER NAME, BESIDE THE 9% CLASS. The 9% is the SML rate of a
+    beta-1.0 stock only when rRF + RPM = 9% (Ch 6 slide 59: 4% + 5%).
+    cost_of_equity.py (value.bat step 7c) writes each name's CAPM r = rRF +
+    adjusted beta x 5.0% (Rob, 2026-11-18). The card prints, CONTEXT ONLY:
+      decision card  '@own r': the class at that r (* where it differs from 9%)
+      2d             beta, r CAPM and its 95% CI; the course's second estimate,
+                     dividend growth r = D1/P0 + g with g = (1 - payout) x ROE
+                     (Ch 9 slides 21-28) on the class's own 12-month ROE, defined
+                     only where g < the CAPM r (Ch 7 slide 62); and the class at
+                     9%, at the beta-1.0 r (the rate LEVEL alone) and at own r
+                     (level plus BETA), so the two effects read separately
+      3              the class across own r -2 / own r / own r +2
+    Own r is the CAPM r alone (the bar is in cost_of_equity.py's header). The
+    headline class, its 7/9/11% robustness, the DP-V2 gate and its ledger are
+    unchanged: moving the class off 9% is class-affecting and needs a ruling.
+    A missing cost_of_equity_<date>.json prints 'not available', never a guess.
+
 WHAT IT DOES NOT DO
     It reads no return, breach, hit or +Nd cell. It modifies no gate, admits
     and rejects nothing, touches no workbook, no prompt, no endpoint, no
@@ -101,6 +119,7 @@ DPV2_MIN_ROWS, DPV2_MIN_TICKERS = 12, 3
 INSTALLED = dt.date(2026, 10, 14)      # rows on or before this are BACKFILLED
 DPV4_ON = dt.date(2026, 10, 24)        # DP-V4: the class reads 12-month ROE; earlier rows REBUILT
 EDGE_BORDERLINE = 0.05                 # a ratio this close to a line can cross on a 2-3% price move
+OWN_R_STEP = 2.0                       # DP-V7 step 2: own r +/- 2 points, as 7/9/11 is 9 +/- 2
 CLASS_LETTER = {"DEMANDING": "D", "NEUTRAL": "N", "UNDEMANDING": "U", "NO READ": "-"}
 # The identity is checked against the ROUNDING of the printed inputs (px, BVPS,
 # ROE% and the ratio are all printed to 2dp), so SND's 0.51% ROE gets the wide
@@ -290,6 +309,98 @@ def g_implied_pct(roe_pct, mb, r=R_BASE):
         return None
     g = (mb * rs - roe) / den
     return None if g >= rs else g * 100.0
+
+
+# --------------------------------------------------------------------------- #
+# DP-V7 step 2 (2026-11-18): the class at the name's own cost of equity.
+# Context only: nothing below feeds klass(f["ratio"]), robustness(), the DP-V2
+# gate or its ledger.
+# --------------------------------------------------------------------------- #
+
+def mb_from_i9(f):
+    """M/B backed out of the exhibit's implied ROE at 9% (inverting implied_roe),
+    so ratio_at(f, 9) IS the headline ratio i9 / ROE. The printed i9 carries more
+    digits than the printed M/B (SND: 7.64% against 0.81x), so this is also the
+    more precise M/B. Falls back to the printed M/B when i9 is absent."""
+    i9 = f.get("i9")
+    if i9 is None:
+        return f.get("mb")
+    return (i9 * (1.0 + G_BASE / 100.0) - G_BASE) / (R_BASE - G_BASE)
+
+
+def ratio_at(f, r):
+    """The class ratio at rate r (percent) on the card's own inputs: implied
+    ROE at r from the exhibit's M/B (mb_from_i9), over the 12-month ROE. At r = 9
+    this equals the headline ratio. None where r is not above g (the
+    constant-growth value is not finite) or an input is missing."""
+    if f is None or r is None or r <= G_BASE:
+        return None
+    mb, roe = mb_from_i9(f), f.get("roe")
+    if mb is None or mb <= 0 or roe is None or roe <= 0:
+        return None
+    return implied_roe(mb, r) / roe
+
+
+def own_r_read(f, cn, mkt_r=None):
+    """The class at the name's own CAPM r (cost_of_equity.py's record `cn`), the
+    own r -/+ 2 grid around it, and the class at the beta-1.0 r (`mkt_r`, rRF +
+    RPM) so the move from 9% splits into the rate LEVEL and the name's BETA.
+    None when there is no CAPM r for the name."""
+    if not cn or cn.get("r_capm_pct") is None:
+        return None
+    r = cn["r_capm_pct"]
+    grid = [ratio_at(f, r + d) for d in (-OWN_R_STEP, 0.0, OWN_R_STEP)]
+    classes = [klass(x) for x in grid]
+    base = classes[1]
+    mkt = ratio_at(f, mkt_r)
+    return dict(r=r, ratio=grid[1], cls=base, grid=grid, classes=classes,
+                tag=("ROBUST" if len(set(classes)) == 1 and base != "NO READ"
+                     else ("—" if base == "NO READ" else "FRAGILE")),
+                ratio_mkt=mkt, cls_mkt=klass(mkt), flags=list(cn.get("flags") or []),
+                ci=cn.get("r_ci_pct"))
+
+
+def dividend_growth_r(q, eps12, roe_pct, r_capm):
+    """The course's second estimate (Ch 9 slides 21, 25-28): r = D1/P0 + g, with
+    the earnings retention model g = (1 - payout) x ROE. Payout is Schwab's
+    dividend per share (divYield x lastPrice) over the SEC 12-month EPS; ROE is
+    the class's own 12-month ROE. The constant-growth model needs g < rs (Ch 7
+    slide 62), tested against the independent CAPM rs (testing it against the
+    DCF r itself would be circular: D1/P0 + g always exceeds g). Dividends only:
+    buybacks count as retention here, so g reads high for heavy repurchasers
+    [?]. Returns dict(r, g, payout, y, why), percent; r is None with a why."""
+    q = q or {}
+    y, px = q.get("divYield"), q.get("lastPrice")
+    out = dict(r=None, g=None, payout=None, y=y, why=None)
+    if q.get("is_etf"):
+        out["why"] = "fund: no company earnings"
+    elif not y or y <= 0:
+        out["why"] = "pays no dividend"
+    elif not px or px <= 0:
+        out["why"] = "no Schwab price for the dividend"
+    elif eps12 is None or eps12 <= 0:
+        out["why"] = "no positive 12-month EPS"
+    elif roe_pct is None or roe_pct <= 0:
+        out["why"] = "no positive 12-month ROE"
+    if out["why"]:
+        return out
+    import corpfin as CF
+    dps = y / 100.0 * px
+    payout = dps / eps12
+    out["payout"] = payout
+    if payout >= 1.0:
+        out["why"] = "payout %.0f%% of 12-month EPS: retention is negative" % (100 * payout)
+        return out
+    g = CF.retention_growth(roe_pct / 100.0, payout) * 100.0
+    out["g"] = g
+    if r_capm is None:
+        out["why"] = "no CAPM r to test g < rs against"
+    elif g >= r_capm:
+        out["why"] = ("retention g %.1f%% is not below the CAPM r %.1f%%: not a constant "
+                      "growth rate (gL < rs, Ch 7 s.62)" % (g, r_capm))
+    else:
+        out["r"] = CF.cost_of_equity_dcf(dps, px, g / 100.0) * 100.0
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -615,9 +726,12 @@ def load_context(root, date):
     them before this step. Missing files mean '—', never a guess.
     AMENDED 2026-10-24 (DP-V4): the CLASS now reads 12-month ROE itself, from
     valuation_cache\\ (TTMBasis); these two files remain context: the notes,
-    the report date, and the calendar's adjusted consensus (section 2c)."""
+    the report date, and the calendar's adjusted consensus (section 2c).
+    AMENDED 2026-11-18 (DP-V7 step 2): also cost_of_equity_<date>.json
+    (cost_of_equity.py, value.bat step 7c), the per-name CAPM r. Context only."""
     out = {}
-    for key, name in (("ttm", "ttm_eps_%s.json"), ("earn", "earnings_calendar_%s.json")):
+    for key, name in (("ttm", "ttm_eps_%s.json"), ("earn", "earnings_calendar_%s.json"),
+                      ("coe", "cost_of_equity_%s.json")):
         path = os.path.join(root, name % date)
         try:
             with open(path, encoding="utf-8") as fh:
@@ -700,6 +814,11 @@ def build(date, root, log_path, quotes_path, tracker):
     findings = []
 
     rob = {t: robustness(f) for t, f in rec.items()}
+    # DP-V7 step 2: own r, context only (never read by rob, klass(ratio) or the ledger)
+    coe = ctx.get("coe") if isinstance(ctx.get("coe"), dict) else None
+    coe_names = (coe or {}).get("names") or {}
+    mkt_r = (coe or {}).get("mkt_r_pct")
+    own = {t: own_r_read(rec.get(t), coe_names.get(t), mkt_r) for t in set(rec) | set(sig)}
     held = sorted(t for t, s in sig.items() if s["held"])
     directional = sorted((t for t, s in sig.items() if s["signal"] in ("BUY", "SELL")),
                          key=lambda t: -sig[t]["conf"])
@@ -810,9 +929,9 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("-" * 100)
     L.append("2. DECISION CARD -- today's directionals, then held names")
     L.append("-" * 100)
-    L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-11s %6s %-11s %-18s %7s %s" % (
+    L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-11s %6s %-11s %-18s %-9s %7s %s" % (
         "tk", "held in", "today", "executability", "class (ratio)", "edge", "last-FY",
-        "P/E", "r 7-11%", "robust", "g impl", "DP-V2 gate"))
+        "P/E", "r 7-11%", "robust", "@own r", "g impl", "DP-V2 gate"))
     order = directional + [t for t in sorted(held, key=lambda t: -(rec.get(t, {}).get("ratio") or -1))
                            if t not in directional]
     card = []
@@ -843,10 +962,13 @@ def build(date, root, log_path, quotes_path, tracker):
         last_s = (rb["lastfy"] if rb and rb["lastfy"] else "—")
         if rb and rb["basis_flip"]:
             last_s = last_s + "*"
-        L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-11s %6s %-11s %-18s %7s %s" % (
+        o = own.get(t)
+        own_s = "—" if o is None else "%.1f%% %s%s" % (
+            o["r"], CLASS_LETTER.get(o["cls"], "-"), "*" if o["cls"] not in (cls, "NO READ") else "")
+        L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-11s %6s %-11s %-18s %-9s %7s %s" % (
             t, (s["acct"] if s["held"] else "scout")[:20], "%s %d" % (s["signal"], s["conf"]),
             executability(s)[:24], cls_s, fmt(rb["edge"] if rb else None), last_s[:11],
-            fmt(pe12, "{:.1f}"), rng, rtag[:18],
+            fmt(pe12, "{:.1f}"), rng, rtag[:18], own_s,
             fmt(f.get("g_impl"), "{:.2f}%") if f else "—", gate_s))
         if cls == "NO READ" and why:
             L.append("  %-5s   NO READ: %s" % ("", why))
@@ -862,14 +984,20 @@ def build(date, root, log_path, quotes_path, tracker):
                          dpv2_gate=DPV2_GATE[cls] if s["signal"] == "BUY" else None,
                          dpv2_flip=dpv2_flip(cls, s["conf"]) if s["signal"] == "BUY" else None,
                          num_age_q=f.get("num_age") if f else None, no_read_reason=why or None,
-                         ttm_roe_pct=f.get("roe") if f else None, ttm_end=f.get("ttm_end") if f else None))
+                         ttm_roe_pct=f.get("roe") if f else None, ttm_end=f.get("ttm_end") if f else None,
+                         own_r=o["r"] if o else None, cls_own_r=o["cls"] if o else None,
+                         ratio_own_r=o["ratio"] if o else None, own_r_classes=o["classes"] if o else None,
+                         own_r_tag=o["tag"] if o else None, own_r_flags=o["flags"] if o else None,
+                         cls_mkt_r=o["cls_mkt"] if o else None))
     L.append("")
     L.append("  class: implied ROE at 9% over 12-month ROE. edge: distance to the nearest line")
     L.append("  (under %.2f marks EDGE: a 2-3%% price move can cross it). last-FY: the class on the" % EDGE_BORDERLINE)
     L.append("  basis used before DP-V4, for reference (* where it differs). P/E: price over 12-month")
     L.append("  diluted EPS (SEC). r 7-11%: the ratio across the cost-of-equity grid; ROBUST only")
     L.append("  if all three give one class (FRAGILE r U/N/D lists them, D/N/U = DEMANDING/NEUTRAL/")
-    L.append("  UNDEMANDING). DP-V2 gate: the PROPOSED modifier (75/70/65); NOT APPLIED.")
+    L.append("  UNDEMANDING). @own r (DP-V7 step 2): the class at the name's own CAPM r, panel 2d;")
+    L.append("  * where it differs from the 9% class. Context only: the class above stays at 9%.")
+    L.append("  DP-V2 gate: the PROPOSED modifier (75/70/65); NOT APPLIED.")
     L.append("")
 
     # ---- 2b. under the hood (DP-V4) ------------------------------------------
@@ -953,23 +1081,121 @@ def build(date, root, log_path, quotes_path, tracker):
                                    ratio_if_met=cim) if ee else None)
     L.append("")
 
+    # ---- 2d. cost of equity (DP-V7 step 2) ------------------------------------
+    L.append("  2d. COST OF EQUITY (DP-V7 step 2) -- each name's own rate beside the card's 9%. CONTEXT")
+    L.append("      ONLY: the headline class stays at 9% until a ruling moves it.")
+    coe_info = None
+    if not coe:
+        L.append("      not available for %s (value.bat step 7c did not write cost_of_equity_%s.json)."
+                 % (date, date))
+        for c in card:
+            c.update(cost_of_equity=None)
+    else:
+        rr = coe.get("rrf") or {}
+        src = coe.get("beta_source") or {}
+        L.append("      rRF %s (%s%s) + RPM %s = %s, a beta-1.0 name's r." % (
+            fmt(rr.get("pct"), "{:.2f}%"), rr.get("source") or rr.get("why") or "none",
+            (", observed %s" % rr["date"]) if rr.get("date") else "", fmt(coe.get("rpm_pct"), "{:.2f}%"),
+            fmt(mkt_r, "{:.2f}%")))
+        L.append("      The 9%% equals rRF + RPM only at rRF %s. Betas estimated %s; SE, window and the" % (
+            fmt(coe.get("rrf_for_9pct"), "{:.2f}%"), src.get("as_of") or "?"))
+        L.append("      weekly check are in cost_of_equity_%s.md." % date)
+        L.append("  %-5s %-20s %7s %-11s %7s %6s %6s %7s | %-7s %-7s %-7s %-13s %s" % (
+            "tk", "beta adj (raw R2 n)", "r CAPM", "95% CI", "r DCF", "g", "payout", "DCF-CAPM",
+            "@9%", "@beta-1", "@own r", "own -2/0/+2", "flags; note"))
+
+        def cell(cl, x):
+            return "-" if cl in (None, "NO READ") else "%s %.2f" % (CLASS_LETTER[cl], x)
+        n_dcf = 0
+        for c in card:
+            t = c["ticker"]
+            cn = coe_names.get(t) or {}
+            o = own.get(t)
+            f = rec.get(t)
+            if cn.get("beta_adj") is None:
+                L.append("  %-5s %s" % (t, cn.get("why") or "not in cost_of_equity_%s.json" % date))
+                c.update(cost_of_equity=None)
+                continue
+            dg = dividend_growth_r(quotes.get(t), c.get("ttm_eps"), f.get("roe") if f else None,
+                                   cn.get("r_capm_pct"))
+            n_dcf += dg["r"] is not None
+            spread = (dg["r"] - cn["r_capm_pct"]) if dg["r"] is not None else None
+            ci = cn.get("r_ci_pct")
+            note = " ".join(cn.get("flags") or [])
+            if dg["why"]:
+                note = (note + "; " if note else "") + "DCF: " + dg["why"]
+            grid_s = "-" if not o or o["cls"] == "NO READ" else "%s %s" % (
+                "/".join(CLASS_LETTER.get(k, "-") for k in o["classes"]), o["tag"])
+            L.append("  %-5s %-20s %7s %-11s %7s %6s %6s %7s | %-7s %-7s %-7s %-13s %s" % (
+                t, ("%.2f (%.2f %.2f %d)" % (cn["beta_adj"], cn["beta_raw"], cn["r2"], cn["n"]))[:20],
+                fmt(cn.get("r_capm_pct"), "{:.2f}%"), ("%.1f-%.1f%%" % tuple(ci)) if ci else "—",
+                fmt(dg["r"], "{:.2f}%"), fmt(dg["g"], "{:.1f}%"),
+                fmt(None if dg["payout"] is None else 100 * dg["payout"], "{:.0f}%"),
+                fmt(spread, "{:+.2f}"), cell(c["cls"], c.get("ratio")),
+                cell(o["cls_mkt"] if o else None, o["ratio_mkt"] if o else None),
+                cell(o["cls"] if o else None, o["ratio"] if o else None), grid_s[:13], note[:150]))
+            c.update(cost_of_equity=dict(
+                beta_adj=cn["beta_adj"], beta_raw=cn["beta_raw"], se=cn.get("se"), r2=cn["r2"], n=cn["n"],
+                r_capm=cn.get("r_capm_pct"), r_ci=ci, flags=cn.get("flags") or [],
+                dcf=dg, dcf_minus_capm=spread, cls_9=c["cls"], ratio_9=c.get("ratio"),
+                cls_mkt=o["cls_mkt"] if o else None, ratio_mkt=o["ratio_mkt"] if o else None,
+                cls_own=o["cls"] if o else None, ratio_own=o["ratio"] if o else None,
+                own_classes=o["classes"] if o else None, own_tag=o["tag"] if o else None))
+        withr = [c for c in card if (c.get("cost_of_equity") or {}).get("r_capm") is not None]
+        dif = [c for c in withr if c["cls"] != "NO READ" and c["cost_of_equity"]["cls_own"] not in (c["cls"], None)]
+        dif_l = [c for c in withr if c["cls"] != "NO READ" and c["cost_of_equity"]["cls_mkt"] not in (c["cls"], None)]
+        L.append("      r CAPM = rRF + adjusted beta x RPM; 95% CI: the raw beta +/- 1.96 SE through Blume and")
+        L.append("      RPM. r DCF = D1/P0 + g, g = (1 - payout) x 12-month ROE (Ch 9 s.21-28), defined only")
+        L.append("      where g < r CAPM (Ch 7 s.62); dividends only, so buybacks count as retention [?].")
+        L.append("      @9%: the headline class. @beta-1: the class at rRF + RPM, the rate LEVEL alone (one r")
+        L.append("      for every name). @own r: level plus the name's BETA. own -2/0/+2: own r -/+ 2 points;")
+        L.append("      ROBUST only if all three agree. Own r is the CAPM r alone: the course averages its")
+        L.append("      three estimates (Ch 9 s.31), but dividend growth reads for %d of %d names here and the"
+                 % (n_dcf, len(withr)))
+        L.append("      own-bond-yield method has no feed yet (step 3 brings the cost of debt).")
+        L.append("      class differs from 9%%: at own r %d (%s); at the beta-1.0 r alone %d (%s)." % (
+            len(dif), ", ".join("%s %s->%s" % (c["ticker"], CLASS_LETTER[c["cls"]],
+                                              CLASS_LETTER[c["cost_of_equity"]["cls_own"]]) for c in dif) or "none",
+            len(dif_l), ", ".join("%s %s->%s" % (c["ticker"], CLASS_LETTER[c["cls"]],
+                                                CLASS_LETTER[c["cost_of_equity"]["cls_mkt"]]) for c in dif_l)
+            or "none"))
+        coe_info = dict(file="cost_of_equity_%s.json" % date, rrf=rr, rpm_pct=coe.get("rpm_pct"),
+                        mkt_r_pct=mkt_r, beta_as_of=src.get("as_of"), dcf_read=n_dcf, with_r=len(withr),
+                        differ_own=[c["ticker"] for c in dif], differ_level=[c["ticker"] for c in dif_l])
+    L.append("")
+
     # ---- 3. robustness, every classed name ---------------------------------
     L.append("-" * 100)
     L.append("3. ROBUSTNESS -- every classed name: the cost-of-equity grid on the 12-month basis")
     L.append("-" * 100)
-    L.append("  %-5s %-12s %7s %-20s | %-12s %-12s %-12s | %6s %-8s" % (
-        "tk", "class @9%", "ratio", "last-FY (ratio)", "r=7%", "r=9%", "r=11%", "edge", "tag"))
+    L.append("  %-5s %-12s %7s %-20s | %-12s %-12s %-12s | %6s %-13s | %-6s %-6s %-8s" % (
+        "tk", "class @9%", "ratio", "last-FY (ratio)", "r=7%", "r=9%", "r=11%", "edge", "tag",
+        "own r", "-2/0/+2", "own tag"))
     for t in sorted(read, key=lambda t: -(rec[t].get("ratio") or 0)):
         rb = rob[t]
-        L.append("  %-5s %-12s %7s %-20s | %-12s %-12s %-12s | %6s %-8s" % (
+        o = own.get(t)
+        L.append("  %-5s %-12s %7s %-20s | %-12s %-12s %-12s | %6s %-13s | %-6s %-6s %-8s" % (
             t, rb["base"], fmt(rec[t].get("ratio")),
             ("%s (%s)" % (rb["lastfy"], fmt(rb["lastfy_ratio"])))[:20],
-            *rb["r_classes"], fmt(rb["edge"]), rb["tag"] + (" EDGE" if rb["borderline"] else "")))
+            *rb["r_classes"], fmt(rb["edge"]), rb["tag"] + (" EDGE" if rb["borderline"] else ""),
+            ("%.1f%%" % o["r"]) if o else "—",
+            "/".join(CLASS_LETTER.get(k, "-") for k in o["classes"]) if o else "—",
+            o["tag"] if o else "—"))
     n_rob = sum(1 for t in read if rob[t]["tag"] == "ROBUST")
     n_edge = sum(1 for t in read if rob[t]["borderline"])
     n_basis = sum(1 for t in read if rob[t]["basis_flip"])
     L.append("  ROBUST %d of %d.  EDGE (within %.2f of a line) %d.  Class differs from last-FY: %d." % (
         n_rob, len(read), EDGE_BORDERLINE, n_edge, n_basis))
+    own_read = [t for t in read if own.get(t) and own[t]["cls"] != "NO READ"]
+    own_dif = [t for t in own_read if own[t]["cls"] != rob[t]["base"]]
+    if coe:
+        L.append("  own r (DP-V7 step 2, context only; -2/0/+2 = own r -/+ 2 points): read %d of %d, ROBUST %d;"
+                 % (len(own_read), len(read), sum(1 for t in own_read if own[t]["tag"] == "ROBUST")))
+        L.append("  class at own r differs from the 9%% class: %d (%s)." % (len(own_dif), ", ".join(
+            "%s %s->%s" % (t, CLASS_LETTER[rob[t]["base"]], CLASS_LETTER[own[t]["cls"]]) for t in sorted(own_dif))
+            or "none"))
+    else:
+        L.append("  own r: not available (no cost_of_equity_%s.json)." % date)
     L.append("")
 
     # ---- 4. DP-V2 counterfactual flip ledger -------------------------------
@@ -1113,7 +1339,14 @@ def build(date, root, log_path, quotes_path, tracker):
                                         borderline=rob[t]["borderline"],
                                         lo=rob[t]["lo"], hi=rob[t]["hi"],
                                         r_classes=rob[t]["r_classes"], ttm_roe_pct=rec[t].get("roe"),
-                                        ttm_why=rec[t].get("ttm_why")) for t in rec},
+                                        ttm_why=rec[t].get("ttm_why"),
+                                        own_r=own[t]["r"] if own.get(t) else None,
+                                        cls_own_r=own[t]["cls"] if own.get(t) else None,
+                                        ratio_own_r=own[t]["ratio"] if own.get(t) else None,
+                                        own_r_classes=own[t]["classes"] if own.get(t) else None,
+                                        own_r_tag=own[t]["tag"] if own.get(t) else None) for t in rec},
+                    cost_of_equity=dict(coe_info or {}, available=bool(coe),
+                                        differ_own_all=sorted(own_dif)),
                     changes=[c.strip() for c in changes],
                     dpv2=dict(basis="12-month (DP-V4)", flip_rows=len(flips), tickers=tks,
                               needed_rows=DPV2_MIN_ROWS, needed_tickers=DPV2_MIN_TICKERS,
@@ -1256,7 +1489,8 @@ def _write_sheet(ws, snap):
            "Edge to line", "Last-FY class", "Last-FY ratio", "P/E (12-month)", "Range low (r 7-11%)",
            "Range high", "Robust", "Why fragile", "Implied g %", "DP-V2 gate (not applied)",
            "Would flip", "NO READ reason", "12-month ROE %", "Next report", "Sessions to report",
-           "Context note"]
+           "Context note", "Own r % (CAPM)", "Class at own r", "Ratio at own r", "Own r -2/0/+2",
+           "Own r tag"]
     put(hdr, f_hdr, fill_hdr)
     for c in snap["card"]:
         detail = (c.get("robust_detail") or "").replace("FRAGILE", "").strip()
@@ -1267,7 +1501,10 @@ def _write_sheet(ws, snap):
              c["lo"], c["hi"], tag, detail, c["g_impl"], c.get("dpv2_gate"),
              c.get("dpv2_flip") or "", c.get("no_read_reason") or "",
              c.get("ttm_roe_pct"), c.get("next_report") or "",
-             c.get("sessions_to_report"), c.get("context_note") or ""],
+             c.get("sessions_to_report"), c.get("context_note") or "",
+             c.get("own_r"), c.get("cls_own_r") or "", c.get("ratio_own_r"),
+             "/".join(CLASS_LETTER.get(k, "-") for k in (c.get("own_r_classes") or [])),
+             c.get("own_r_tag") or ""],
             fill=fill_rob if tag == "ROBUST" else (fill_frag if tag == "FRAGILE" else None))
     put(["Class: implied ROE at 9%% over 12-month ROE (SEC, point in time). Edge: distance to the "
          "nearest line (under %.2f, a 2-3%% price move can cross it). Range: r = 7/9/11%%; ROBUST "
@@ -1296,16 +1533,48 @@ def _write_sheet(ws, snap):
              e.get("cls_if_met") or "", e.get("ratio_if_met"),
              e.get("why") or e.get("history_why") or ""])
     gap()
+    ce = snap.get("cost_of_equity") or {}
+    put(["Cost of equity (DP-V7 step 2) -- each name's own CAPM r beside the 9% class; CONTEXT ONLY, "
+         "the headline class stays at 9% until a ruling moves it"], f_sec)
+    if not ce.get("available"):
+        put(["not available: value.bat step 7c did not write cost_of_equity_%s.json" % d], f_note)
+    else:
+        rr = ce.get("rrf") or {}
+        put(["rRF %s%% (%s, observed %s) + RPM %s%% = %s%% for a beta-1.0 name; the 9%% equals rRF + RPM "
+             "only at rRF 4%%. Betas estimated %s. Class differs from 9%%: at own r %s; at the beta-1.0 r "
+             "alone %s." % (fmt(rr.get("pct")), rr.get("source") or rr.get("why"), rr.get("date") or "-",
+                            fmt(ce.get("rpm_pct")), fmt(ce.get("mkt_r_pct")), ce.get("beta_as_of") or "?",
+                            ", ".join(ce.get("differ_own") or []) or "none",
+                            ", ".join(ce.get("differ_level") or []) or "none")], f_note)
+        put(["Ticker", "Beta (adj.)", "Beta (raw)", "R^2", "Returns (n)", "r CAPM %", "CI low %",
+             "CI high %", "r DCF %", "Retention g %", "Payout %", "DCF - CAPM (points)", "Class @9%",
+             "Class @beta-1 r", "Ratio @beta-1 r", "Class @own r", "Ratio @own r", "Own r -2/0/+2",
+             "Own r tag", "Flags", "Note"], f_hdr, fill_hdr)
+        for c in snap["card"]:
+            x = c.get("cost_of_equity")
+            if not x:
+                continue
+            dg = x.get("dcf") or {}
+            ci = x.get("r_ci") or [None, None]
+            put([c["ticker"], x["beta_adj"], x["beta_raw"], x["r2"], x["n"], x["r_capm"], ci[0], ci[1],
+                 dg.get("r"), dg.get("g"), _p100(dg.get("payout")), x.get("dcf_minus_capm"),
+                 x.get("cls_9") or "", x.get("cls_mkt") or "", x.get("ratio_mkt"), x.get("cls_own") or "",
+                 x.get("ratio_own"), "/".join(CLASS_LETTER.get(k, "-") for k in (x.get("own_classes") or [])),
+                 x.get("own_tag") or "", " ".join(x.get("flags") or []),
+                 ("DCF: " + dg["why"]) if dg.get("why") else ""])
+    gap()
     put(["Robustness -- every classed name: the cost-of-equity grid on the 12-month basis"], f_sec)
     put(["Ticker", "Class @9%", "Ratio", "Last-FY class", "Last-FY ratio", "r = 7%", "r = 9%",
-         "r = 11%", "Edge", "Tag"], f_hdr, fill_hdr)
+         "r = 11%", "Edge", "Tag", "Own r %", "Own r -2", "Own r", "Own r +2", "Own r tag"],
+        f_hdr, fill_hdr)
     rb = snap["robustness"]
     for t in sorted((t for t in rb if rb[t]["cls"] != "NO READ"),
                     key=lambda t: -(rb[t]["ratio"] or 0)):
         x = rb[t]
         put([t, x["cls"], x["ratio"], x.get("lastfy") or "", x.get("lastfy_ratio"),
              *x.get("r_classes", ["", "", ""]), x.get("edge"),
-             x["tag"] + (" EDGE" if x.get("borderline") else "")],
+             x["tag"] + (" EDGE" if x.get("borderline") else ""),
+             x.get("own_r"), *(x.get("own_r_classes") or ["", "", ""]), x.get("own_r_tag") or ""],
             fill=fill_rob if x["tag"] == "ROBUST" else fill_frag)
     gap()
     dp = snap["dpv2"]
@@ -1349,7 +1618,8 @@ def _write_sheet(ws, snap):
         for cell in row:
             if isinstance(cell.value, float):
                 cell.number_format = "0.00"
-    widths = [8, 22, 9, 8, 26, 14, 8, 10, 13, 10, 10, 10, 10, 9, 14, 11, 12, 15, 40, 10, 12, 10, 40]
+    widths = [8, 22, 9, 8, 26, 14, 8, 10, 13, 10, 10, 10, 10, 9, 14, 11, 12, 15, 40, 10, 12, 10, 40,
+              10, 13, 10, 12, 10]
     from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -1717,6 +1987,85 @@ def _selftest():
           not conf_caveat() or ("conf  = " + conf_caveat()) in txt)
     check("the caveat changes no class or flip: NVDA still NEUTRAL, FTI still flips",
           cn["NVDA"]["cls"] == "NEUTRAL" and "FLIP REJECT->ADMIT" in txt)
+
+    # ---- DP-V7 step 2 (2026-11-18): own r beside the 9% class -----------------
+    check("DP-V7: with no cost_of_equity file, 2d and section 3 say 'not available', no own r",
+          "not available for 2026-10-14 (value.bat step 7c" in txt and "own r: not available" in txt
+          and cn["NVDA"]["own_r"] is None and snap["cost_of_equity"]["available"] is False
+          and "not available for 2026-10-14 (value.bat step 7c" in tb)
+    with open(os.path.join(tmp, "cost_of_equity_2026-10-14.json"), "w", encoding="utf-8") as fh:
+        json.dump({"date": "2026-10-14", "rpm_pct": 5.0, "mkt_r_pct": 10.12, "rrf_for_9pct": 4.0,
+                   "rrf": {"pct": 5.12, "date": "2026-10-13", "source": "FRED DGS10"},
+                   "beta_source": {"as_of": "2026-10-14"},
+                   "names": {"NVDA": {"beta_adj": 1.553, "beta_raw": 1.825, "se": 0.085, "r2": 0.48, "n": 499,
+                                      "r_capm_pct": 12.885, "r_ci_pct": [12.32, 13.45], "flags": []},
+                             "FTI": {"beta_adj": 1.017, "beta_raw": 1.026, "se": 0.087, "r2": 0.22, "n": 499,
+                                     "r_capm_pct": 10.205, "r_ci_pct": [9.64, 10.77], "flags": ["DISAGREE"]}}}, fh)
+    txt2, snap2, fnd2 = build(dt.date(2026, 10, 14), tmp, log, None, None)
+    c2 = {c["ticker"]: c for c in snap2["card"]}
+    same = all(c2[t][k] == cn[t][k] for t in ("NVDA", "FTI")
+               for k in ("cls", "ratio", "robust", "lo", "hi", "dpv2_gate", "dpv2_flip", "edge"))
+    check("DP-V7: the headline class, its 7/9/11 robustness, the DP-V2 gate and flip are unchanged by own r",
+          same and snap2["robustness"]["NVDA"]["r_classes"] == snap["robustness"]["NVDA"]["r_classes"]
+          and snap2["dpv2"]["rows"] == snap["dpv2"]["rows"] and "FLIP REJECT->ADMIT" in txt2
+          and snap2["identity"] == snap["identity"])
+    rec2 = rebase(parse_exhibit(p)[0], TTMBasis(tmp), dt.date(2026, 10, 14), strict=False)
+    check("DP-V7: ratio_at(9%) IS the headline ratio (M/B backed out of the exhibit's i9)",
+          all(abs(ratio_at(rec2[t], R_BASE) - rec2[t]["ratio"]) < 1e-12 for t in ("NVDA", "FTI")))
+    mbn = (140.99 * 1.03 - 3.0) / 6.0
+    hand = ((mbn * (12.885 - 3.0) + 3.0) / 1.03) / rec2["NVDA"]["roe"]
+    check("DP-V7: NVDA at own r 12.885%% by hand ((M/B (r-g) + g)/(1+g) / ROE = %.3f): DEMANDING, '12.9%% D*'" % hand,
+          abs(c2["NVDA"]["ratio_own_r"] - hand) < 1e-9 and c2["NVDA"]["cls_own_r"] == "DEMANDING"
+          and "12.9% D*" in txt2)
+    check("DP-V7: NVDA's grid is own r -/+ 2 (10.885 / 12.885 / 14.885)",
+          c2["NVDA"]["own_r_classes"] == [klass(ratio_at(rec2["NVDA"], x)) for x in (10.885, 12.885, 14.885)]
+          and c2["NVDA"]["own_r_tag"] == ("ROBUST" if len(set(c2["NVDA"]["own_r_classes"])) == 1 else "FRAGILE"))
+    check("DP-V7: FTI at own r 10.2% is NEUTRAL against UNDEMANDING at 9%, and its BUY still flips at 9%",
+          c2["FTI"]["cls_own_r"] == "NEUTRAL" and c2["FTI"]["cls"] == "UNDEMANDING"
+          and c2["FTI"]["dpv2_flip"] == "REJECT->ADMIT" and "10.2% N*" in txt2
+          and c2["FTI"]["own_r_flags"] == ["DISAGREE"])
+    ce2 = c2["NVDA"]["cost_of_equity"]
+    check("DP-V7: @beta-1 is the class at rRF + RPM (10.12%), the rate level alone",
+          abs(ce2["ratio_mkt"] - ratio_at(rec2["NVDA"], 10.12)) < 1e-12 and ce2["cls_mkt"] == klass(ce2["ratio_mkt"]))
+    check("DP-V7: 2d prints rRF, the beta-1.0 r and the 9% identity; section 3 counts the differences",
+          "2d. COST OF EQUITY" in txt2 and "rRF 5.12% (FRED DGS10, observed 2026-10-13) + RPM 5.00% = 10.12%" in txt2
+          and "only at rRF 4.00%" in txt2
+          and "class at own r differs from the 9% class: 2 (FTI U->N, NVDA N->D)." in txt2
+          and snap2["cost_of_equity"]["available"] and snap2["cost_of_equity"]["differ_own_all"] == ["FTI", "NVDA"])
+    check("DP-V7: the snapshot's robustness carries own r for every classed name",
+          snap2["robustness"]["NVDA"]["own_r"] == 12.885 and snap2["robustness"]["FTI"]["cls_own_r"] == "NEUTRAL")
+    check("DP-V7: no quotes -> the DCF estimate says why, never a number",
+          ce2["dcf"]["r"] is None and ce2["dcf"]["why"] == "pays no dividend")
+    # the course's retention example (Ch 9 slides 27-28): ROE 15%, payout 62% -> g 5.7%
+    dg = dividend_growth_r({"divYield": 6.2, "lastPrice": 50.0}, 5.0, 15.0, 12.8)
+    check("DCF: the course's ROE 15%%, payout 62%% gives g 5.7%% and r = 6.2%% x 1.057 + 5.7%% = %.2f%%"
+          % (dg["r"] or 0), abs(dg["payout"] - 0.62) < 1e-12 and abs(dg["g"] - 5.7) < 1e-9
+          and abs(dg["r"] - (6.2 * 1.057 + 5.7)) < 1e-9)
+    check("NEGATIVE DCF: retention g at or above the CAPM r is not a constant growth rate (AAPL-like)",
+          (dividend_growth_r({"divYield": 0.3, "lastPrice": 350.0}, 8.9, 118.0, 10.24)["why"] or "").startswith(
+              "retention g 104.1% is not below the CAPM r 10.2%"))
+    check("NEGATIVE DCF: a payout over 100% of EPS has negative retention (O-like)",
+          (dividend_growth_r({"divYield": 5.59, "lastPrice": 58.08}, 1.44, 3.6, 7.24)["why"] or "").startswith("payout 225%"))
+    check("NEGATIVE DCF: a fund, no dividend, no positive EPS, no CAPM r each say why",
+          (dividend_growth_r({"is_etf": True, "divYield": 1.0, "lastPrice": 700}, None, None, 10.0)["why"] or "").startswith("fund")
+          and dividend_growth_r({"divYield": 0.0, "lastPrice": 586}, 30.0, 10.0, 8.0)["why"] == "pays no dividend"
+          and dividend_growth_r({"divYield": 4.2, "lastPrice": 31.4}, -5.6, 5.0, 9.4)["why"] == "no positive 12-month EPS"
+          and (dividend_growth_r({"divYield": 6.2, "lastPrice": 50.0}, 5.0, 15.0, None)["why"] or "").startswith("no CAPM r"))
+    check("NEGATIVE: ratio_at refuses r at or below g = 3% and a missing ROE; own_r_read needs a CAPM r",
+          ratio_at(rec2["NVDA"], 3.0) is None and ratio_at(dict(rec2["NVDA"], roe=None), 9.0) is None
+          and own_r_read(rec2["NVDA"], {"r_capm_pct": None}) is None and own_r_read(rec2["NVDA"], None) is None)
+    snap2_j = json.loads(json.dumps(snap2, default=str))
+    ok7, _ = embed(snap2_j, copy)
+    _vs7 = openpyxl.load_workbook(copy)[VC_SHEET]
+    _rows7 = [row for row in _vs7.iter_rows(values_only=True) if row and row[0]]
+    _dc = [r_ for r_ in _rows7 if r_[0] == "Ticker" and "Executability" in r_]
+    _ce = [r_ for r_ in _rows7 if r_[0] == "Ticker" and "r CAPM %" in r_]
+    _nv = [r_ for r_ in _rows7 if r_[0] == "NVDA" and len(r_) > 6 and r_[5] == 12.885]
+    check("DP-V7 sheet: the decision card ends with the own-r columns; a cost-of-equity block with NVDA",
+          ok7 and len(_dc) == 1 and [x for x in _dc[0] if x][-5:] == ["Own r % (CAPM)", "Class at own r",
+                                                                     "Ratio at own r", "Own r -2/0/+2", "Own r tag"]
+          and len(_ce) == 1 and len(_nv) == 1 and _nv[0][15] == "DEMANDING")
+    check("DP-V7: own r adds no finding", fnd2 == [])
     print("SELFTEST %s (%d failed)" % ("PASSED" if not fails else "FAILED", len(fails)))
     return 1 if fails else 0
 

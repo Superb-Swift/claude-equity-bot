@@ -28,6 +28,11 @@ REM                         AMENDED 2026-10-24 (DP-V4): its class reads 12-month
 REM                         ROE from valuation_cache\ (written by ttm_eps), and
 REM                         its expectations panel reads the calendar's consensus
 REM                         (earnings_calendar). Both run before it below.
+REM    cost_of_equity.py -> ADDED 2026-11-18 (DP-V7 step 2), step 7c. The CAPM r
+REM                         per name (beta from Schwab daily history, rRF from
+REM                         FRED DGS10, RPM 5.0%%). CONTEXT, like steps 6-7b: it
+REM                         runs before the card, which prints the class at that
+REM                         r BESIDE the 9%% class, and never changes the exit code.
 REM    step 5b           -> ADDED 2026-10-14. Embeds the card as the 'Value Card'
 REM                         sheet in tracker_with_registry.xlsx. So value.bat now
 REM                         runs AFTER run_daily_review.bat (which rebuilds that
@@ -269,6 +274,23 @@ if errorlevel 2 (
 ) else (
     echo   sec_data_audit_%RUNDATE%.md written - no unresolved gap or mismatch.
 )
+REM  Step 7c - ADDED 2026-11-18 (DP-V7 step 2; claude/DP-V7_Step2_CostOfEquity_
+REM  2026-11-18.md). cost_of_equity.py: each name's CAPM r = rRF + adjusted beta x
+REM  5.0%%, written to cost_of_equity_<date>.md/.json for the card's panel 2d and
+REM  its '@own r' column. Betas are re-fetched from Schwab at most weekly
+REM  (valuation_cache\beta_cache.json); rRF is FRED DGS10. Like steps 6-7b it
+REM  NEVER changes the exit code, and nothing in it reaches the prompt, a gate or
+REM  the headline class (DP-V1).
+echo.
+echo ### 7c. cost of equity - beta, rRF and CAPM r per name (DP-V7 step 2, context only)
+python cost_of_equity.py --date %RUNDATE% --log "%LOGFILE%"
+if errorlevel 2 (
+    echo   NOTE: cost_of_equity could not run - context only; exit code unchanged.
+) else if errorlevel 1 (
+    echo   NOTE: cost_of_equity has findings - read cost_of_equity_%RUNDATE%.md; exit code unchanged.
+) else (
+    echo   cost_of_equity_%RUNDATE%.md written - no findings.
+)
 
 echo.
 if "%FAIL2%"=="1" goto skip5
@@ -342,7 +364,7 @@ REM  The old banner listed all three names unconditionally, including on
 REM  2026-08-19 when value_anchor_2026-08-19.md did not exist. A closing summary
 REM  that names a file it never checked for is the same defect this script now
 REM  guards against, printed one line lower down.
-python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md" "value_card_%RUNDATE%.md" "earnings_calendar_%RUNDATE%.md" "ttm_eps_%RUNDATE%.md" "sec_data_audit_%RUNDATE%.md"
+python -c "import os,sys,time;t0=float(sys.argv[1]);[print('   {:<28} {}'.format(p,('WRITTEN this run' if os.path.getmtime(p)>=t0 else 'STALE - left from an earlier run') if os.path.exists(p) else 'ABSENT')) for p in sys.argv[2:]]" "%T0%" "band_price_%RUNDATE%.md" "value_anchor_%RUNDATE%.md" "implied_return_%RUNDATE%.md" "value_card_%RUNDATE%.md" "earnings_calendar_%RUNDATE%.md" "ttm_eps_%RUNDATE%.md" "sec_data_audit_%RUNDATE%.md" "cost_of_equity_%RUNDATE%.md"
 echo.
 echo No valuation is asserted and no price target is implied by any step.
 echo Advisory-only - no orders - not financial advice.
