@@ -86,6 +86,9 @@ CONVENTIONS (Phase 2 locked)
     * DP-3C-w PROSPECTIVE ARM: counted here with episodes.dp3cw_arm(), blind
       until 10 episodes resolve; the first qualifying reading is recorded to
       logs/instrument_readings.json and printed thereafter as recorded.
+    * PR-6 / F1-a (DP-V9, 2026-11-18): gate-cleared BUY episodes scored on
+      AR = r - beta x r_SPY with a point-in-time beta (episodes.pr6_arm), blind
+      until its read set; the read is recorded once under DP-3C-bb.
     The registry reads logs with signal_logs.discover() (recursive). A row
     whose log is not on disk shows "no log".
 
@@ -385,12 +388,19 @@ def attach_log_fields(rows, fields):
 
 def load_master_rows(tracker_path):
     """Every master row as a light dict for the DP-3C-w arm (price-derived
-    +5d return, so the formula cache cannot affect it)."""
+    +5d return, so the formula cache cannot affect it).
+
+    AMENDED 2026-11-18 (DP-V9): also ret10 and ret20, from the p10 and p20
+    price columns the same way, for PR-6's secondaries. ret5 is unchanged."""
     wb = openpyxl.load_workbook(tracker_path, data_only=True, read_only=True)
     ws = wb[SIGNALS_SHEET]
     out, blank = [], 0
+
+    def _ret(p0, ph):
+        ok = isinstance(p0, (int, float)) and isinstance(ph, (int, float)) and p0
+        return ((ph - p0) / p0) if ok else None
     for vals in ws.iter_rows(min_row=FIRST_DATA_ROW, max_row=LAST_DATA_ROW_CAP,
-                             min_col=1, max_col=COL["p5"], values_only=True):
+                             min_col=1, max_col=COL["p20"], values_only=True):
         d = as_date(vals[0])
         if d is None:
             blank += 1
@@ -405,7 +415,8 @@ def load_master_rows(tracker_path):
             date=d, ticker=str(vals[1] or "").strip().upper(),
             signal=str(vals[COL["signal"] - 1] or "").strip().upper(),
             conf=(conf * 100 if isinstance(conf, (int, float)) and conf <= 1 else conf),
-            ret5=((p5 - p0) / p0) if ok else None))
+            ret5=((p5 - p0) / p0) if ok else None,
+            ret10=_ret(p0, vals[COL["p10"] - 1]), ret20=_ret(p0, vals[COL["p20"] - 1])))
     wb.close()
     return out
 
@@ -523,6 +534,111 @@ def dp3cw_block(master_rows, cohort_dates, as_of, record=True, dropouts=None,
         _take("DP-3C-w", "READ DATE")
     else:
         lines.append(f"  {arm['verdict']}")
+    return lines
+
+
+
+def _pct(x, signed=False):
+    return "-" if x is None else (("%+.2f%%" if signed else "%.1f%%") % x)
+
+
+def pr6_block(master_rows, cohort_dates, as_of, record=True, dropouts=None, coe_dir=None,
+              betas_for=None, readings_path=None):
+    """Print PR-6 (F1-a, DP-V9, ruled 2026-11-18): gate-cleared BUY episodes
+    scored net of the market. ADDED 2026-11-18.
+
+    Blind until its read set exists (episodes.pr6_arm returns counts only).
+    The read is RECORDED ONCE, and only when every resolving close predates
+    the newest cohort (DP-3C-bb, as for DP-3C-w). Later runs print it as
+    recorded and never recompute it. A WITHDRAWN state is recorded the same
+    way. betas_for and readings_path exist for the selftest only."""
+    import episodes
+    import rulings as _ru
+    import trading_calendar as _tc
+    path = readings_path or _ru.READINGS_PATH
+    if betas_for is None:
+        betas_for = episodes.pit_betas(coe_dir or os.path.dirname(os.path.abspath(__file__)))
+    lines = []
+    for lab, start, end, backstop in episodes.pr6_segments():
+        inst = "PR-6" if lab == "S1" else "PR-6/%s" % lab
+        head = ("PR-6 / F1-a CAPM-ALPHA ARM, segment %s: BUY conf >= %.0f episodes opening %s%s; "
+                "AR = r - beta x r_%s (DP-V9)" % (lab, episodes.PR6_GATE, start,
+                                                   " .. %s (exclusive)" % end if end else " on",
+                                                   episodes.PR6_MARKET))
+        if as_of is not None and as_of < start:
+            lines += [head, "  opens on %s; nothing is counted yet. Read at n >= %d on >= %d tickers; "
+                            "backstop %s." % (start, episodes.PR6_MIN_N, episodes.PR6_MIN_TICKERS, backstop)]
+            continue
+        arm = episodes.pr6_arm(master_rows, cohort_dates, betas_for, as_of,
+                               dropouts=dropouts, segment=lab)
+        lines.append(head)
+        lines.append("  episodes opened %d   resolved +5d %d of %d needed   tickers %d of %d needed   "
+                     "backstop %s" % (arm["n_open"], arm["n_prefix"], episodes.PR6_MIN_N,
+                                      len(arm["tickers_prefix"]), episodes.PR6_MIN_TICKERS, backstop))
+        lines.append("  excluded and counted: no point-in-time beta %d, the market itself (%s) %d"
+                     % (arm["n_no_beta"], episodes.PR6_MARKET, arm["n_market"]))
+        if arm["n_resolved_any"] > arm["n_prefix"]:
+            lines.append("  an unresolved episode holds the count: %d resolved in all, %d in the "
+                         "unbroken opening-order prefix the read uses" % (arm["n_resolved_any"], arm["n_prefix"]))
+        prior = _ru.readings(inst, path=path)
+        if prior:
+            e = prior[0]
+            dd = e.get("detail", {})
+            lines.append("  READ on %s (recorded, not recomputed): %s" % (e["date"], dd.get("verdict")))
+            if dd.get("n"):
+                lines.append("    hits %s / %s = %s   without %s: %s" % (
+                    dd.get("hits"), dd.get("n"), _pct(dd.get("share")), dd.get("loto_ticker"),
+                    _pct(dd.get("loto_share"))))
+            continue
+        if arm["state"] == "COLLECTING":
+            lines.append("  [BLIND] counts only. No hit, share, mean or sign is computed for display "
+                         "before the read (DP-3C-ah).")
+            continue
+        if arm["state"] == "WITHDRAWN":
+            lines.append("  %s" % arm["verdict"])
+            if record:
+                _ru.record_reading(inst, as_of, False, path=path, detail=dict(
+                    verdict=arm["verdict"], n_prefix=arm["n_prefix"],
+                    tickers=arm["tickers_prefix"], n_open=arm["n_open"]))
+                lines.append("  recorded to the readings log as %s." % inst)
+            continue
+        sess = [_tc.shift_sessions(d, 5) for d in arm["resolved_open_dates"]]
+        ok, last = _ru.read_protection(sess, as_of)
+        if not ok:
+            lines.append("  READ SET REACHED - NOT READ (DP-3C-bb): the %s close has not been "
+                         "log-verified (newest cohort %s). Counts only; the next session's chain "
+                         "(scan, then review) reads and records it." % (last, as_of))
+            continue
+        rd = arm["read"]
+        f5 = rd["f1c"]["h5"]
+        lines += [
+            "  READ on %s: %s" % (as_of, rd["verdict"]),
+            "    hits %d / %d = %.1f%%  (POSITIVE needs %d; one-sided sign p %.3f)   without %s "
+            "(%d episodes): %s   knife-edge: %s" % (
+                rd["hits"], rd["n"], rd["share"], rd["k"], rd["p"], rd["loto_ticker"],
+                rd["loto_count"], _pct(rd["loto_share"]), "YES" if rd["knife_edge"] else "no"),
+            "    mean AR5 %s   median %s   raw r5 share %s (the gap to the AR share is the market's part)"
+            % (_pct(100 * rd["mean_ar5"], True), _pct(100 * rd["median_ar5"], True), _pct(rd["raw_share"])),
+            "    AR10 share %s (n %d)   AR20 share %s (n %d; no t is computed at +20d)" % (
+                _pct(rd["ar10_share"]), rd["ar10_n"], _pct(rd["ar20_share"]), rd["ar20_n"]),
+            "    near-miss stratum (conf 60-69, no bar): AR5 share %s (n %d)" % (
+                _pct(rd["near_share"]), rd["near_n"]),
+            "    excluded: no PIT beta %d, %s %d, ties %d; short-history betas in the read set %d" % (
+                rd["excluded_no_beta"], episodes.PR6_MARKET, rd["excluded_market"], rd["ties"],
+                rd["short_betas"]),
+            "    F1-c, raw +5d variance removed by beta x r_%s: episodes %s, all rows %s" % (
+                episodes.PR6_MARKET,
+                _pct(100 * f5["episodes"]["removed"]) if f5["episodes"] else "-",
+                _pct(100 * f5["all_rows"]["removed"]) if f5["all_rows"] else "-"),
+        ]
+        if record:
+            import json
+            detail = json.loads(json.dumps(rd, default=str))
+            detail["verified_through"] = str(last)
+            _ru.record_reading(inst, as_of, rd["verdict"].startswith("POSITIVE"),
+                               path=path, detail=detail)
+            lines.append("  reading recorded to the readings log as %s; later runs print it as "
+                         "recorded." % inst)
     return lines
 
 
@@ -1175,6 +1291,44 @@ def selftest():
         bl = dp3cw_block([], [D(2026, 11, 6)], D(2026, 11, 6), record=False, exit_run=True)
         check("an exit run's nightly block does not say 'run with --exit-read'",
               any("run with --exit-read" in ln for ln in bl), False)
+        # PR-6 (DP-V9, 2026-11-18): the nightly block, blind, then read once.
+        import episodes as _ep
+        import trading_calendar as _tcx
+        import json
+        rp6 = os.path.join(tmp, "pr6_readings.json")
+        bl = pr6_block([], [D(2026, 11, 18)], D(2026, 11, 18), betas_for=lambda d, t: None,
+                       readings_path=rp6)
+        check("PR-6 before its first cohort: 'opens 2026-11-19', nothing counted",
+              any("opens on 2026-11-19" in ln for ln in bl), True)
+        cal6 = [_tcx.shift_sessions(D(2026, 11, 19), i) for i in range(120)]
+        bet6 = lambda d, t: dict(beta=1.2, raw=1.3, file=d, short=False)
+
+        def rows6(n):
+            rr = [dict(date=x, ticker="SPY", signal="HOLD", conf=50.0, ret5=0.01, ret10=0.01,
+                       ret20=0.01) for x in cal6]
+            rr += [dict(date=cal6[2 * j], ticker="T%d" % (j % 8), signal="BUY", conf=72.0,
+                        ret5=0.012 + (0.005 if j < 30 else -0.005), ret10=None, ret20=None)
+                   for j in range(n)]
+            return rr
+        bl = pr6_block(rows6(39), cal6, cal6[100], betas_for=bet6, readings_path=rp6)
+        check("PR-6 blind at 39: counts only, no hit / share / mean in any line",
+              (any("resolved +5d 39 of 40" in ln for ln in bl), any("[BLIND]" in ln for ln in bl),
+               any(_re.search(r"hits \d|share \d|mean AR5 |\d%", ln) for ln in bl)),
+              (True, True, False))
+        last_res = _tcx.shift_sessions(cal6[78], 5)
+        bl = pr6_block(rows6(40), cal6, last_res, betas_for=bet6, readings_path=rp6)
+        check("PR-6 read set reached on its resolving session: NOT READ (DP-3C-bb), nothing recorded",
+              (any("NOT READ (DP-3C-bb)" in ln for ln in bl), os.path.exists(rp6),
+               any(_re.search(r"hits \d|share \d|\d%", ln) for ln in bl)), (True, False, False))
+        bl = pr6_block(rows6(40), cal6, cal6[100], betas_for=bet6, readings_path=rp6)
+        check("PR-6 protected read: 30/40 POSITIVE, recorded once",
+              (any("READ on" in ln and "POSITIVE" in ln for ln in bl),
+               len(json.load(open(rp6, encoding="utf-8")).get("PR-6", []))), (True, 1))
+        bl = pr6_block(rows6(45), cal6, cal6[110], betas_for=bet6, readings_path=rp6)
+        check("PR-6 later runs print the record and never recompute it (n stays 40)",
+              (any("recorded, not recomputed" in ln for ln in bl),
+               any("hits 30 / 40" in ln for ln in bl),
+               len(json.load(open(rp6, encoding="utf-8"))["PR-6"])), (True, True, 1))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("build_actionable_registry selftest (synthetic data only): "
@@ -1451,6 +1605,11 @@ def _build(args, source, snap):
     for line in dp3cw_block(master_rows, cohort_dates, as_of,
                             record=not args.no_record and not args.exit_read, dropouts=dropouts,
                             exit_run=args.exit_read):
+        print(line)
+    print()
+    # PR-6 (DP-V9, 2026-11-18): blind until its read set; recorded once, like DP-3C-w.
+    for line in pr6_block(master_rows, cohort_dates, as_of,
+                          record=not args.no_record and not args.exit_read, dropouts=dropouts):
         print(line)
     exit_rc = 0
     if args.exit_read:

@@ -326,6 +326,8 @@ if errorlevel 1 (
 
 REM ---------------------------------------------------------------------------
 REM  Step 5b - embed the card into the report copy. ADDED 2026-10-14.
+REM  AMENDED 2026-11-18: the fallback command in the NOTE below now carries --tracker,
+REM  as the call itself does, so it keeps the never-the-master check.
 REM  Today's run only: a re-run for an earlier date has no report copy to match.
 REM  Read at TOP LEVEL, like every other flag here.
 REM ---------------------------------------------------------------------------
@@ -339,7 +341,7 @@ python value_card.py --embed-from "value_card_%RUNDATE%.json" --embed-into track
 if errorlevel 1 (
     echo   NOTE: the Value Card sheet was NOT embedded ^(reason above^). The exhibit
     echo         value_card_%RUNDATE%.md is unaffected. Close Excel, then re-run
-    echo         value.bat, or only: python value_card.py --embed-from value_card_%RUNDATE%.json --embed-into tracker_with_registry.xlsx
+    echo         value.bat, or only: python value_card.py --embed-from value_card_%RUNDATE%.json --embed-into tracker_with_registry.xlsx --tracker "%MASTER%"
     set "FAIL2=1"
 )
 goto summary

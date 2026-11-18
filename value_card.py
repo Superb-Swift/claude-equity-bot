@@ -718,6 +718,28 @@ def dividend_implied_g(yield_pct, r=R_BASE):
     return (rr - y) / (1.0 + y) * 100.0
 
 
+# F-10 (Rob, 2026-11-18 14:58 CT: yes): step 3's own share-class bar, applied to
+# section 5. A P/E below 1 is not a cheap stock: it is a price on one share class
+# over EPS on another. BRK.B: Schwab eps 46,563.02 (Class A) on a 573.78 B price
+# gives peRatio 0.01092, which section 5 used to label UNDEMANDING-equiv.
+MIN_PE_ONE_CLASS = 1.0
+
+
+def book_free_pe(px, eps12, schwab_pe):
+    """Section 5's P/E: price over 12-month SEC EPS, else Schwab's own
+    12-month P/E. Returns (pe, source, why). ADDED 2026-11-18 (F-10): a P/E
+    below MIN_PE_ONE_CLASS from either route is refused, and `why` says so."""
+    pe, src = None, ""
+    if eps12 and eps12 > 0 and px:
+        pe, src = px / eps12, "SEC 12m"
+    elif schwab_pe and schwab_pe > 0:
+        pe, src = schwab_pe, "Schwab 12m"
+    if pe is not None and pe < MIN_PE_ONE_CLASS:
+        return None, src, ("%s P/E %.4f < 1: price and EPS on different share classes (F-10)"
+                           % (src, pe))
+    return pe, src, None
+
+
 # --------------------------------------------------------------------------- #
 # DP-V7 step 3 (2026-11-18): capital and credit. Context only.
 # --------------------------------------------------------------------------- #
@@ -1648,19 +1670,15 @@ def build(date, root, log_path, quotes_path, tracker):
         px, y = sig[t].get("px") or q.get("lastPrice"), q.get("divYield")
         fu = hood.get(t) if t in hood else basis.fundamentals(t, date) if t in basis.cik else None
         eps12 = (((fu or {}).get("growth") or {}).get("eps") or {}).get("ttm")
-        pe, src = None, ""
-        if eps12 and eps12 > 0 and px:
-            pe, src = px / eps12, "SEC 12m"
-        elif q.get("peRatio") and q["peRatio"] > 0:
-            pe, src = q["peRatio"], "Schwab 12m"
+        pe, src, pe_why = book_free_pe(px, eps12, q.get("peRatio"))     # F-10 guard
         band = None if (pe is None or pe_hi is None) else (
             "DEMANDING-equiv" if pe >= pe_hi else ("NEUTRAL-equiv" if pe >= pe_lo else "UNDEMANDING-equiv"))
         gdiv = dividend_implied_g(y, r=r_bf) if r_bf else None
         etf = q.get("is_etf") or q.get("asset_type") not in (None, "EQUITY")
-        note = "fund: distributions, not earnings" if etf else src
+        note = "fund: distributions, not earnings" if etf else (pe_why or src)
         bf.append((t, pe, band, y, gdiv, note))
         L.append("  %-5s P/E %7s  %-18s divY %6s  dividend-implied g %7s  %s" % (
-            t, fmt(pe, "{:.1f}"), band or "no positive eps", fmt(y, "{:.2f}%"),
+            t, fmt(pe, "{:.1f}"), band or ("no P/E" if pe_why else "no positive eps"), fmt(y, "{:.2f}%"),
             fmt(gdiv, "{:.2f}%"), note))
     L.append("")
 
@@ -2038,7 +2056,8 @@ def _write_sheet(ws, snap):
     put(["Ticker", "P/E (12-month EPS)", "P/E band", "Div yield %",
          "Dividend-implied g %", "Note"], f_hdr, fill_hdr)
     for x in snap["book_free"]:
-        put([x["ticker"], x["pe"], x["band"] or "no positive eps", x["div_yield"], x["g_div"],
+        put([x["ticker"], x["pe"], x["band"] or ("no P/E" if "different share classes" in (x.get("note") or "")
+                                                  else "no positive eps"), x["div_yield"], x["g_div"],
              x["note"]])
     gap()
     idn = snap.get("identity", {})
@@ -2179,6 +2198,17 @@ def _selftest():
     g = dividend_implied_g(3.0)
     check("dividend-implied g at y=3% is (9-3)/1.03", abs(g - 6.0 / 1.03) < 1e-9)
     check("NEGATIVE: no yield gives no g", dividend_implied_g(0) is None)
+
+    # F-10 (2026-11-18): section 5's share-class guard, on BRK.B's own numbers
+    pe_b, src_b, why_b = book_free_pe(573.78, None, 0.01092)
+    check("F-10 NEGATIVE: BRK.B's Schwab P/E 0.0109 (Class A eps, B price) -> no P/E, and it says why",
+          pe_b is None and src_b == "Schwab 12m" and "different share classes" in why_b)
+    check("F-10 NEGATIVE: the SEC route is guarded too (573.78 over 46,563.02)",
+          book_free_pe(573.78, 46563.02, None)[0] is None)
+    check("F-10: an ordinary P/E passes untouched (40.3, Schwab; 25.0, SEC)",
+          book_free_pe(20.0, None, 40.3) == (40.3, "Schwab 12m", None)
+          and book_free_pe(50.0, 2.0, 40.3) == (25.0, "SEC 12m", None))
+    check("F-10: no EPS and no P/E -> none, with no reason", book_free_pe(10.0, None, None) == (None, "", None))
 
     # parsing real-format lines, then the end-to-end refusal paths
     tmp = tempfile.mkdtemp(prefix="value_card_selftest_")

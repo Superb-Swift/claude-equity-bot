@@ -1028,6 +1028,38 @@ RULINGS = {
               "series) read 10 rows on 2 tickers; it is not the count [?]. The count is the "
               "first value.bat run on the real series."),
     ),
+    # ADDED 2026-11-18: DP-V9 (FINC 5133 step 4, F1).
+    "DP-V9": dict(
+        dp="DP-V9",
+        question=("F1, scoring BUYs net of the market (FINC 5133 step 4): PR-6, gate-cleared BUY "
+                  "episodes on abnormal return, plus AR twins for PR-1, PR-3 and PR-5"),
+        status=("RULED (Rob) - PR-6 OPEN from 2026-11-19, blind: BUY conf >= 70 episodes (DP-3C-m/"
+                "ab/ar, opening row), AR5 = r5 - beta_adj x r_SPY5 (r_f = 0), point-in-time beta "
+                "from cost_of_equity_<D>.json; a 4b go-live starts a new segment, never pooled; "
+                "AR twins defined now, built before PR-1's read, no disposition"),
+        open=False, ruled_on=dt.date(2026, 11, 18), effective=dt.date(2026, 11, 19),
+        doc="claude/F1_CAPMAlpha_PreRegistration_2026-11-18.md",
+        bar=("read at the shortest resolved opening-order prefix with n >= 40 (ties dropped) on "
+             ">= 6 tickers, once, under DP-3C-bb. POSITIVE: hits >= k (one-sided sign test p <= "
+             "0.05; k = 26 at n = 40) AND >= 60% without the most frequent ticker. NEGATIVE: "
+             "share <= 50%. Otherwise INCONCLUSIVE, not extended. Backstop 2027-06-30 for S1, "
+             "else WITHDRAWN, NOT EXTENDED. Code: episodes.pr6_arm (bars in its header), "
+             "printed and recorded by build_actionable_registry.pr6_block"),
+        note=("Rob, 2026-11-18 14:58 CT, verbatim: \"I'm comfortable ruling your recommendations. "
+              "Please proceed\" - R1 gate-cleared population (near-miss 60-69 printed beside it, "
+              "no bar), R2 n = 40, R3 segment by prompt variant, R4 twins ruled now. The same "
+              "message said yes to F-10 (section 5 refuses a P/E below 1: price and EPS on "
+              "different share classes) and to the value.bat 5b note carrying --tracker. KNOWN "
+              "WHEN RULED (signal columns only, no outcome): 16 gate-cleared episodes opened "
+              "09-17..11-18 on 8 tickers, 0.38-0.53 per cohort, so the read is expected about "
+              "2027-03-18..04-30; power 0.32 at a true 60% hit rate. F1-B TWINS, DEFINED NOW: at "
+              "each of PR-1, PR-3 and PR-5's own read dates, after its primary is recorded, the "
+              "same statistic with r5 replaced by AR5 = r5 - beta x r_SPY5, beta rebuilt point "
+              "in time (2y daily ending the close before each date, Blume, step 7c's estimator); "
+              "printed as 'AR twin, no disposition', never replacing the primary. F1-C: at "
+              "PR-6's read, 1 - var(AR)/var(r) and R^2 of r on beta x r_SPY per horizon, report "
+              "only."),
+    ),
 }
 
 def status_of(key):
