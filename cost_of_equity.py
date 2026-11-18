@@ -9,8 +9,9 @@ WHY (DP-V7, ruled by Rob 2026-11-18; claude/FINC5133_CourseReview_2026-11-18.md 
     rRF + RPM = 9%, e.g. the course's rRF 4% + RPM 5%. This tool measures the two
     things the card has been assuming: each name's beta, and today's rRF. The
     card (value_card.py, panel 2d and section 3) prints the class at the name's
-    own r BESIDE the 9% class. The headline class stays at 9%: moving it is
-    class-affecting and needs its own ruling.
+    own r BESIDE the headline class. AMENDED 2026-11-18 (DP-V8, Rob): the
+    headline class itself now reads rRF + RPM, the beta-1.0 r, from the series
+    this tool caches; own r stays context.
 
     Beta comes from beta_probe.name_betas (step 1, committed 0dd90ef), so the
     card and the probe can never disagree about how a beta is estimated.
@@ -18,12 +19,16 @@ WHY (DP-V7, ruled by Rob 2026-11-18; claude/FINC5133_CourseReview_2026-11-18.md 
 WHAT IT READS
     today's signals log (the watchlist, via value_card.parse_log), Schwab daily
     candles (one call per name, through beta_probe.fetch_all) unless a fresh
-    beta cache covers them, FRED's public DGS10 series, and - only if FRED fails
-    and the date is today - Schwab's $TNX quote. No account data, no model call.
+    beta cache covers them, and FRED's public DGS10 series (the cached copy when
+    FRED does not answer). No account data, no model call.
 
 WHAT IT WRITES
-    cost_of_equity_<date>.md and .json, and valuation_cache\\beta_cache.json
-    (today's runs only). No workbook, no prompt, no gate, no endpoint (DP-V1).
+    cost_of_equity_<date>.md and .json, valuation_cache\\beta_cache.json
+    (today's runs only) and valuation_cache\\dgs10.json (the 10-year series,
+    whenever FRED answers). No workbook, no prompt, no gate, no endpoint.
+    AMENDED 2026-11-18 (DP-V8): dgs10.json is the HEADLINE class's rRF (value_card
+    reads it for the card and every DP-V2 ledger date), so this step is no longer
+    context only for the class: with no series at all the card is NO READ.
 
 BARS - fixed here on 2026-11-18, before the first run (DP-V7)
     Ruled by Rob (2026-11-18)
@@ -32,14 +37,17 @@ BARS - fixed here on 2026-11-18, before the first run (DP-V7)
                  of WEEKLY returns as the cross-check. Exactly beta_probe's.
       RPM        5.0%
     Set by Claude under DP-V7 (2026-11-18); Rob may change any before Part B
-      rRF        FRED DGS10, the latest observation ON OR BEFORE the card's date
-                 (a 10-year Treasury, Ch 9 slide 23). STALE when that
-                 observation is more than 7 calendar days old.
-      fallback   Schwab $TNX / 10, ONLY when FRED fails and the date is today
-                 (a live quote cannot stand in for a past date). $TNX quotes
-                 the yield x 10: the probe read 50.62 against FRED's 5.12
-                 (ratio 9.89). A value in [20, 150] is divided by 10; one in
-                 [0.5, 15] is taken as a percent; anything else is refused.
+      rRF        FRED DGS10 (a 10-year Treasury, Ch 9 slide 23). STALE when the
+                 observation used is more than 7 calendar days old.
+                 RE-CUT 2026-11-18 (DP-V8, after the first live run): the latest
+                 observation dated BEFORE the card's date (value_card.rrf_before),
+                 not on or before it -- the yield known when the session opened,
+                 one rule for the card and the rebuilt ledger. The first live
+                 run read 11-16's 5.12% on 11-18, which the new rule also reads
+                 while 11-17's is unpublished. The series is cached in
+                 valuation_cache\\dgs10.json; a failed fetch reads the cache
+                 (a FINDING). The $TNX fallback is REMOVED: a live quote is not
+                 a yield dated before the session.
       CAPM r     rRF + adjusted beta x RPM, in percent.
       95% CI     the raw beta's +/- 1.96 SE carried through Blume (x 0.67) and
                  RPM: half-width = 5.0 x 0.67 x 1.96 x SE points of r.
@@ -90,8 +98,7 @@ RRF_STALE_DAYS = 7
 BETA_MAX_AGE_DAYS = 7
 WIDE_HALF_PP = 2.0                  # the card's own grid: own r +/- 2 points
 CI_Z = 1.96
-TNX_X10 = (20.0, 150.0)
-TNX_X1 = (0.5, 15.0)
+SERIES_FROM = dt.date(2024, 1, 1)   # dgs10.json keeps observations from here on
 CACHE_DIR = "valuation_cache"
 CACHE_NAME = "beta_cache.json"
 FRED_URL = BP.FRED_URL
@@ -106,13 +113,13 @@ def bars():
 
 
 # ============================================================================ rRF
-def rrf_on_or_before(text, date):
-    """(observation date, percent) for the latest numeric DGS10 row on or before
-    `date`. FRED's header has been 'DATE,DGS10' and 'observation_date,DGS10'; a
-    missing day is '.' or empty."""
+def parse_fred_series(text, since=SERIES_FROM):
+    """[(date, percent), ...] oldest first, every numeric DGS10 row from `since`.
+    FRED's header has been 'DATE,DGS10' and 'observation_date,DGS10'; a missing
+    day is '.' or empty and is skipped."""
     import csv
     import io
-    best = None
+    out = {}
     for row in csv.reader(io.StringIO(text or "")):
         if len(row) < 2 or not row[0][:4].isdigit():
             continue
@@ -121,9 +128,9 @@ def rrf_on_or_before(text, date):
             v = float(row[1])
         except ValueError:
             continue
-        if d <= date and (best is None or d > best[0]):
-            best = (d, v)
-    return best
+        if d >= since:
+            out[d] = v
+    return sorted(out.items())
 
 
 def fetch_fred_text(timeout=20):
@@ -138,60 +145,48 @@ def fetch_fred_text(timeout=20):
     return resp.text
 
 
-def tnx_to_pct(v):
-    if v is None:
-        return None
-    if TNX_X10[0] <= v <= TNX_X10[1]:
-        return v / 10.0
-    if TNX_X1[0] <= v <= TNX_X1[1]:
-        return float(v)
-    return None
+def series_path(root):
+    import value_card as VC
+    return os.path.join(root, VC.RRF_SERIES)
 
 
-def fetch_tnx():
-    import time
-    import schwab_client as SC
-    client = SC.get_client()
-    for sym in BP.TNX_SYMBOLS:
-        try:
-            v = BP.tnx_from_quote_json(client.get_quotes([sym]).json(), sym)
-        except Exception:           # noqa: BLE001
-            v = None
-        if v:
-            return sym, v
-        time.sleep(BP.CALL_PAUSE_S)
-    return None, None
+def save_rrf_series(root, obs):
+    os.makedirs(os.path.dirname(series_path(root)), exist_ok=True)
+    tmp = series_path(root) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"source": "FRED DGS10", "url": FRED_URL,
+                   "fetched": dt.datetime.now().isoformat(timespec="seconds"),
+                   "obs": [[str(d), v] for d, v in obs]}, fh, indent=0)
+    os.replace(tmp, series_path(root))
 
 
-def get_rrf(date, today, fred_text_fn=fetch_fred_text, tnx_fn=fetch_tnx):
-    """{'pct', 'date', 'source', 'stale', 'why', 'fallback'}; pct None when no
-    source answers."""
-    why = None
+def get_rrf(date, root, fred_text_fn=fetch_fred_text):
+    """The headline's own rule (DP-V8): the latest DGS10 observation dated
+    before `date`, from a fresh FRED fetch (which rewrites the cached series)
+    or, if FRED does not answer, the cached series. Returns {'pct', 'date',
+    'source', 'stale', 'age_days', 'why', 'cached', 'series_written'}."""
+    import value_card as VC
+    why, written = None, False
     try:
-        got = rrf_on_or_before(fred_text_fn(), date)
-        if got:
-            age = (date - got[0]).days
-            return {"pct": got[1], "date": str(got[0]), "source": "FRED DGS10", "fallback": False,
-                    "stale": age > RRF_STALE_DAYS, "age_days": age, "why": None}
-        why = "FRED: no observation on or before %s" % date
+        obs = parse_fred_series(fred_text_fn())
+        if obs:
+            save_rrf_series(root, obs)
+            written = True
+        else:
+            why = "FRED answered with no numeric DGS10 row"
     except Exception as e:          # noqa: BLE001
         why = "FRED: %s: %s" % (type(e).__name__, e)
-    if date != today:
-        return {"pct": None, "date": None, "source": None, "fallback": False, "stale": False,
-                "why": why + "; no fallback for a past date (a live $TNX quote is today's)"}
-    try:
-        sym, v = tnx_fn()
-    except Exception as e:          # noqa: BLE001
-        sym, v = None, None
-        why += "; Schwab $TNX: %s: %s" % (type(e).__name__, e)
-    pct = tnx_to_pct(v)
-    if pct is None:
-        return {"pct": None, "date": None, "source": None, "fallback": False, "stale": False,
-                "why": why + ("; Schwab %s %s outside both scales" % (sym, v) if v else
-                              "; Schwab $TNX: no value")}
-    return {"pct": pct, "date": str(today), "source": "Schwab %s / 10 (fallback)" % sym if v != pct
-            else "Schwab %s (fallback)" % sym, "fallback": True, "stale": False, "age_days": 0,
-            "raw": v, "why": why}
+    series = VC.load_rrf_series(root)
+    got = VC.rrf_before(series, date) if series else None
+    if got is None:
+        return {"pct": None, "date": None, "source": None, "stale": False, "age_days": None,
+                "cached": not written, "series_written": written,
+                "why": "; ".join(x for x in (why, "no 10-year yield dated before %s in %s" % (
+                    date, VC.RRF_SERIES)) if x)}
+    age = (date - got[0]).days
+    return {"pct": got[1], "date": str(got[0]), "source": "FRED DGS10" + ("" if written else
+            " (cached series, fetched %s)" % series.get("fetched")), "stale": age > RRF_STALE_DAYS,
+            "age_days": age, "cached": not written, "series_written": written, "why": why}
 
 
 # ============================================================================ cache
@@ -277,7 +272,7 @@ def tickers_from_log(path):
 
 
 def build(date, today, tickers, root, refresh=False, fetch_fn=None, fred_text_fn=fetch_fred_text,
-          tnx_fn=fetch_tnx, log=print):
+          log=print):
     """Returns (result dict, findings, cache_written) or raises SystemExit((msg, 2))."""
     fetch_fn = fetch_fn or BP.fetch_all
     want = sorted(set(tickers) | {BP.MARKET})
@@ -309,14 +304,16 @@ def build(date, today, tickers, root, refresh=False, fetch_fn=None, fred_text_fn
             src["note"] = "past date: estimated on candles before %s; the cache was not written" % date
     if BP.MARKET not in betas:
         raise SystemExit(("no %s beta in the cache or the fetch" % BP.MARKET, 2))
-    rrf = get_rrf(date, today, fred_text_fn, tnx_fn)
+    rrf = get_rrf(date, root, fred_text_fn)
     if rrf["pct"] is None:
-        findings.append("no rRF (%s): no CAPM r today; the card prints the 9%% class alone" % rrf["why"])
-    elif rrf["fallback"]:
-        findings.append("rRF from the fallback, %s: %s" % (rrf["source"], rrf["why"]))
-    elif rrf["stale"]:
-        findings.append("rRF STALE: FRED's latest DGS10 on or before %s is %s (%d days)"
-                        % (date, rrf["date"], rrf["age_days"]))
+        findings.append("no rRF (%s): no CAPM r, and the value card's headline class is NO READ (DP-V8)"
+                        % rrf["why"])
+    else:
+        if rrf["cached"]:
+            findings.append("FRED did not answer (%s): rRF read from the cached series" % rrf["why"])
+        if rrf["stale"]:
+            findings.append("rRF STALE: the latest DGS10 dated before %s is %s (%d days)"
+                            % (date, rrf["date"], rrf["age_days"]))
     for t, why in sorted(errors.items()):
         findings.append("fetch error %s: %s" % (t, why))
     fs = BP.feed_sanity(betas)
@@ -354,8 +351,8 @@ def render_md(res):
         res["date"], _f(rrf["pct"], "%.2f%%"), rrf.get("source") or rrf.get("why"),
         (", observed %s" % rrf["date"]) if rrf.get("date") else "", res["rpm_pct"],
         _f(res["mkt_r_pct"], "%.2f%%")))
-    L.append("the card's 9%% equals rRF + RPM only when rRF = %.2f%%; today rRF + RPM = %s" % (
-        res["rrf_for_9pct"], _f(res["mkt_r_pct"], "%.2f%%")))
+    L.append("rRF + RPM = %s is the value card's headline r since DP-V8 (it was 9%%, which is rRF + RPM "
+             "only at rRF %.2f%%)" % (_f(res["mkt_r_pct"], "%.2f%%"), res["rrf_for_9pct"]))
     if src["from_cache"]:
         age = (dt.date.fromisoformat(res["date"]) - dt.date.fromisoformat(src["as_of"])).days
         L.append("betas: REUSED from valuation_cache\\beta_cache.json, estimated %s on completed sessions "
@@ -399,7 +396,7 @@ def render_md(res):
     return "# cost_of_equity exhibit\n\n```\n" + "\n".join(L) + "\n```\n"
 
 
-def run(args, log=print, fetch_fn=None, fred_text_fn=fetch_fred_text, tnx_fn=fetch_tnx, today=None):
+def run(args, log=print, fetch_fn=None, fred_text_fn=fetch_fred_text, today=None):
     today = today or BP.market_today()
     date = dt.date.fromisoformat(args.date) if args.date else today
     if date > today:
@@ -421,7 +418,7 @@ def run(args, log=print, fetch_fn=None, fred_text_fn=fetch_fred_text, tnx_fn=fet
             return 2
     try:
         res, findings, wrote = build(date, today, tickers, args.root, args.refresh, fetch_fn,
-                                     fred_text_fn, tnx_fn, log)
+                                     fred_text_fn, log)
     except SystemExit as e:
         msg = e.code[0] if isinstance(e.code, tuple) else str(e.code)
         log("COULD NOT RUN: %s" % msg)
@@ -451,33 +448,46 @@ def selftest():
     def ok(name, cond, detail=""):
         checks.append((name, bool(cond), detail))
 
-    # 1-5 rRF: FRED on or before the date; $TNX scale
-    csv_a = "observation_date,DGS10\n2026-11-13,5.10\n2026-11-16,5.12\n2026-11-17,.\n2026-11-18,5.20\n"
-    ok("FRED: latest row on or before 11-17 skips the '.' day", rrf_on_or_before(csv_a, dt.date(2026, 11, 17))
-       == (dt.date(2026, 11, 16), 5.12))
-    ok("FRED: on the day itself", rrf_on_or_before(csv_a, dt.date(2026, 11, 18)) == (dt.date(2026, 11, 18), 5.20))
-    ok("FRED: older header 'DATE' and no row before the date", rrf_on_or_before(
-        "DATE,DGS10\n2026-11-16,5.12\n", dt.date(2026, 11, 15)) is None and rrf_on_or_before(
-        "DATE,DGS10\n2026-11-16,5.12\n", dt.date(2026, 11, 16)) == (dt.date(2026, 11, 16), 5.12))
-    ok("$TNX 50.62 reads 5.062% (yield x 10, the probe's 11-18 quote)", abs(tnx_to_pct(50.62) - 5.062) < 1e-12)
-    ok("$TNX 5.06 reads as a percent; 300 and 0.1 are refused", tnx_to_pct(5.06) == 5.06
-       and tnx_to_pct(300) is None and tnx_to_pct(0.1) is None and tnx_to_pct(None) is None)
-
+    # 1-9 rRF (DP-V8): the latest DGS10 dated BEFORE the date, from a cached series
+    csv_a = "observation_date,DGS10\n2023-12-29,3.88\n2026-11-13,5.10\n2026-11-16,5.12\n2026-11-17,.\n2026-11-18,5.20\n"
+    sa = parse_fred_series(csv_a)
+    ok("FRED series: '.' skipped, rows before 2024 dropped, oldest first",
+       sa == [(dt.date(2026, 11, 13), 5.10), (dt.date(2026, 11, 16), 5.12), (dt.date(2026, 11, 18), 5.20)])
+    ok("FRED series: the older 'DATE' header parses too",
+       parse_fred_series("DATE,DGS10\n2026-11-16,5.12\n") == [(dt.date(2026, 11, 16), 5.12)])
     today = dt.date(2026, 11, 18)
-    g = get_rrf(today, today, lambda: csv_a, lambda: (_ for _ in ()).throw(AssertionError("no TNX")))
-    ok("rRF: FRED answers, no fallback, not stale", g["pct"] == 5.20 and not g["fallback"] and not g["stale"])
-    g = get_rrf(dt.date(2026, 12, 1), dt.date(2026, 12, 1), lambda: csv_a, lambda: ("$TNX", 51.0))
-    ok("rRF: an observation 13 days old is STALE (and FRED still wins)", g["stale"] and g["pct"] == 5.20
-       and g["age_days"] == 13)
+    rr_root = tempfile.mkdtemp(prefix="coe_rrf_")
+    try:
+        g = get_rrf(today, rr_root, lambda: csv_a)
+        ok("rRF on 11-18 is 11-16's 5.12% (dated BEFORE the session; 11-18's own 5.20 is not used)",
+           g["pct"] == 5.12 and g["date"] == "2026-11-16" and g["series_written"] and not g["cached"]
+           and not g["stale"], str(g["pct"]))
+        g = get_rrf(dt.date(2026, 11, 19), rr_root, lambda: csv_a)
+        ok("rRF on 11-19 is 11-18's 5.20%", g["pct"] == 5.20 and g["date"] == "2026-11-18")
+        g = get_rrf(dt.date(2026, 12, 2), rr_root, lambda: csv_a)
+        ok("rRF: an observation 14 days old is STALE", g["stale"] and g["age_days"] == 14 and g["pct"] == 5.20)
 
-    def down():
-        raise OSError("blocked")
-    g = get_rrf(today, today, down, lambda: ("$TNX", 50.62))
-    ok("rRF: FRED down today -> $TNX / 10, marked fallback", g["fallback"] and abs(g["pct"] - 5.062) < 1e-12
-       and "FRED: OSError" in g["why"])
-    g = get_rrf(dt.date(2026, 11, 10), today, down, lambda: ("$TNX", 50.62))
-    ok("NEGATIVE: FRED down for a PAST date -> no rRF, never today's quote", g["pct"] is None
-       and "past date" in g["why"])
+        def down():
+            raise OSError("blocked")
+        g = get_rrf(today, rr_root, down)
+        ok("FRED down: the cached series answers, marked cached, the same 5.12%",
+           g["pct"] == 5.12 and g["cached"] and not g["series_written"] and "FRED: OSError" in g["why"]
+           and "cached series" in g["source"])
+        g = get_rrf(dt.date(2026, 11, 13), rr_root, down)
+        ok("NEGATIVE: no observation dated before 11-13 in the series -> no rRF", g["pct"] is None
+           and "no 10-year yield dated before 2026-11-13" in g["why"])
+        empty = tempfile.mkdtemp(prefix="coe_rrf0_")
+        g = get_rrf(today, empty, down)
+        ok("NEGATIVE: FRED down and no cached series -> no rRF, never a quote", g["pct"] is None)
+        shutil.rmtree(empty, ignore_errors=True)
+        import value_card as VC
+        ok("one rule: the card's headline reads the same rRF from the same file",
+           VC.headline_r(VC.load_rrf_series(rr_root), today)["rrf"] == 5.12
+           and abs(VC.headline_r(VC.load_rrf_series(rr_root), today)["r"] - 10.12) < 1e-12)
+        ok("RPM is one number in three places (cost_of_equity, value_card, beta_probe)",
+           RPM_PCT == VC.RPM_PCT == 100 * BP.RPM)
+    finally:
+        shutil.rmtree(rr_root, ignore_errors=True)
 
     # 10-16 the per-name record against the probe's own 11-18 numbers
     aapl = {"daily": {"beta": 1.0369704336236014, "adj": CF.blume(1.0369704336236014), "se": 0.06113877344510087,
@@ -559,14 +569,14 @@ def selftest():
                          "Risk: APPROVED | Reason: x | H1[]\n" % t)
         ns = argparse.Namespace(date="2026-11-18", log=logp, tickers=None, root=root, refresh=False, out=None)
         quiet = []
-        rc1 = run(ns, quiet.append, fake_fetch, lambda: csv_a, lambda: ("$TNX", 50.0), today=today)
+        rc1 = run(ns, quiet.append, fake_fetch, lambda: csv_a, today=today)
         with open(os.path.join(root, "cost_of_equity_2026-11-18.json"), encoding="utf-8") as fh:
             j = json.load(fh)
         aaa = j["names"]["AAA"]
         ok("e2e: the log's names plus SPY are fetched once, candles before the date",
            len(calls) == 1 and set(calls[0][0]) == {"AAA", "BBB", "VTI", "QQQX", "SPY"} and calls[0][1] == today)
-        ok("e2e: AAA (true beta 1.5) reads within 3 SE, r = 5.20 + adj x 5",
-           abs(aaa["beta_raw"] - 1.5) < 3 * aaa["se"] and abs(aaa["r_capm_pct"] - (5.20 + 5 * aaa["beta_adj"])) < 1e-12,
+        ok("e2e: AAA (true beta 1.5) reads within 3 SE, r = 5.12 + adj x 5 (the yield dated before 11-18)",
+           abs(aaa["beta_raw"] - 1.5) < 3 * aaa["se"] and abs(aaa["r_capm_pct"] - (5.12 + 5 * aaa["beta_adj"])) < 1e-12,
            "%.3f" % aaa["beta_raw"])
         ok("e2e: a name with no candles is listed with its reason and is a finding",
            j["names"]["QQQX"]["r_capm_pct"] is None and "HTTP 400" in j["names"]["QQQX"]["why"]
@@ -574,14 +584,15 @@ def selftest():
         ok("e2e: feed sanity PASS (SPY on itself, VTI ~1)", j["feed_sanity"]["spy_self"] == "PASS"
            and j["feed_sanity"]["vti"] == "PASS")
         ok("e2e: the keys value_card reads are present",
-           all(k in j for k in ("rrf", "mkt_r_pct", "rpm_pct", "names")) and abs(j["mkt_r_pct"] - 10.2) < 1e-12
+           all(k in j for k in ("rrf", "mkt_r_pct", "rpm_pct", "names")) and abs(j["mkt_r_pct"] - 10.12) < 1e-12
            and all(k in aaa for k in ("r_capm_pct", "r_ci_pct", "flags", "beta_adj", "beta_raw", "se", "r2", "n")))
         ok("e2e: today's run writes the cache", os.path.exists(cache_path(root)))
         with open(os.path.join(root, "cost_of_equity_2026-11-18.md"), encoding="utf-8") as fh:
             md = fh.read()
         ok("e2e: the exhibit states the rRF, the 9% identity and the method",
-           "rRF 5.20% (FRED DGS10, observed 2026-11-18)" in md and "rRF = 4.00%" in md and "Blume 0.67" in md)
-        rc2 = run(ns, quiet.append, fake_fetch, lambda: csv_a, lambda: ("$TNX", 50.0), today=today)
+           "rRF 5.12% (FRED DGS10, observed 2026-11-16)" in md and "rRF 4.00%" in md and "Blume 0.67" in md
+           and os.path.exists(series_path(root)))
+        rc2 = run(ns, quiet.append, fake_fetch, lambda: csv_a, today=today)
         with open(os.path.join(root, "cost_of_equity_2026-11-18.json"), encoding="utf-8") as fh:
             j2 = json.load(fh)
         ok("e2e: a second run the same day reuses the cache (no fetch), same r",
@@ -589,16 +600,16 @@ def selftest():
            and abs(j2["names"]["AAA"]["r_capm_pct"] - aaa["r_capm_pct"]) < 1e-12)
         mtime = os.path.getmtime(cache_path(root))
         ns_past = argparse.Namespace(date="2026-11-10", log=logp, tickers=None, root=root, refresh=False, out=None)
-        rc3 = run(ns_past, quiet.append, fake_fetch, lambda: csv_a, lambda: ("$TNX", 50.0), today=today)
+        rc3 = run(ns_past, quiet.append, fake_fetch, lambda: csv_a, today=today)
         with open(os.path.join(root, "cost_of_equity_2026-11-10.json"), encoding="utf-8") as fh:
             j3 = json.load(fh)
         ok("e2e: a PAST date refuses the later cache, fetches candles before it, writes no cache",
            len(calls) == 2 and calls[1][1] == dt.date(2026, 11, 10) and os.path.getmtime(cache_path(root)) == mtime
            and not j3["beta_source"]["from_cache"] and j3["names"]["AAA"]["last"] < "2026-11-10" and rc3 == 1)
-        ok("e2e: the past date reads FRED's 11-10 or earlier value (5.10 on 11-13 is after it: none)",
-           j3["rrf"]["pct"] is None and "past date" in j3["rrf"]["why"])
+        ok("e2e: the past date finds no yield dated before 11-10 in the series (it starts 11-13): none",
+           j3["rrf"]["pct"] is None and "dated before 2026-11-10" in j3["rrf"]["why"])
         ns_ref = argparse.Namespace(date="2026-11-18", log=logp, tickers=None, root=root, refresh=True, out=None)
-        run(ns_ref, quiet.append, fake_fetch, lambda: csv_a, lambda: ("$TNX", 50.0), today=today)
+        run(ns_ref, quiet.append, fake_fetch, lambda: csv_a, today=today)
         ok("e2e: --refresh fetches even with a fresh cache", len(calls) == 3)
 
         def no_spy(tickers, asof, log):
@@ -606,21 +617,21 @@ def selftest():
         nos = argparse.Namespace(date="2026-11-18", log=logp, tickers=None, root=root, refresh=True,
                                  out=os.path.join(root, "nospy"))
         ok("NEGATIVE: no SPY history -> exit 2, nothing written",
-           run(nos, quiet.append, no_spy, lambda: csv_a, lambda: ("$TNX", 50.0), today=today) == 2
+           run(nos, quiet.append, no_spy, lambda: csv_a, today=today) == 2
            and not os.path.exists(os.path.join(root, "nospy.md")))
         nolog = argparse.Namespace(date="2026-11-18", log=os.path.join(root, "none.log"), tickers=None,
                                    root=root, refresh=False, out=None)
         ok("NEGATIVE: no signals log -> exit 2", run(nolog, quiet.append, fake_fetch, lambda: csv_a,
-                                                    lambda: ("$TNX", 50.0), today=today) == 2)
+                                                    today=today) == 2)
         fut = argparse.Namespace(date="2026-11-19", log=logp, tickers=None, root=root, refresh=False, out=None)
         ok("NEGATIVE: a date after today -> exit 2", run(fut, quiet.append, fake_fetch, lambda: csv_a,
-                                                        lambda: ("$TNX", 50.0), today=today) == 2)
+                                                        today=today) == 2)
         shutil.copy(logp, os.path.join(root, REFUSED))     # exists and parses: only the name refuses it
         rep = argparse.Namespace(date="2026-11-18", log=os.path.join(root, REFUSED), tickers=None, root=root,
                                  refresh=False, out=None)
         said = []
         ok("NEGATIVE: the report copy is refused as an input, by name",
-           run(rep, said.append, fake_fetch, lambda: csv_a, lambda: ("$TNX", 50.0), today=today) == 2
+           run(rep, said.append, fake_fetch, lambda: csv_a, today=today) == 2
            and said and said[0].startswith("REFUSED"))
     finally:
         shutil.rmtree(root, ignore_errors=True)

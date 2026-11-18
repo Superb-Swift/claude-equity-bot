@@ -989,6 +989,45 @@ RULINGS = {
               "becomes NO READ (no 10-K yet). The basis is chosen on B1 of the 2026-08-24 memo "
               "(written before any of these counts), not on which rows survive."),
     ),
+    # ADDED 2026-11-18: DP-V7 and DP-V8. (DP-V5 and DP-V6 are recorded in their docs only.)
+    "DP-V7": dict(
+        dp="DP-V7",
+        question=("the FINC 5133 build (claude/FINC5133_CourseReview_2026-11-18.md section 7): "
+                  "steps 0-3 as one reporting-only build"),
+        status=("RULED (Rob) - build now, reporting only (DP-V1): corpfin, beta_probe, cost_of_equity "
+                "and the class at own r on the value card; beta 2y daily (3y weekly check), Blume "
+                "0.67/0.33, RPM 5.0%; steps 4-7 each get their own pre-registration"),
+        open=False, ruled_on=dt.date(2026, 11, 18), effective=dt.date(2026, 11, 18),
+        doc="claude/DP-V7_Steps0-1_Build_2026-11-18.md",
+        bar="each tool's bars are fixed in its header before its first live run",
+        note=("Rob, 2026-11-18 12:35 CT, four AskUserQuestion answers, the recommended option each "
+              "time, before any probe figure existed. Step 2 doc: "
+              "claude/DP-V7_Step2_CostOfEquity_2026-11-18.md. AMENDED by DP-V8 the same day: the "
+              "headline class no longer stays at 9%."),
+    ),
+    "DP-V8": dict(
+        dp="DP-V8",
+        question="the value card's headline cost of equity: the pre-registered 9%, or rRF + RPM",
+        status=("RULED (Rob) - the class reads r = rRF + RPM (the 10-year Treasury dated before the "
+                "session + 5.0%); the DP-V2 ledger is rebuilt on it from 2026-08-24 and the 12-month "
+                "9% ledger CLOSED, never pooled"),
+        open=False, ruled_on=dt.date(2026, 11, 18), effective=dt.date(2026, 11, 18),
+        doc="claude/DP-V8_HeadlineRate_2026-11-18.md",
+        bar=("unchanged: the 2.00x / 1.50x lines, g = 3%, and DP-V2's bar (12 flip rows on 3 "
+             "tickers by 2026-12-31, else withdrawn)"),
+        note=("Rob, 2026-11-18 13:56 CT, verbatim: 'For the headline r, change to rRF + RPM'. "
+              "Asked how the DP-V2 ledger should take it, before any rebuilt count was computed, he "
+              "chose 'Rebuild, close 9% (Recommended)' (the DP-V4 precedent). DEFINITIONS, fixed by "
+              "Claude before the rebuilt count existed: rRF = the latest FRED DGS10 observation "
+              "dated BEFORE the session, from valuation_cache/dgs10.json (written by "
+              "cost_of_equity.py), one rule for the card and every ledger date; no yield -> NO "
+              "READ, never a 9% fallback; robustness = r -/+ 2 points; the class at 9% printed for "
+              "reference; section 6 keeps implied_return's own 9% identity. KNOWN WHEN RULED "
+              "(counts, no outcome): the 12-month 9% ledger read 3 rows (FTI 10-28, 11-04, 11-09), "
+              "1 of 3 tickers. AFTER the choice, a code check at a FLAT 5.12% (not the real "
+              "series) read 10 rows on 2 tickers; it is not the count [?]. The count is the "
+              "first value.bat run on the real series."),
+    ),
 }
 
 def status_of(key):

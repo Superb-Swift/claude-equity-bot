@@ -70,6 +70,24 @@ DP-V7 step 2, 2026-11-18 (claude/DP-V7_Step2_CostOfEquity_2026-11-18.md): A
     unchanged: moving the class off 9% is class-affecting and needs a ruling.
     A missing cost_of_equity_<date>.json prints 'not available', never a guess.
 
+DP-V8, 2026-11-18 (Rob, 13:56 CT; claude/DP-V8_HeadlineRate_2026-11-18.md): THE
+    HEADLINE CLASS READS r = rRF + RPM. rRF is the latest 10-year Treasury yield
+    (FRED DGS10) dated BEFORE the card's session, from the series
+    cost_of_equity.py caches in valuation_cache\\dgs10.json; RPM is 5.0% (DP-V7).
+    The same rule serves every date, so the card and the rebuilt ledger read one
+    rate. The 2.00 / 1.50 lines and g = 3% are unchanged; at r = 10.12% they are
+    P/E lines of about 29 and 22 (34 and 26 at 9%). Robustness is the r -/+ 2
+    grid around the headline r (7/9/11 when r was 9). The class at 9% is
+    carried for reference (decision card '@9%', section 3, the sheet). Section
+    1 splits a ratio move into PRICE, FILING and RATE. The DP-V2 ledger is
+    REBUILT on this basis from 2026-08-24, point in time (each session's own
+    yield, filings public before it, its own exhibit); the 12-month ledger at
+    9% is CLOSED and printed, never pooled; DP-V2's bar and 12-31 stop are
+    unchanged. No yield before the date -> every class NO READ, never a 9%
+    fallback. Section 6 still checks implied_return's own 9% arithmetic.
+    AMENDS DP-V7 step 2 above: '@beta-1' is now the headline itself, so panel
+    2d prints @9%, the headline class and @own r.
+
 WHAT IT DOES NOT DO
     It reads no return, breach, hit or +Nd cell. It modifies no gate, admits
     and rejects nothing, touches no workbook, no prompt, no endpoint, no
@@ -106,8 +124,14 @@ import os
 import re
 import sys
 
-R_GRID = (7.0, 9.0, 11.0)      # cost-of-equity grid printed by implied_return 4
-R_BASE = 9.0                   # the pre-registered class rate (DP-V2 memo 3.1)
+R_GRID = (7.0, 9.0, 11.0)      # implied_return 4's own grid (its exhibit); the card's is r -/+ R_STEP (DP-V8)
+R_BASE = 9.0                   # the class rate until DP-V8 (DP-V2 memo 3.1); now the reference
+                               # rate: the '@9%' columns, the closed ledger and implied_return's own
+                               # exhibit (section 6)
+RPM_PCT = 5.0                  # DP-V7 (Rob, 2026-11-18); DP-V8: headline r = rRF + RPM
+R_STEP = 2.0                   # DP-V8: the robustness grid is r -/+ 2 points (7/9/11 at r = 9)
+RRF_SERIES = os.path.join("valuation_cache", "dgs10.json")   # written by cost_of_equity.py
+RRF_STALE_DAYS = 7             # an rRF older than this before the date is a FINDING
 G_BASE = 3.0                   # implied_return's g
 DEMANDING_AT = 2.00            # DP-V2 memo 3.1, frozen at first run, never re-cut
 NEUTRAL_AT = 1.50
@@ -118,6 +142,7 @@ DPV2_STOP = dt.date(2026, 12, 31)      # DP-V2 memo 6: withdrawn, not extended
 DPV2_MIN_ROWS, DPV2_MIN_TICKERS = 12, 3
 INSTALLED = dt.date(2026, 10, 14)      # rows on or before this are BACKFILLED
 DPV4_ON = dt.date(2026, 10, 24)        # DP-V4: the class reads 12-month ROE; earlier rows REBUILT
+DPV8_ON = dt.date(2026, 11, 18)        # DP-V8: the class reads r = rRF + RPM; earlier rows REBUILT
 EDGE_BORDERLINE = 0.05                 # a ratio this close to a line can cross on a 2-3% price move
 OWN_R_STEP = 2.0                       # DP-V7 step 2: own r +/- 2 points, as 7/9/11 is 9 +/- 2
 CLASS_LETTER = {"DEMANDING": "D", "NEUTRAL": "N", "UNDEMANDING": "U", "NO READ": "-"}
@@ -253,18 +278,21 @@ def pe_lastfy(f):
 
 
 def robustness(f):
-    """DP-V4 (2026-10-24): the class under the r = 7/9/11% grid on the 12-month
+    """DP-V4 (2026-10-24): the class under a cost-of-equity grid on the 12-month
     basis, and the distance from today's ratio to the nearest line. ROBUST
     only if the three agree. The old six-way test mixed in two ROE routes that
     were both known to be the wrong period (the last-FY year and one quarter
     x4); the basis is now settled by DP-V4, so what is left to doubt is the
     cost of equity and the closeness of a line. The last-FY class (the basis
-    before DP-V4) is carried for reference only."""
-    roe = f.get("roe")
+    before DP-V4) is carried for reference only.
+    AMENDED 2026-11-18 (DP-V8): the grid is the headline r -/+ 2 points
+    (f["r_head"]; 9% when absent, which is the 7/9/11 grid exactly: ratio_at
+    inverts the exhibit's own i9). r_grid carries the three rates."""
+    r0 = f.get("r_head", R_BASE)
+    grid = (r0 - R_STEP, r0, r0 + R_STEP) if r0 is not None else (None, None, None)
     combos = {}
-    for r, ik in zip(R_GRID, ("i7", "i9", "i11")):
-        i = f.get(ik)
-        ratio = (i / roe) if (i is not None and roe and roe > 0) else None
+    for r in grid:
+        ratio = ratio_at(f, r) if r is not None else None
         combos[r] = (ratio, klass(ratio))
     base = klass(f.get("ratio"))
     ratios = [v[0] for v in combos.values() if v[0] is not None]
@@ -278,7 +306,7 @@ def robustness(f):
              ("—" if base == "NO READ" else "FRAGILE")),
         lo=min(ratios) if ratios else None, hi=max(ratios) if ratios else None,
         r_flip=(base != "NO READ" and len(classes) > 1),
-        r_classes=[combos[r][1] for r in R_GRID],
+        r_classes=[combos[r][1] for r in grid], r_grid=list(grid),
         edge=edge[0] if edge else None, edge_line=edge[1] if edge else None,
         borderline=bool(edge) and edge[0] < EDGE_BORDERLINE,
         lastfy=lastfy, lastfy_ratio=f.get("ratio_lastfy"),
@@ -286,15 +314,21 @@ def robustness(f):
 
 
 def decompose(prev, cur):
-    """Split a ratio move into PRICE (new price, old fundamentals) and FILING
-    (new fundamentals at the new price). Returns None where either side has
-    no ratio."""
-    r0 = ratio_from(prev["px"], prev["bvps"], prev["roe"])
-    rp = ratio_from(cur["px"], prev["bvps"], prev["roe"])
-    r1 = ratio_from(cur["px"], cur["bvps"], cur["roe"])
-    if None in (r0, rp, r1):
+    """Split a ratio move into PRICE (new price, old fundamentals, old rate),
+    FILING (new fundamentals at the new price, old rate) and RATE (the new
+    headline r on everything new; DP-V8). The three sum to the total. A record
+    without r_head reads 9%, so before DP-V8 RATE is 0. Returns None where any
+    leg has no ratio."""
+    ra, rb = prev.get("r_head", R_BASE), cur.get("r_head", R_BASE)
+    if ra is None or rb is None:
         return None
-    return dict(r0=r0, r1=r1, price=rp - r0, filing=r1 - rp)
+    r0 = ratio_from(prev["px"], prev["bvps"], prev["roe"], ra)
+    rp = ratio_from(cur["px"], prev["bvps"], prev["roe"], ra)
+    rf = ratio_from(cur["px"], cur["bvps"], cur["roe"], ra)
+    r1 = ratio_from(cur["px"], cur["bvps"], cur["roe"], rb)
+    if None in (r0, rp, rf, r1):
+        return None
+    return dict(r0=r0, r1=r1, price=rp - r0, filing=rf - rp, rate=r1 - rf)
 
 
 def g_implied_pct(roe_pct, mb, r=R_BASE):
@@ -309,6 +343,50 @@ def g_implied_pct(roe_pct, mb, r=R_BASE):
         return None
     g = (mb * rs - roe) / den
     return None if g >= rs else g * 100.0
+
+
+# --------------------------------------------------------------------------- #
+# DP-V8 (2026-11-18): the headline r = rRF + RPM, rRF the 10-year yield dated
+# before the session. One rule for the card, section 1's previous exhibit and
+# every DP-V2 ledger date.
+# --------------------------------------------------------------------------- #
+
+def load_rrf_series(root):
+    """[(date, percent), ...] oldest first from valuation_cache\\dgs10.json (FRED
+    DGS10, written by cost_of_equity.py), and the file's 'fetched' stamp. None
+    when the file is absent or unreadable."""
+    path = os.path.join(root, RRF_SERIES)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            js = json.load(fh)
+        obs = sorted((dt.date.fromisoformat(d), float(v)) for d, v in js.get("obs") or [])
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    return dict(obs=obs, fetched=js.get("fetched"), source=js.get("source") or "FRED DGS10") if obs else None
+
+
+def rrf_before(series, d):
+    """(observation date, percent): the latest observation dated strictly
+    before d -- the yield known when d's session opened. None if there is none."""
+    best = None
+    for od, v in (series or {}).get("obs") or []:
+        if od < d:
+            best = (od, v)
+        else:
+            break
+    return best
+
+
+def headline_r(series, d):
+    """dict(r, rrf, rrf_date, age_days, stale, why) for the card dated d."""
+    got = rrf_before(series, d) if series else None
+    if got is None:
+        return dict(r=None, rrf=None, rrf_date=None, age_days=None, stale=False,
+                    why=("no %s: run cost_of_equity.py online once (DP-V8)" % RRF_SERIES if not series
+                         else "no 10-year yield dated before %s in %s" % (d, RRF_SERIES)))
+    age = (d - got[0]).days
+    return dict(r=got[1] + RPM_PCT, rrf=got[1], rrf_date=got[0], age_days=age,
+                stale=age > RRF_STALE_DAYS, why=None)
 
 
 # --------------------------------------------------------------------------- #
@@ -345,7 +423,8 @@ def own_r_read(f, cn, mkt_r=None):
     """The class at the name's own CAPM r (cost_of_equity.py's record `cn`), the
     own r -/+ 2 grid around it, and the class at the beta-1.0 r (`mkt_r`, rRF +
     RPM) so the move from 9% splits into the rate LEVEL and the name's BETA.
-    None when there is no CAPM r for the name."""
+    None when there is no CAPM r for the name. Since DP-V8 the beta-1.0 r is
+    the headline r, so cls_mkt is the headline class re-derived."""
     if not cn or cn.get("r_capm_pct") is None:
         return None
     r = cn["r_capm_pct"]
@@ -446,24 +525,30 @@ class TTMBasis:
         return self.SF.fundamentals(self.SF.point_in_time(cf, d, strict=False), d)
 
 
-def rebase(rec, basis, d, strict):
+def rebase(rec, basis, d, strict, r=R_BASE):
     """The exhibit's records re-based on 12-month ROE as of d (DP-V4).
     `roe` and `ratio` become the 12-month figures; the exhibit's own are kept
     as roe_lastfy / ratio_lastfy for reference and for the identity check.
     The implied ROE at each r (i7/i9/i11) depends only on price and book, so
-    it carries over unchanged: ratio = i9 / 12-month ROE."""
+    it carries over unchanged: ratio = i9 / 12-month ROE.
+    AMENDED 2026-11-18 (DP-V8): the ratio is read at `r` (the headline r for
+    d; 9% by default, which is i9 / ROE exactly). ratio_9 keeps the 9% ratio
+    for reference. r None (no yield before d) leaves every ratio None."""
     out = {}
     for t, f in rec.items():
         g = dict(f, roe_lastfy=f.get("roe"), ratio_lastfy=f.get("ratio"),
                  g_impl_lastfy=f.get("g_impl"))
-        pct, r, why = basis.roe(t, d, strict) if basis is not None else (None, None, "no basis")
+        pct, rr, why = basis.roe(t, d, strict) if basis is not None else (None, None, "no basis")
         g["roe"] = pct
         g["ttm_why"] = why
-        g["ttm_notes"] = (r or {}).get("notes") or []
-        g["ttm_end"] = (r or {}).get("ni_end")
+        g["ttm_notes"] = (rr or {}).get("notes") or []
+        g["ttm_end"] = (rr or {}).get("ni_end")
         i9 = f.get("i9")
-        g["ratio"] = (i9 / pct) if (i9 is not None and pct is not None and pct > 0) else None
-        g["g_impl"] = g_implied_pct(pct, f.get("mb")) if pct is not None else None
+        g["ratio_9"] = (i9 / pct) if (i9 is not None and pct is not None and pct > 0) else None
+        g["r_head"] = r
+        g["ratio"] = ratio_at(g, r) if r is not None else None
+        g["class_why"] = None if r is not None else "no headline r: no 10-year yield before %s (DP-V8)" % d
+        g["g_impl"] = g_implied_pct(pct, f.get("mb"), r) if (pct is not None and r is not None) else None
         out[t] = g
     return out
 
@@ -473,7 +558,7 @@ def no_read_reason(f, blocked_reason=None):
         return blocked_reason
     if f is None:
         return "not in the valuation set"
-    return f.get("ttm_why") or "negative 12-month ROE"
+    return f.get("ttm_why") or f.get("class_why") or "negative 12-month ROE"
 
 
 def sector_caveat(t):
@@ -691,6 +776,12 @@ def _label_ttm(d):
     return "rebuilt" if d < DPV4_ON else "live"
 
 
+def _label_v8(d):
+    """DP-V8: rows before the ruling are REBUILT at their own session's r (the
+    10-year yield dated before it, + RPM); they count."""
+    return "rebuilt" if d < DPV8_ON else "live"
+
+
 def dpv2_ledger(buy_rows, classes_by_date, label=_label_lastfy):
     """classes_by_date: {date: {ticker: class}}. Returns flips, unscored rows.
     A row on a session with no exhibit is NEVER counted. It is reported as
@@ -803,11 +894,15 @@ def build(date, root, log_path, quotes_path, tracker):
     if not rec_raw:
         raise SystemExit(("implied_return_%s.md parsed to zero names -- format changed?" % date, 2))
     basis = TTMBasis(root)
-    rec = rebase(rec_raw, basis, date, strict=False)        # the card: everything filed by today
+    series = load_rrf_series(root)                          # DP-V8: the 10-year series
+    hr = headline_r(series, date)
+    r_head = hr["r"]
+    rec = rebase(rec_raw, basis, date, strict=False, r=r_head)   # the card: everything filed by today
     earlier = sorted(d for d in exhibits if d < date)
     prev_date = earlier[-1] if earlier else None
     prev_raw, prev_blocked = parse_exhibit(exhibits[prev_date]) if prev_date else ({}, {})
-    prev_rec = rebase(prev_raw, basis, prev_date, strict=False) if prev_date else {}
+    hr_prev = headline_r(series, prev_date) if prev_date else None
+    prev_rec = rebase(prev_raw, basis, prev_date, strict=False, r=hr_prev["r"]) if prev_date else {}
     sig = parse_log(log_path)
     quotes = load_quotes(quotes_path)
     ctx = load_context(root, date)
@@ -817,7 +912,7 @@ def build(date, root, log_path, quotes_path, tracker):
     # DP-V7 step 2: own r, context only (never read by rob, klass(ratio) or the ledger)
     coe = ctx.get("coe") if isinstance(ctx.get("coe"), dict) else None
     coe_names = (coe or {}).get("names") or {}
-    mkt_r = (coe or {}).get("mkt_r_pct")
+    mkt_r = r_head                                          # DP-V8: the headline is the beta-1.0 r
     own = {t: own_r_read(rec.get(t), coe_names.get(t), mkt_r) for t in set(rec) | set(sig)}
     held = sorted(t for t, s in sig.items() if s["held"])
     directional = sorted((t for t, s in sig.items() if s["signal"] in ("BUY", "SELL")),
@@ -825,6 +920,12 @@ def build(date, root, log_path, quotes_path, tracker):
     if not basis.cik:
         findings.append("no valuation_cache\\cik_map.json: every class is NO READ until ttm_eps "
                         "or sec_data_audit has run online once (DP-V4)")
+    if r_head is None:
+        findings.append("no headline r (%s): every class is NO READ, never a 9%% fallback (DP-V8)" % hr["why"])
+    elif hr["stale"]:
+        findings.append("headline rRF STALE: the latest 10-year yield before %s is dated %s (%d days); "
+                        "run cost_of_equity.py online (DP-V8)" % (date, hr["rrf_date"], hr["age_days"]))
+    r_s = fmt(r_head, "{:.2f}%")
 
     L = []
     L.append("=" * 100)
@@ -833,8 +934,11 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("=" * 100)
     L.append("as of %s   exhibit %s   previous exhibit %s   log %s" % (
         date, os.path.basename(exhibits[date]), prev_date or "none", os.path.basename(log_path)))
-    L.append("class = implied ROE at 9%% / 12-MONTH ROE (DP-V4: SEC filings, point in time); "
+    L.append("class = implied ROE at r / 12-MONTH ROE (DP-V4: SEC filings, point in time); "
              "lines %.2fx / %.2fx (DP-V2 memo 3.1, frozen)" % (DEMANDING_AT, NEUTRAL_AT))
+    L.append("r     = rRF + RPM = %s (DP-V8): 10-year Treasury %s dated %s (FRED DGS10, the latest "
+             "before %s) + %.2f%%" % (r_s, fmt(hr["rrf"], "{:.2f}%"), hr["rrf_date"] or "-", date, RPM_PCT)
+             if r_head is not None else "r     = NO HEADLINE r (DP-V8): %s" % hr["why"])
     caveat = conf_caveat()
     if caveat:
         L.append("conf  = " + caveat)
@@ -872,7 +976,16 @@ def build(date, root, log_path, quotes_path, tracker):
                   "basis: %s" % (DPV4_ON, len(basis_diff), ", ".join(
                       "%s %s->%s" % (t, rob[t]["lastfy"], rob[t]["base"]) for t in sorted(basis_diff))
                       or "none"))
+    diff_9 = sorted(t for t in rec if klass(rec[t].get("ratio_9")) != rob[t]["base"])
+    rate_line = ("RATE: r = rRF + RPM since %s (DP-V8), %s today. %d class(es) differ from the 9%% "
+                 "class: %s" % (DPV8_ON, r_s, len(diff_9), ", ".join(
+                     "%s %s->%s" % (t, klass(rec[t].get("ratio_9")), rob[t]["base"]) for t in diff_9)
+                     or "none"))
+    L.append("  " + rate_line)
     L.append("  " + basis_line)
+    if prev_date and hr_prev and hr_prev["r"] is not None and r_head is not None:
+        L.append("  r %s on %s (10-yr dated %s) -> %s today (%+.2f points)" % (
+            fmt(hr_prev["r"], "{:.2f}%"), prev_date, hr_prev["rrf_date"], r_s, r_head - hr_prev["r"]))
     changes = []
     if prev_date:
         for t in sorted(set(rec) | set(prev_rec)):
@@ -887,19 +1000,20 @@ def build(date, root, log_path, quotes_path, tracker):
             ca, cb = klass(a.get("ratio")), klass(b.get("ratio"))
             dec = decompose(a, b)
             if filing:
-                part = (" | ratio %.2f -> %.2f: price %+.2f, filing %+.2f" % (
-                    dec["r0"], dec["r1"], dec["price"], dec["filing"])) if dec else ""
+                part = (" | ratio %.2f -> %.2f: price %+.2f, filing %+.2f, rate %+.2f" % (
+                    dec["r0"], dec["r1"], dec["price"], dec["filing"], dec["rate"])) if dec else ""
                 changes.append("  %-5s NEW FILING  anchor %s -> %s   BVPS %s -> %s   12-month ROE %s -> %s%s" % (
                     t, a["anchor"], b["anchor"], fmt(a["bvps"]), fmt(b["bvps"]),
                     fmt(a.get("roe"), "{:.2f}%"), fmt(b.get("roe"), "{:.2f}%"), part))
             if ca != cb:
-                why = (" (price %+.2f, filing %+.2f)" % (dec["price"], dec["filing"])) if dec else ""
+                why = (" (price %+.2f, filing %+.2f, rate %+.2f)" % (
+                    dec["price"], dec["filing"], dec["rate"])) if dec else ""
                 changes.append("  %-5s CLASS %s -> %s   ratio %s -> %s%s" % (
                     t, ca, cb, fmt(a.get("ratio")), fmt(b.get("ratio")), why))
             ra = robustness(a)
             if ra["tag"] != rob[t]["tag"]:
                 lo, hi = rob[t]["lo"], rob[t]["hi"]
-                changes.append("  %-5s ROBUSTNESS %s -> %s   r 7-11%% range %s%s" % (
+                changes.append("  %-5s ROBUSTNESS %s -> %s   r -/+2 range %s%s" % (
                     t, ra["tag"], rob[t]["tag"],
                     ("%.2f-%.2f" % (lo, hi)) if lo is not None else "—",
                     ("   (%.2f from the %.2fx line: borderline, expect flicker)" % (
@@ -917,9 +1031,9 @@ def build(date, root, log_path, quotes_path, tracker):
                 moves.append((abs(b["ratio"] - a["ratio"]), t, a["ratio"], b["ratio"]))
         if moves:
             mv = max(moves)
-            quiet = ("No valuation input changed. Price moves only; no class crossed a line. "
+            quiet = ("No filing changed. Price and rate moves only; no class crossed a line. "
                      "Largest ratio move: %s %.2f -> %.2f" % (mv[1], mv[2], mv[3]))
-            L.append("  NO VALUATION INPUT CHANGED. Price moves only; no class crossed a line.")
+            L.append("  NO FILING CHANGED. Price and rate moves only; no class crossed a line.")
             L.append("  largest ratio move: %s %.2f -> %.2f" % (mv[1], mv[2], mv[3]))
         else:
             L.append("  nothing to compare.")
@@ -929,9 +1043,9 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("-" * 100)
     L.append("2. DECISION CARD -- today's directionals, then held names")
     L.append("-" * 100)
-    L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-11s %6s %-11s %-18s %-9s %7s %s" % (
-        "tk", "held in", "today", "executability", "class (ratio)", "edge", "last-FY",
-        "P/E", "r 7-11%", "robust", "@own r", "g impl", "DP-V2 gate"))
+    L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-12s %6s %-11s %-18s %-9s %7s %s" % (
+        "tk", "held in", "today", "executability", "class (ratio)", "edge", "@9%",
+        "P/E", "r -/+2", "robust", "@own r", "g impl", "DP-V2 gate"))
     order = directional + [t for t in sorted(held, key=lambda t: -(rec.get(t, {}).get("ratio") or -1))
                            if t not in directional]
     card = []
@@ -959,15 +1073,14 @@ def build(date, root, log_path, quotes_path, tracker):
         eps12 = ((fu.get("growth") or {}).get("eps") or {}).get("ttm")
         px = f.get("px") if f else (s.get("px") or (quotes.get(t) or {}).get("lastPrice"))
         pe12 = (px / eps12) if (px and eps12 and eps12 > 0) else None
-        last_s = (rb["lastfy"] if rb and rb["lastfy"] else "—")
-        if rb and rb["basis_flip"]:
-            last_s = last_s + "*"
+        c9 = klass(f.get("ratio_9")) if f else "NO READ"
+        last_s = "—" if c9 == "NO READ" else c9 + ("*" if c9 != cls else "")   # DP-V8: the 9% class
         o = own.get(t)
         own_s = "—" if o is None else "%.1f%% %s%s" % (
             o["r"], CLASS_LETTER.get(o["cls"], "-"), "*" if o["cls"] not in (cls, "NO READ") else "")
-        L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-11s %6s %-11s %-18s %-9s %7s %s" % (
+        L.append("  %-5s %-20s %-8s %-24s %-19s %5s %-12s %6s %-11s %-18s %-9s %7s %s" % (
             t, (s["acct"] if s["held"] else "scout")[:20], "%s %d" % (s["signal"], s["conf"]),
-            executability(s)[:24], cls_s, fmt(rb["edge"] if rb else None), last_s[:11],
+            executability(s)[:24], cls_s, fmt(rb["edge"] if rb else None), last_s[:12],
             fmt(pe12, "{:.1f}"), rng, rtag[:18], own_s,
             fmt(f.get("g_impl"), "{:.2f}%") if f else "—", gate_s))
         if cls == "NO READ" and why:
@@ -978,6 +1091,7 @@ def build(date, root, log_path, quotes_path, tracker):
                          edge=rb["edge"] if rb else None, borderline=rb["borderline"] if rb else False,
                          cls_lastfy=rb["lastfy"] if rb else None,
                          ratio_lastfy=f.get("ratio_lastfy") if f else None,
+                         cls_9=c9, ratio_9=f.get("ratio_9") if f else None, r_head=r_head,
                          pe_ttm=pe12, lo=rb["lo"] if rb else None, hi=rb["hi"] if rb else None,
                          robust=rb["tag"] if rb else "—", robust_detail=rtag,
                          g_impl=f.get("g_impl") if f else None,
@@ -990,14 +1104,14 @@ def build(date, root, log_path, quotes_path, tracker):
                          own_r_tag=o["tag"] if o else None, own_r_flags=o["flags"] if o else None,
                          cls_mkt_r=o["cls_mkt"] if o else None))
     L.append("")
-    L.append("  class: implied ROE at 9% over 12-month ROE. edge: distance to the nearest line")
-    L.append("  (under %.2f marks EDGE: a 2-3%% price move can cross it). last-FY: the class on the" % EDGE_BORDERLINE)
-    L.append("  basis used before DP-V4, for reference (* where it differs). P/E: price over 12-month")
-    L.append("  diluted EPS (SEC). r 7-11%: the ratio across the cost-of-equity grid; ROBUST only")
+    L.append("  class: implied ROE at r = rRF + RPM (%s, DP-V8) over 12-month ROE. edge: distance to" % r_s)
+    L.append("  the nearest line (under %.2f marks EDGE: a 2-3%% price move can cross it). @9%%: the" % EDGE_BORDERLINE)
+    L.append("  class at the 9% used before DP-V8, for reference (* where it differs). P/E: price over")
+    L.append("  12-month diluted EPS (SEC). r -/+2: the ratio across r - 2 / r / r + 2; ROBUST only")
     L.append("  if all three give one class (FRAGILE r U/N/D lists them, D/N/U = DEMANDING/NEUTRAL/")
     L.append("  UNDEMANDING). @own r (DP-V7 step 2): the class at the name's own CAPM r, panel 2d;")
-    L.append("  * where it differs from the 9% class. Context only: the class above stays at 9%.")
-    L.append("  DP-V2 gate: the PROPOSED modifier (75/70/65); NOT APPLIED.")
+    L.append("  * where it differs from the class. Context only. Last-FY (pre-DP-V4): section 3.")
+    L.append("  DP-V2 gate: the PROPOSED modifier (75/70/65) on the class; NOT APPLIED.")
     L.append("")
 
     # ---- 2b. under the hood (DP-V4) ------------------------------------------
@@ -1082,8 +1196,8 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("")
 
     # ---- 2d. cost of equity (DP-V7 step 2) ------------------------------------
-    L.append("  2d. COST OF EQUITY (DP-V7 step 2) -- each name's own rate beside the card's 9%. CONTEXT")
-    L.append("      ONLY: the headline class stays at 9% until a ruling moves it.")
+    L.append("  2d. COST OF EQUITY (DP-V7 step 2) -- each name's own rate beside the headline r. CONTEXT")
+    L.append("      ONLY: the class reads rRF + RPM (DP-V8), the beta-1.0 rate; own r never enters it.")
     coe_info = None
     if not coe:
         L.append("      not available for %s (value.bat step 7c did not write cost_of_equity_%s.json)."
@@ -1093,16 +1207,17 @@ def build(date, root, log_path, quotes_path, tracker):
     else:
         rr = coe.get("rrf") or {}
         src = coe.get("beta_source") or {}
-        L.append("      rRF %s (%s%s) + RPM %s = %s, a beta-1.0 name's r." % (
+        L.append("      own r = rRF %s (%s%s) + adjusted beta x RPM %s. Betas estimated %s; SE, window and" % (
             fmt(rr.get("pct"), "{:.2f}%"), rr.get("source") or rr.get("why") or "none",
             (", observed %s" % rr["date"]) if rr.get("date") else "", fmt(coe.get("rpm_pct"), "{:.2f}%"),
-            fmt(mkt_r, "{:.2f}%")))
-        L.append("      The 9%% equals rRF + RPM only at rRF %s. Betas estimated %s; SE, window and the" % (
-            fmt(coe.get("rrf_for_9pct"), "{:.2f}%"), src.get("as_of") or "?"))
-        L.append("      weekly check are in cost_of_equity_%s.md." % date)
+            src.get("as_of") or "?"))
+        L.append("      the weekly check are in cost_of_equity_%s.md." % date)
+        if rr.get("pct") is not None and hr["rrf"] is not None and abs(rr["pct"] - hr["rrf"]) > 1e-9:
+            L.append("      NOTE: cost_of_equity_%s read rRF %s, the headline %s dated %s: re-run step 7c."
+                     % (date, fmt(rr["pct"], "{:.2f}%"), fmt(hr["rrf"], "{:.2f}%"), hr["rrf_date"]))
         L.append("  %-5s %-20s %7s %-11s %7s %6s %6s %7s | %-7s %-7s %-7s %-13s %s" % (
             "tk", "beta adj (raw R2 n)", "r CAPM", "95% CI", "r DCF", "g", "payout", "DCF-CAPM",
-            "@9%", "@beta-1", "@own r", "own -2/0/+2", "flags; note"))
+            "@9%", "class", "@own r", "own -2/0/+2", "flags; note"))
 
         def cell(cl, x):
             return "-" if cl in (None, "NO READ") else "%s %.2f" % (CLASS_LETTER[cl], x)
@@ -1131,33 +1246,32 @@ def build(date, root, log_path, quotes_path, tracker):
                 fmt(cn.get("r_capm_pct"), "{:.2f}%"), ("%.1f-%.1f%%" % tuple(ci)) if ci else "—",
                 fmt(dg["r"], "{:.2f}%"), fmt(dg["g"], "{:.1f}%"),
                 fmt(None if dg["payout"] is None else 100 * dg["payout"], "{:.0f}%"),
-                fmt(spread, "{:+.2f}"), cell(c["cls"], c.get("ratio")),
-                cell(o["cls_mkt"] if o else None, o["ratio_mkt"] if o else None),
+                fmt(spread, "{:+.2f}"), cell(c.get("cls_9"), c.get("ratio_9")), cell(c["cls"], c.get("ratio")),
                 cell(o["cls"] if o else None, o["ratio"] if o else None), grid_s[:13], note[:150]))
             c.update(cost_of_equity=dict(
                 beta_adj=cn["beta_adj"], beta_raw=cn["beta_raw"], se=cn.get("se"), r2=cn["r2"], n=cn["n"],
                 r_capm=cn.get("r_capm_pct"), r_ci=ci, flags=cn.get("flags") or [],
-                dcf=dg, dcf_minus_capm=spread, cls_9=c["cls"], ratio_9=c.get("ratio"),
-                cls_mkt=o["cls_mkt"] if o else None, ratio_mkt=o["ratio_mkt"] if o else None,
+                dcf=dg, dcf_minus_capm=spread, cls_9=c.get("cls_9"), ratio_9=c.get("ratio_9"),
+                cls_head=c["cls"], ratio_head=c.get("ratio"),
                 cls_own=o["cls"] if o else None, ratio_own=o["ratio"] if o else None,
                 own_classes=o["classes"] if o else None, own_tag=o["tag"] if o else None))
         withr = [c for c in card if (c.get("cost_of_equity") or {}).get("r_capm") is not None]
         dif = [c for c in withr if c["cls"] != "NO READ" and c["cost_of_equity"]["cls_own"] not in (c["cls"], None)]
-        dif_l = [c for c in withr if c["cls"] != "NO READ" and c["cost_of_equity"]["cls_mkt"] not in (c["cls"], None)]
+        dif_l = [c for c in withr if c["cls"] != "NO READ" and c["cost_of_equity"]["cls_9"] not in (c["cls"], None, "NO READ")]
         L.append("      r CAPM = rRF + adjusted beta x RPM; 95% CI: the raw beta +/- 1.96 SE through Blume and")
         L.append("      RPM. r DCF = D1/P0 + g, g = (1 - payout) x 12-month ROE (Ch 9 s.21-28), defined only")
         L.append("      where g < r CAPM (Ch 7 s.62); dividends only, so buybacks count as retention [?].")
-        L.append("      @9%: the headline class. @beta-1: the class at rRF + RPM, the rate LEVEL alone (one r")
-        L.append("      for every name). @own r: level plus the name's BETA. own -2/0/+2: own r -/+ 2 points;")
+        L.append("      @9%: the class before DP-V8. class: the headline at rRF + RPM, the rate LEVEL (one r for")
+        L.append("      every name). @own r: level plus the name's BETA. own -2/0/+2: own r -/+ 2 points;")
         L.append("      ROBUST only if all three agree. Own r is the CAPM r alone: the course averages its")
         L.append("      three estimates (Ch 9 s.31), but dividend growth reads for %d of %d names here and the"
                  % (n_dcf, len(withr)))
         L.append("      own-bond-yield method has no feed yet (step 3 brings the cost of debt).")
-        L.append("      class differs from 9%%: at own r %d (%s); at the beta-1.0 r alone %d (%s)." % (
+        L.append("      own r differs from the class: %d (%s). The class differs from 9%%: %d (%s)." % (
             len(dif), ", ".join("%s %s->%s" % (c["ticker"], CLASS_LETTER[c["cls"]],
                                               CLASS_LETTER[c["cost_of_equity"]["cls_own"]]) for c in dif) or "none",
-            len(dif_l), ", ".join("%s %s->%s" % (c["ticker"], CLASS_LETTER[c["cls"]],
-                                                CLASS_LETTER[c["cost_of_equity"]["cls_mkt"]]) for c in dif_l)
+            len(dif_l), ", ".join("%s %s->%s" % (c["ticker"], CLASS_LETTER[c["cost_of_equity"]["cls_9"]],
+                                                CLASS_LETTER[c["cls"]]) for c in dif_l)
             or "none"))
         coe_info = dict(file="cost_of_equity_%s.json" % date, rrf=rr, rpm_pct=coe.get("rpm_pct"),
                         mkt_r_pct=mkt_r, beta_as_of=src.get("as_of"), dcf_read=n_dcf, with_r=len(withr),
@@ -1168,14 +1282,18 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("-" * 100)
     L.append("3. ROBUSTNESS -- every classed name: the cost-of-equity grid on the 12-month basis")
     L.append("-" * 100)
-    L.append("  %-5s %-12s %7s %-20s | %-12s %-12s %-12s | %6s %-13s | %-6s %-6s %-8s" % (
-        "tk", "class @9%", "ratio", "last-FY (ratio)", "r=7%", "r=9%", "r=11%", "edge", "tag",
+    if r_head is not None:
+        L.append("  grid: r - 2 / r / r + 2 = %.2f / %.2f / %.2f%% (DP-V8; r = rRF + RPM)" % (
+            r_head - R_STEP, r_head, r_head + R_STEP))
+    L.append("  %-5s %-12s %7s %-18s %-20s | %-12s %-12s %-12s | %6s %-13s | %-6s %-6s %-8s" % (
+        "tk", "class", "ratio", "@9% (ratio)", "last-FY (ratio)", "r-2", "r", "r+2", "edge", "tag",
         "own r", "-2/0/+2", "own tag"))
     for t in sorted(read, key=lambda t: -(rec[t].get("ratio") or 0)):
         rb = rob[t]
         o = own.get(t)
-        L.append("  %-5s %-12s %7s %-20s | %-12s %-12s %-12s | %6s %-13s | %-6s %-6s %-8s" % (
+        L.append("  %-5s %-12s %7s %-18s %-20s | %-12s %-12s %-12s | %6s %-13s | %-6s %-6s %-8s" % (
             t, rb["base"], fmt(rec[t].get("ratio")),
+            ("%s (%s)" % (klass(rec[t].get("ratio_9")), fmt(rec[t].get("ratio_9"))))[:18],
             ("%s (%s)" % (rb["lastfy"], fmt(rb["lastfy_ratio"])))[:20],
             *rb["r_classes"], fmt(rb["edge"]), rb["tag"] + (" EDGE" if rb["borderline"] else ""),
             ("%.1f%%" % o["r"]) if o else "—",
@@ -1184,14 +1302,14 @@ def build(date, root, log_path, quotes_path, tracker):
     n_rob = sum(1 for t in read if rob[t]["tag"] == "ROBUST")
     n_edge = sum(1 for t in read if rob[t]["borderline"])
     n_basis = sum(1 for t in read if rob[t]["basis_flip"])
-    L.append("  ROBUST %d of %d.  EDGE (within %.2f of a line) %d.  Class differs from last-FY: %d." % (
-        n_rob, len(read), EDGE_BORDERLINE, n_edge, n_basis))
+    L.append("  ROBUST %d of %d.  EDGE (within %.2f of a line) %d.  Class differs from 9%%: %d.  From last-FY: %d."
+             % (n_rob, len(read), EDGE_BORDERLINE, n_edge, len(diff_9), n_basis))
     own_read = [t for t in read if own.get(t) and own[t]["cls"] != "NO READ"]
     own_dif = [t for t in own_read if own[t]["cls"] != rob[t]["base"]]
     if coe:
         L.append("  own r (DP-V7 step 2, context only; -2/0/+2 = own r -/+ 2 points): read %d of %d, ROBUST %d;"
                  % (len(own_read), len(read), sum(1 for t in own_read if own[t]["tag"] == "ROBUST")))
-        L.append("  class at own r differs from the 9%% class: %d (%s)." % (len(own_dif), ", ".join(
+        L.append("  class at own r differs from the class: %d (%s)." % (len(own_dif), ", ".join(
             "%s %s->%s" % (t, CLASS_LETTER[rob[t]["base"]], CLASS_LETTER[own[t]["cls"]]) for t in sorted(own_dif))
             or "none"))
     else:
@@ -1202,23 +1320,32 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("-" * 100)
     L.append("4. DP-V2 COUNTERFACTUAL FLIP LEDGER -- COUNTS ONLY. No outcome is read here.")
     L.append("-" * 100)
-    cls_ttm, cls_old = {}, {}
+    cls_ttm, cls_9, cls_old, rate_of = {}, {}, {}, {}
     for d, p in exhibits.items():
         if DPV2_SINCE <= d <= date:
             r_, _ = parse_exhibit(p)
-            # the BUY on d was decided that morning: only filings public BEFORE d
-            cls_ttm[d] = {t: klass(f.get("ratio")) for t, f in rebase(r_, basis, d, strict=True).items()}
+            # the BUY on d was decided that morning: only filings public BEFORE d, and
+            # (DP-V8) the 10-year yield dated before d
+            hd = headline_r(series, d)
+            rate_of[d] = hd["r"]
+            rb_ = rebase(r_, basis, d, strict=True, r=hd["r"])
+            cls_ttm[d] = {t: klass(f.get("ratio")) for t, f in rb_.items()}
+            if d < DPV8_ON:
+                cls_9[d] = {t: klass(f.get("ratio_9")) for t, f in rb_.items()}
             if d < DPV4_ON:
                 cls_old[d] = {t: klass(f.get("ratio")) for t, f in r_.items()}
-    flips, unscored, closed, closed_un = [], [], [], []
+    flips, unscored, closed, closed_un, closed9, closed9_un = [], [], [], [], [], []
     if tracker:
         rows = [r for r in load_buy_rows(tracker, DPV2_SINCE) if r[0] <= date]
-        flips, unscored = dpv2_ledger(rows, cls_ttm, label=_label_ttm)
+        flips, unscored = dpv2_ledger(rows, cls_ttm, label=_label_v8)
+        closed9, closed9_un = dpv2_ledger([r for r in rows if r[0] < DPV8_ON], cls_9, label=_label_ttm)
         closed, closed_un = dpv2_ledger([r for r in rows if r[0] < DPV4_ON], cls_old)
-    L.append("  ON THE 12-MONTH BASIS (DP-V4; the count). Rows before %s are REBUILT point in time:" % DPV4_ON)
-    L.append("  only filings public before that session, and the exhibit written that day.")
+    L.append("  ON THE 12-MONTH BASIS AT r = rRF + RPM (DP-V4, DP-V8; the count). Rows before %s are" % DPV8_ON)
+    L.append("  REBUILT point in time: only filings public before that session, the exhibit written that")
+    L.append("  day, and the 10-year yield dated before it.")
     for d, tk, c, cls, f, src in flips:
-        L.append("  %s  %-5s BUY %3.0f  %-11s %-14s %s" % (d, tk, c, cls, f, src))
+        L.append("  %s  %-5s BUY %3.0f  %-11s %-14s %-8s r %s" % (d, tk, c, cls, f, src,
+                                                             fmt(rate_of.get(d), "{:.2f}%")))
     if not flips:
         L.append("  no flip rows.")
     for d, tk, c, hint, pd_ in unscored:
@@ -1235,6 +1362,17 @@ def build(date, root, log_path, quotes_path, tracker):
         DPV2_STOP, ("   sessions left %d" % left) if left is not None else ""))
     L.append("  If the n condition is unmet on %s, DP-V2 is WITHDRAWN, NOT EXTENDED (memo 6)." % DPV2_STOP)
     closed_tks = sorted({f[1] for f in closed})
+    closed9_tks = sorted({f[1] for f in closed9})
+    L.append("")
+    L.append("  CLOSED -- the 12-month ledger at r = 9%% as it ran %s .. %s (DP-V8). On the record;" % (
+        DPV2_SINCE, DPV8_ON - dt.timedelta(days=1)))
+    L.append("  never pooled with the count above:")
+    for d, tk, c, cls, f, src in closed9:
+        L.append("  %s  %-5s BUY %3.0f  %-11s %-14s %s" % (d, tk, c, cls, f, src))
+    for d, tk, c, hint, pd_ in closed9_un:
+        L.append("  %s  %-5s BUY %3.0f  UNSCORED (prior %s on %s)" % (d, tk, c, hint, pd_))
+    L.append("  closed: %d row(s), %d ticker(s) (%s)" % (len(closed9), len(closed9_tks),
+                                                       ", ".join(closed9_tks) or "none"))
     L.append("")
     L.append("  CLOSED -- the last-FY ledger as it ran %s .. %s (DP-V4). On the record; never" % (
         DPV2_SINCE, DPV4_ON - dt.timedelta(days=1)))
@@ -1251,13 +1389,13 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("-" * 100)
     L.append("5. BOOK-FREE READS -- context only, for names the class cannot read")
     L.append("-" * 100)
-    L.append("  P/E band: the class's own lines restated as P/E (about %.0f and %.0f, section 6)," % (
-        DEMANDING_AT / ((R_BASE - G_BASE) / 100 / (1 + G_BASE / 100)),
-        NEUTRAL_AT / ((R_BASE - G_BASE) / 100 / (1 + G_BASE / 100))))
+    r_bf = r_head if r_head is not None and r_head > G_BASE else None     # DP-V8: the headline r
+    pe_hi = DEMANDING_AT / ((r_bf - G_BASE) / (100 + G_BASE)) if r_bf else None
+    pe_lo = NEUTRAL_AT / ((r_bf - G_BASE) / (100 + G_BASE)) if r_bf else None
+    L.append("  P/E band: the class's own lines restated as P/E at r = %s (about %s and %s, section 6)," % (
+        r_s, fmt(pe_hi, "{:.0f}"), fmt(pe_lo, "{:.0f}")))
     L.append("  on 12-month EPS (SEC, else Schwab's own 12-month P/E). Dividend-implied g: Gordon at")
-    L.append("  r = 9%, g = (r - y)/(1 + y). It ignores buybacks, so it UNDERSTATES for buyback-heavy names.")
-    pe_hi = DEMANDING_AT / ((R_BASE - G_BASE) / (100 + G_BASE))
-    pe_lo = NEUTRAL_AT / ((R_BASE - G_BASE) / (100 + G_BASE))
+    L.append("  r = %s, g = (r - y)/(1 + y). It ignores buybacks, so it UNDERSTATES for buyback-heavy names." % r_s)
     bf = []
     for t in sorted(set(held) | set(directional)):
         if t in rec and rob[t]["base"] != "NO READ":
@@ -1271,9 +1409,9 @@ def build(date, root, log_path, quotes_path, tracker):
             pe, src = px / eps12, "SEC 12m"
         elif q.get("peRatio") and q["peRatio"] > 0:
             pe, src = q["peRatio"], "Schwab 12m"
-        band = None if pe is None else ("DEMANDING-equiv" if pe >= pe_hi else
-                                        ("NEUTRAL-equiv" if pe >= pe_lo else "UNDEMANDING-equiv"))
-        gdiv = dividend_implied_g(y)
+        band = None if (pe is None or pe_hi is None) else (
+            "DEMANDING-equiv" if pe >= pe_hi else ("NEUTRAL-equiv" if pe >= pe_lo else "UNDEMANDING-equiv"))
+        gdiv = dividend_implied_g(y, r=r_bf) if r_bf else None
         etf = q.get("is_etf") or q.get("asset_type") not in (None, "EQUITY")
         note = "fund: distributions, not earnings" if etf else src
         bf.append((t, pe, band, y, gdiv, note))
@@ -1306,6 +1444,10 @@ def build(date, root, log_path, quotes_path, tracker):
     L.append("  so a class is %.4f x P/E + %.4f/ROE: DEMANDING ~ P/E >= %.1f, UNDEMANDING ~ < %.1f" % (
         k, G_BASE / (100.0 + G_BASE), DEMANDING_AT / k, NEUTRAL_AT / k))
     L.append("  on whichever EPS the ROE carries: since DP-V4, the 12-month EPS.")
+    if r_bf:
+        kh = (r_bf - G_BASE) / (100.0 + G_BASE)
+        L.append("  at the headline r = %s (DP-V8) the same lines are DEMANDING ~ P/E >= %.1f, "
+                 "UNDEMANDING ~ < %.1f." % (r_s, DEMANDING_AT / kh, NEUTRAL_AT / kh))
     if breach:
         findings.append("identity check FAILED for %s: implied_return's class no longer reconstructs "
                         "as a P/E within rounding -- its formula or inputs changed; re-read section 1"
@@ -1326,9 +1468,16 @@ def build(date, root, log_path, quotes_path, tracker):
     L = [line.replace("—", "-") for line in L]
     snapshot = dict(date=str(date), exhibit=os.path.basename(exhibits[date]), conf_caveat=conf_caveat(),
                     log=os.path.basename(log_path), coverage=coverage, quiet=quiet,
-                    basis=dict(name="12-month ROE (DP-V4)", since=str(DPV4_ON), line=basis_line,
+                    basis=dict(name="12-month ROE (DP-V4) at r = rRF + RPM (DP-V8)", since=str(DPV4_ON),
+                               line=basis_line, rate_line=rate_line,
                                differ=[dict(ticker=t, lastfy=rob[t]["lastfy"], now=rob[t]["base"])
-                                       for t in sorted(basis_diff)]),
+                                       for t in sorted(basis_diff)],
+                               differ_9=[dict(ticker=t, at9=klass(rec[t].get("ratio_9")), now=rob[t]["base"])
+                                         for t in diff_9]),
+                    headline=dict(r=r_head, rrf=hr["rrf"], rrf_date=str(hr["rrf_date"]) if hr["rrf_date"] else None,
+                                  rpm=RPM_PCT, age_days=hr["age_days"], stale=hr["stale"], why=hr["why"],
+                                  since=str(DPV8_ON), series=(series or {}).get("fetched"),
+                                  previous=dict(date=str(prev_date), r=hr_prev["r"]) if hr_prev else None),
                     identity_outside_bound=breach,
                     identity=dict(checked=checked, max_diff=worst, k=k,
                                   pe_demanding=DEMANDING_AT / k, pe_undemanding=NEUTRAL_AT / k),
@@ -1338,7 +1487,9 @@ def build(date, root, log_path, quotes_path, tracker):
                                         tag=rob[t]["tag"], edge=rob[t]["edge"],
                                         borderline=rob[t]["borderline"],
                                         lo=rob[t]["lo"], hi=rob[t]["hi"],
-                                        r_classes=rob[t]["r_classes"], ttm_roe_pct=rec[t].get("roe"),
+                                        r_classes=rob[t]["r_classes"], r_grid=rob[t]["r_grid"],
+                                        cls_9=klass(rec[t].get("ratio_9")), ratio_9=rec[t].get("ratio_9"),
+                                        ttm_roe_pct=rec[t].get("roe"),
                                         ttm_why=rec[t].get("ttm_why"),
                                         own_r=own[t]["r"] if own.get(t) else None,
                                         cls_own_r=own[t]["cls"] if own.get(t) else None,
@@ -1348,13 +1499,18 @@ def build(date, root, log_path, quotes_path, tracker):
                     cost_of_equity=dict(coe_info or {}, available=bool(coe),
                                         differ_own_all=sorted(own_dif)),
                     changes=[c.strip() for c in changes],
-                    dpv2=dict(basis="12-month (DP-V4)", flip_rows=len(flips), tickers=tks,
+                    dpv2=dict(basis="12-month at rRF + RPM (DP-V8)", flip_rows=len(flips), tickers=tks,
                               needed_rows=DPV2_MIN_ROWS, needed_tickers=DPV2_MIN_TICKERS,
                               stop=str(DPV2_STOP), sessions_left=left,
                               unscored=[dict(date=str(u[0]), ticker=u[1], conf=u[2], hint=u[3])
                                         for u in unscored],
-                              rows=[dict(date=str(d), ticker=tk, conf=c, cls=cl, flip=f, source=s)
-                                    for d, tk, c, cl, f, s in flips],
+                              rows=[dict(date=str(d), ticker=tk, conf=c, cls=cl, flip=f, source=s,
+                                         r=rate_of.get(d)) for d, tk, c, cl, f, s in flips],
+                              closed_9=dict(basis="12-month at 9% (closed by DP-V8)", rows=[
+                                  dict(date=str(d), ticker=tk, conf=c, cls=cl, flip=f, source=s)
+                                  for d, tk, c, cl, f, s in closed9], tickers=closed9_tks,
+                                  unscored=[dict(date=str(u[0]), ticker=u[1], conf=u[2], hint=u[3])
+                                            for u in closed9_un]),
                               closed=dict(basis="last-FY (closed by DP-V4)", rows=[
                                   dict(date=str(d), ticker=tk, conf=c, cls=cl, flip=f, source=s)
                                   for d, tk, c, cl, f, s in closed], tickers=closed_tks)),
@@ -1482,15 +1638,18 @@ def _write_sheet(ws, snap):
     for line in (snap["changes"] or [snap.get("quiet") or "Nothing to compare."]):
         put([line])
     gap()
-    put(["Decision card -- today's directionals, then held names (class on 12-month ROE, DP-V4)"], f_sec)
+    hd = snap.get("headline") or {}
+    put(["Decision card -- today's directionals, then held names (class on 12-month ROE, DP-V4, at "
+         "r = rRF + RPM = %s%%, DP-V8: 10-year %s%% dated %s + %s%%)" % (
+             fmt(hd.get("r")), fmt(hd.get("rrf")), hd.get("rrf_date") or "-", fmt(hd.get("rpm")))], f_sec)
     if snap.get("conf_caveat"):
         put([snap["conf_caveat"]], f_note)
-    hdr = ["Ticker", "Held in", "Today", "Conf", "Executability", "Class (12-month)", "Ratio",
-           "Edge to line", "Last-FY class", "Last-FY ratio", "P/E (12-month)", "Range low (r 7-11%)",
+    hdr = ["Ticker", "Held in", "Today", "Conf", "Executability", "Class (12-month, rRF + RPM)", "Ratio",
+           "Edge to line", "Last-FY class", "Last-FY ratio", "P/E (12-month)", "Range low (r -/+2)",
            "Range high", "Robust", "Why fragile", "Implied g %", "DP-V2 gate (not applied)",
            "Would flip", "NO READ reason", "12-month ROE %", "Next report", "Sessions to report",
            "Context note", "Own r % (CAPM)", "Class at own r", "Ratio at own r", "Own r -2/0/+2",
-           "Own r tag"]
+           "Own r tag", "Class @9%", "Ratio @9%"]
     put(hdr, f_hdr, fill_hdr)
     for c in snap["card"]:
         detail = (c.get("robust_detail") or "").replace("FRAGILE", "").strip()
@@ -1504,10 +1663,10 @@ def _write_sheet(ws, snap):
              c.get("sessions_to_report"), c.get("context_note") or "",
              c.get("own_r"), c.get("cls_own_r") or "", c.get("ratio_own_r"),
              "/".join(CLASS_LETTER.get(k, "-") for k in (c.get("own_r_classes") or [])),
-             c.get("own_r_tag") or ""],
+             c.get("own_r_tag") or "", c.get("cls_9") or "", c.get("ratio_9")],
             fill=fill_rob if tag == "ROBUST" else (fill_frag if tag == "FRAGILE" else None))
-    put(["Class: implied ROE at 9%% over 12-month ROE (SEC, point in time). Edge: distance to the "
-         "nearest line (under %.2f, a 2-3%% price move can cross it). Range: r = 7/9/11%%; ROBUST "
+    put(["Class: implied ROE at r = rRF + RPM (DP-V8) over 12-month ROE (SEC, point in time). Edge: "
+         "distance to the nearest line (under %.2f, a 2-3%% price move can cross it). Range: r -/+ 2; ROBUST "
          "only if all three give one class. Last-FY: the basis before DP-V4, for reference."
          % EDGE_BORDERLINE], f_note)
     gap()
@@ -1540,15 +1699,15 @@ def _write_sheet(ws, snap):
         put(["not available: value.bat step 7c did not write cost_of_equity_%s.json" % d], f_note)
     else:
         rr = ce.get("rrf") or {}
-        put(["rRF %s%% (%s, observed %s) + RPM %s%% = %s%% for a beta-1.0 name; the 9%% equals rRF + RPM "
-             "only at rRF 4%%. Betas estimated %s. Class differs from 9%%: at own r %s; at the beta-1.0 r "
-             "alone %s." % (fmt(rr.get("pct")), rr.get("source") or rr.get("why"), rr.get("date") or "-",
-                            fmt(ce.get("rpm_pct")), fmt(ce.get("mkt_r_pct")), ce.get("beta_as_of") or "?",
-                            ", ".join(ce.get("differ_own") or []) or "none",
-                            ", ".join(ce.get("differ_level") or []) or "none")], f_note)
+        put(["own r = rRF %s%% (%s, observed %s) + adjusted beta x RPM %s%%; the class reads rRF + RPM = %s%% "
+             "(DP-V8). Betas estimated %s. Own r differs from the class: %s. The class differs from 9%%: %s."
+             % (fmt(rr.get("pct")), rr.get("source") or rr.get("why"), rr.get("date") or "-",
+                fmt(ce.get("rpm_pct")), fmt(ce.get("mkt_r_pct")), ce.get("beta_as_of") or "?",
+                ", ".join(ce.get("differ_own") or []) or "none",
+                ", ".join(ce.get("differ_level") or []) or "none")], f_note)
         put(["Ticker", "Beta (adj.)", "Beta (raw)", "R^2", "Returns (n)", "r CAPM %", "CI low %",
              "CI high %", "r DCF %", "Retention g %", "Payout %", "DCF - CAPM (points)", "Class @9%",
-             "Class @beta-1 r", "Ratio @beta-1 r", "Class @own r", "Ratio @own r", "Own r -2/0/+2",
+             "Class (rRF + RPM)", "Ratio (rRF + RPM)", "Class @own r", "Ratio @own r", "Own r -2/0/+2",
              "Own r tag", "Flags", "Note"], f_hdr, fill_hdr)
         for c in snap["card"]:
             x = c.get("cost_of_equity")
@@ -1558,15 +1717,15 @@ def _write_sheet(ws, snap):
             ci = x.get("r_ci") or [None, None]
             put([c["ticker"], x["beta_adj"], x["beta_raw"], x["r2"], x["n"], x["r_capm"], ci[0], ci[1],
                  dg.get("r"), dg.get("g"), _p100(dg.get("payout")), x.get("dcf_minus_capm"),
-                 x.get("cls_9") or "", x.get("cls_mkt") or "", x.get("ratio_mkt"), x.get("cls_own") or "",
+                 x.get("cls_9") or "", x.get("cls_head") or "", x.get("ratio_head"), x.get("cls_own") or "",
                  x.get("ratio_own"), "/".join(CLASS_LETTER.get(k, "-") for k in (x.get("own_classes") or [])),
                  x.get("own_tag") or "", " ".join(x.get("flags") or []),
                  ("DCF: " + dg["why"]) if dg.get("why") else ""])
     gap()
     put(["Robustness -- every classed name: the cost-of-equity grid on the 12-month basis"], f_sec)
-    put(["Ticker", "Class @9%", "Ratio", "Last-FY class", "Last-FY ratio", "r = 7%", "r = 9%",
-         "r = 11%", "Edge", "Tag", "Own r %", "Own r -2", "Own r", "Own r +2", "Own r tag"],
-        f_hdr, fill_hdr)
+    put(["Ticker", "Class (rRF + RPM)", "Ratio", "Last-FY class", "Last-FY ratio", "r - 2", "r",
+         "r + 2", "Edge", "Tag", "Own r %", "Own r -2", "Own r", "Own r +2", "Own r tag", "Class @9%",
+         "Ratio @9%"], f_hdr, fill_hdr)
     rb = snap["robustness"]
     for t in sorted((t for t in rb if rb[t]["cls"] != "NO READ"),
                     key=lambda t: -(rb[t]["ratio"] or 0)):
@@ -1574,7 +1733,8 @@ def _write_sheet(ws, snap):
         put([t, x["cls"], x["ratio"], x.get("lastfy") or "", x.get("lastfy_ratio"),
              *x.get("r_classes", ["", "", ""]), x.get("edge"),
              x["tag"] + (" EDGE" if x.get("borderline") else ""),
-             x.get("own_r"), *(x.get("own_r_classes") or ["", "", ""]), x.get("own_r_tag") or ""],
+             x.get("own_r"), *(x.get("own_r_classes") or ["", "", ""]), x.get("own_r_tag") or "",
+             x.get("cls_9") or "", x.get("ratio_9")],
             fill=fill_rob if x["tag"] == "ROBUST" else fill_frag)
     gap()
     dp = snap["dpv2"]
@@ -1584,12 +1744,21 @@ def _write_sheet(ws, snap):
          "withdrawn, not extended, if unmet on the stop date" % (
              dp["flip_rows"], dp["needed_rows"], len(dp["tickers"]), dp["needed_tickers"],
              ", ".join(dp["tickers"]) or "none", dp["stop"], dp.get("sessions_left"))])
-    put(["Date", "Ticker", "BUY conf", "Class that day", "Flip", "Source"], f_hdr, fill_hdr)
+    put(["Date", "Ticker", "BUY conf", "Class that day", "Flip", "Source", "r that day %"], f_hdr, fill_hdr)
     for x in dp["rows"]:
-        put([x["date"], x["ticker"], x["conf"], x["cls"], x["flip"], x["source"]])
+        put([x["date"], x["ticker"], x["conf"], x["cls"], x["flip"], x["source"], x.get("r")])
     for x in dp.get("unscored", []):
         put([x["date"], x["ticker"], x["conf"], "UNSCORED (prior: %s)" % x["hint"],
              "not counted", "no exhibit that session"])
+    c9 = dp.get("closed_9")
+    if c9:
+        put(["CLOSED by DP-V8 -- the 12-month ledger at r = 9%% (%d rows; %s). On the record, never pooled "
+             "with the count above." % (len(c9["rows"]), ", ".join(c9["tickers"]) or "none")], f_note)
+        for x in c9["rows"]:
+            put([x["date"], x["ticker"], x["conf"], x["cls"], x["flip"], x["source"] + " (closed)"])
+        for x in c9.get("unscored", []):
+            put([x["date"], x["ticker"], x["conf"], "UNSCORED (prior: %s)" % x["hint"],
+                 "not counted (closed)", "no exhibit that session"])
     cl = dp.get("closed")
     if cl:
         put(["CLOSED by DP-V4 -- the last-FY ledger (%d rows; %s). On the record, never pooled "
@@ -1714,7 +1883,14 @@ def _selftest():
     a = dict(px=210.57, bvps=8.01, roe=61.17)
     b = dict(px=218.16, bvps=9.44, roe=51.92)
     dec = decompose(a, b)
-    check("price + filing == total move", abs(dec["price"] + dec["filing"] - (dec["r1"] - dec["r0"])) < 1e-12)
+    check("price + filing == total move (rate 0 with no r_head: both at 9%)",
+          abs(dec["price"] + dec["filing"] + dec["rate"] - (dec["r1"] - dec["r0"])) < 1e-12 and dec["rate"] == 0)
+    dr = decompose(dict(a, r_head=9.0), dict(b, r_head=10.12))
+    check("DP-V8: price + filing + rate == total; rate = the new r on the new inputs",
+          abs(dr["price"] + dr["filing"] + dr["rate"] - (dr["r1"] - dr["r0"])) < 1e-12
+          and abs(dr["rate"] - (ratio_from(b["px"], b["bvps"], b["roe"], 10.12)
+                                - ratio_from(b["px"], b["bvps"], b["roe"], 9.0))) < 1e-12
+          and abs(dr["price"] - dec["price"]) < 1e-12 and dr["rate"] > 0)
 
     # robustness on a synthetic record (DP-V4: the r grid on 12-month ROE)
     f = dict(ratio=140.99 / 84.2, roe=84.2, i7=94.97, i9=140.99, i11=187.02, ratio_lastfy=2.72)
@@ -1805,6 +1981,15 @@ def _selftest():
             {"end": "2026-03-31", "val": 3.20e9, "filed": "2026-04-24"},
             {"end": "2026-06-30", "val": 1.18e9 / 0.359, "filed": "2026-07-24"}]}}}}}
     os.makedirs(os.path.join(tmp, "valuation_cache"))
+    # DP-V8: the headline r reads the 10-year yield dated before the session. 4.00% + 5.00%
+    # = 9.00%, so every pre-DP-V8 expectation below holds unchanged at r = 9%.
+    rrf_file = os.path.join(tmp, RRF_SERIES)
+
+    def _series(pct):
+        with open(rrf_file, "w", encoding="utf-8") as fh:
+            json.dump({"source": "FRED DGS10", "fetched": "selftest",
+                       "obs": [["2026-10-09", pct - 0.05], ["2026-10-13", pct], ["2026-10-14", pct + 0.4]]}, fh)
+    _series(4.00)
     with open(os.path.join(tmp, "valuation_cache", "cik_map.json"), "w") as fh:
         json.dump({"NVDA": "0001045810", "FTI": "0001681459"}, fh)
     for cik, body in (("0001045810", nvda), ("0001681459", fti)):
@@ -1995,7 +2180,7 @@ def _selftest():
           and "not available for 2026-10-14 (value.bat step 7c" in tb)
     with open(os.path.join(tmp, "cost_of_equity_2026-10-14.json"), "w", encoding="utf-8") as fh:
         json.dump({"date": "2026-10-14", "rpm_pct": 5.0, "mkt_r_pct": 10.12, "rrf_for_9pct": 4.0,
-                   "rrf": {"pct": 5.12, "date": "2026-10-13", "source": "FRED DGS10"},
+                   "rrf": {"pct": 4.00, "date": "2026-10-13", "source": "FRED DGS10"},
                    "beta_source": {"as_of": "2026-10-14"},
                    "names": {"NVDA": {"beta_adj": 1.553, "beta_raw": 1.825, "se": 0.085, "r2": 0.48, "n": 499,
                                       "r_capm_pct": 12.885, "r_ci_pct": [12.32, 13.45], "flags": []},
@@ -2010,8 +2195,9 @@ def _selftest():
           and snap2["dpv2"]["rows"] == snap["dpv2"]["rows"] and "FLIP REJECT->ADMIT" in txt2
           and snap2["identity"] == snap["identity"])
     rec2 = rebase(parse_exhibit(p)[0], TTMBasis(tmp), dt.date(2026, 10, 14), strict=False)
-    check("DP-V7: ratio_at(9%) IS the headline ratio (M/B backed out of the exhibit's i9)",
-          all(abs(ratio_at(rec2[t], R_BASE) - rec2[t]["ratio"]) < 1e-12 for t in ("NVDA", "FTI")))
+    check("DP-V7: ratio_at(9%) IS i9 / 12-month ROE (M/B backed out of the exhibit's i9)",
+          all(abs(ratio_at(rec2[t], R_BASE) - rec2[t]["ratio_9"]) < 1e-12 for t in ("NVDA", "FTI"))
+          and all(abs(rec2[t]["ratio_9"] - rec2[t]["i9"] / rec2[t]["roe"]) < 1e-12 for t in ("NVDA", "FTI")))
     mbn = (140.99 * 1.03 - 3.0) / 6.0
     hand = ((mbn * (12.885 - 3.0) + 3.0) / 1.03) / rec2["NVDA"]["roe"]
     check("DP-V7: NVDA at own r 12.885%% by hand ((M/B (r-g) + g)/(1+g) / ROE = %.3f): DEMANDING, '12.9%% D*'" % hand,
@@ -2025,12 +2211,13 @@ def _selftest():
           and c2["FTI"]["dpv2_flip"] == "REJECT->ADMIT" and "10.2% N*" in txt2
           and c2["FTI"]["own_r_flags"] == ["DISAGREE"])
     ce2 = c2["NVDA"]["cost_of_equity"]
-    check("DP-V7: @beta-1 is the class at rRF + RPM (10.12%), the rate level alone",
-          abs(ce2["ratio_mkt"] - ratio_at(rec2["NVDA"], 10.12)) < 1e-12 and ce2["cls_mkt"] == klass(ce2["ratio_mkt"]))
-    check("DP-V7: 2d prints rRF, the beta-1.0 r and the 9% identity; section 3 counts the differences",
-          "2d. COST OF EQUITY" in txt2 and "rRF 5.12% (FRED DGS10, observed 2026-10-13) + RPM 5.00% = 10.12%" in txt2
-          and "only at rRF 4.00%" in txt2
-          and "class at own r differs from the 9% class: 2 (FTI U->N, NVDA N->D)." in txt2
+    check("DP-V8: the 2d record carries @9%, the class (rRF + RPM) and @own r",
+          ce2["cls_9"] == "NEUTRAL" and ce2["cls_head"] == c2["NVDA"]["cls"] and ce2["cls_own"] == "DEMANDING"
+          and abs(ce2["ratio_head"] - c2["NVDA"]["ratio"]) < 1e-12)
+    check("DP-V7: 2d prints own r's rRF; section 3 counts the differences; no rRF mismatch note",
+          "2d. COST OF EQUITY" in txt2 and "own r = rRF 4.00% (FRED DGS10, observed 2026-10-13) + adjusted beta"
+          in txt2 and "re-run step 7c" not in txt2
+          and "class at own r differs from the class: 2 (FTI U->N, NVDA N->D)." in txt2
           and snap2["cost_of_equity"]["available"] and snap2["cost_of_equity"]["differ_own_all"] == ["FTI", "NVDA"])
     check("DP-V7: the snapshot's robustness carries own r for every classed name",
           snap2["robustness"]["NVDA"]["own_r"] == 12.885 and snap2["robustness"]["FTI"]["cls_own_r"] == "NEUTRAL")
@@ -2062,10 +2249,71 @@ def _selftest():
     _ce = [r_ for r_ in _rows7 if r_[0] == "Ticker" and "r CAPM %" in r_]
     _nv = [r_ for r_ in _rows7 if r_[0] == "NVDA" and len(r_) > 6 and r_[5] == 12.885]
     check("DP-V7 sheet: the decision card ends with the own-r columns; a cost-of-equity block with NVDA",
-          ok7 and len(_dc) == 1 and [x for x in _dc[0] if x][-5:] == ["Own r % (CAPM)", "Class at own r",
-                                                                     "Ratio at own r", "Own r -2/0/+2", "Own r tag"]
+          ok7 and len(_dc) == 1 and [x for x in _dc[0] if x][-7:-2] == ["Own r % (CAPM)", "Class at own r",
+                                                                       "Ratio at own r", "Own r -2/0/+2", "Own r tag"]
           and len(_ce) == 1 and len(_nv) == 1 and _nv[0][15] == "DEMANDING")
     check("DP-V7: own r adds no finding", fnd2 == [])
+
+    # ---- DP-V8 (2026-11-18): the headline r = rRF + RPM -------------------------
+    sr = {"obs": [(dt.date(2026, 11, 13), 5.10), (dt.date(2026, 11, 16), 5.12), (dt.date(2026, 11, 17), 5.15)]}
+    h18, h17 = headline_r(sr, dt.date(2026, 11, 18)), headline_r(sr, dt.date(2026, 11, 17))
+    check("DP-V8: r is the yield dated BEFORE the session + 5.00 (11-18 reads 11-17's 5.15; 11-17 reads 11-16's)",
+          abs(h18["r"] - 10.15) < 1e-12 and h18["rrf_date"] == dt.date(2026, 11, 17)
+          and abs(h17["r"] - 10.12) < 1e-12 and not h18["stale"])
+    check("DP-V8: an observation 8 days before the session is STALE; none before it is no r",
+          headline_r(sr, dt.date(2026, 11, 25))["stale"] and headline_r(sr, dt.date(2026, 11, 13))["r"] is None
+          and "no valuation_cache" in headline_r(None, dt.date(2026, 11, 18))["why"])
+    _series(5.12)
+    global load_buy_rows
+    _real_lbr = load_buy_rows
+
+    def _rows(tracker, since):                 # the master's BUY rows, without a workbook
+        return [(dt.date(2026, 10, 14), "FTI", 68.0), (dt.date(2026, 10, 14), "NVDA", 74.0)]
+    load_buy_rows = _rows
+    try:
+        txt3, snap3, fnd3 = build(dt.date(2026, 10, 14), tmp, log, None, "selftest-master")
+    finally:
+        load_buy_rows = _real_lbr
+    c3 = {c["ticker"]: c for c in snap3["card"]}
+    hand3 = ((mbn * (10.12 - 3.0) + 3.0) / 1.03) / rec2["NVDA"]["roe"]
+    check("DP-V8: at rRF 5.12%% the headline r is 10.12%%; NVDA's ratio by hand %.4f, NEUTRAL" % hand3,
+          abs(snap3["headline"]["r"] - 10.12) < 1e-12 and abs(c3["NVDA"]["ratio"] - hand3) < 1e-9 and c3["NVDA"]["cls"] == "NEUTRAL"
+          and "r     = rRF + RPM = 10.12% (DP-V8): 10-year Treasury 5.12% dated 2026-10-13" in txt3)
+    check("DP-V8: FTI moves UNDEMANDING -> NEUTRAL at 10.12%; its BUY 68 no longer flips; '@9%' keeps U",
+          c3["FTI"]["cls"] == "NEUTRAL" and c3["FTI"]["cls_9"] == "UNDEMANDING" and c3["FTI"]["dpv2_flip"] is None
+          and "UNDEMANDING*" in txt3 and "1 class(es) differ from the 9% class: FTI UNDEMANDING->NEUTRAL" in txt3)
+    check("DP-V8: robustness is r -/+ 2 around 10.12 (8.12 / 10.12 / 12.12)",
+          all(abs(x - y) < 1e-12 for x, y in zip(snap3["robustness"]["NVDA"]["r_grid"], (8.12, 10.12, 12.12)))
+          and "8.12 / 10.12 / 12.12%" in txt3
+          and snap3["robustness"]["NVDA"]["r_classes"] == [klass(ratio_at(rec2["NVDA"], x)) for x in (8.12, 10.12, 12.12)])
+    check("DP-V8: g implied and the book-free P/E band read the headline r; section 6 adds its P/E lines",
+          abs(c3["NVDA"]["g_impl"] - g_implied_pct(rec2["NVDA"]["roe"], rec2["NVDA"]["mb"], 10.12)) < 1e-12
+          and "at the headline r = 10.12%% (DP-V8) the same lines are DEMANDING ~ P/E >= %.1f" % (
+              DEMANDING_AT / (7.12 / 103.0)) in txt3)
+    dp3 = snap3["dpv2"]
+    check("DP-V8 ledger: rebuilt at 10.12% the FTI row does not flip; the 9% ledger is CLOSED and keeps it",
+          dp3["basis"].startswith("12-month at rRF + RPM") and dp3["rows"] == []
+          and [(x["ticker"], x["flip"], x["source"]) for x in dp3["closed_9"]["rows"]] == [("FTI", "REJECT->ADMIT", "rebuilt")]
+          and [(x["ticker"], x["flip"]) for x in dp3["closed"]["rows"]] == [("NVDA", "ADMIT->REJECT")]
+          and "CLOSED -- the 12-month ledger at r = 9% as it ran 2026-08-24 .. 2026-11-17 (DP-V8)" in txt3)
+    check("DP-V8: an exhibit's own 9% identity check is unchanged by the headline r",
+          snap3["identity"] == snap["identity"])
+    os.remove(rrf_file)
+    txt4, snap4, fnd4 = build(dt.date(2026, 10, 14), tmp, log, None, None)
+    c4 = {c["ticker"]: c for c in snap4["card"]}
+    check("NEGATIVE DP-V8: no 10-year series -> every class NO READ with the reason, and a FINDING; never 9%",
+          all(c4[t]["cls"] == "NO READ" and (c4[t]["no_read_reason"] or "").startswith("no headline r")
+              for t in ("NVDA", "FTI")) and any("never a 9% fallback" in x for x in fnd4)
+          and "NO HEADLINE r" in txt4)
+    _series(5.12)
+    snap3_j = json.loads(json.dumps(snap3, default=str))
+    ok8, _ = embed(snap3_j, copy)
+    _rows8 = [row for row in openpyxl.load_workbook(copy)[VC_SHEET].iter_rows(values_only=True) if row and row[0]]
+    _dc8 = [r_ for r_ in _rows8 if r_[0] == "Ticker" and "Executability" in r_]
+    check("DP-V8 sheet: the class column says rRF + RPM, the card ends with @9%, the closed 9% ledger prints",
+          ok8 and len(_dc8) == 1 and "Class (12-month, rRF + RPM)" in _dc8[0]
+          and [x for x in _dc8[0] if x][-2:] == ["Class @9%", "Ratio @9%"]
+          and any(str(r_[0]).startswith("CLOSED by DP-V8") for r_ in _rows8))
     print("SELFTEST %s (%d failed)" % ("PASSED" if not fails else "FAILED", len(fails)))
     return 1 if fails else 0
 

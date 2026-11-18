@@ -33,6 +33,11 @@ REM                         per name (beta from Schwab daily history, rRF from
 REM                         FRED DGS10, RPM 5.0%%). CONTEXT, like steps 6-7b: it
 REM                         runs before the card, which prints the class at that
 REM                         r BESIDE the 9%% class, and never changes the exit code.
+REM                         AMENDED 2026-11-18 (DP-V8): the 10-year series it
+REM                         caches (valuation_cache\dgs10.json) is now the
+REM                         HEADLINE class's rRF: the card reads r = rRF + RPM.
+REM                         Its exit code still never changes the pass; with no
+REM                         series at all the card is NO READ with a FINDING.
 REM    step 5b           -> ADDED 2026-10-14. Embeds the card as the 'Value Card'
 REM                         sheet in tracker_with_registry.xlsx. So value.bat now
 REM                         runs AFTER run_daily_review.bat (which rebuilds that
@@ -281,6 +286,10 @@ REM  its '@own r' column. Betas are re-fetched from Schwab at most weekly
 REM  (valuation_cache\beta_cache.json); rRF is FRED DGS10. Like steps 6-7b it
 REM  NEVER changes the exit code, and nothing in it reaches the prompt, a gate or
 REM  the headline class (DP-V1).
+REM  AMENDED 2026-11-18 (DP-V8; claude/DP-V8_HeadlineRate_2026-11-18.md): it also
+REM  writes valuation_cache\dgs10.json, the 10-year series the headline class now
+REM  reads (r = the yield dated before the session + 5.0%%). It must stay BEFORE
+REM  step 5. A failed FRED fetch leaves the cached series in place.
 echo.
 echo ### 7c. cost of equity - beta, rRF and CAPM r per name (DP-V7 step 2, context only)
 python cost_of_equity.py --date %RUNDATE% --log "%LOGFILE%"
