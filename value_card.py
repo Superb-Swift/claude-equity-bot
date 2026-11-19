@@ -106,6 +106,14 @@ DP-V7 step 3, 2026-11-18 (claude/DP-V7_Step3_CapitalCredit_2026-11-18.md):
               - 1 (Brav 2005: buybacks raise EPS)
     Bars fixed in capital_read()'s docstring before the first live run.
 
+DP-V10, 2026-11-18 (Rob, 15:20 CT; FINC 5133 step 5; claude/DP-V10_Step5_ImpliedMove_
+    2026-11-18.md): PANEL 2f, the market-implied move. implied_vol.py (value.bat step 7d)
+    reads one option chain per name; the card prints its ATM IV at the earliest expiry
+    on or after the +5 session, the 5-day 1-sigma move, the band in sigma and the
+    market's P(|move| > 3%), and flags a report between the session and that expiry.
+    F-10 (same day): section 5 refuses a P/E below 1 (price and EPS on different share
+    classes). Both are context: no class, gate, prompt or ledger reads them.
+
 WHAT IT DOES NOT DO
     It reads no return, breach, hit or +Nd cell. It modifies no gate, admits
     and rejects nothing, touches no workbook, no prompt, no endpoint, no
@@ -740,6 +748,48 @@ def book_free_pe(px, eps12, schwab_pe):
     return pe, src, None
 
 
+# DP-V10 (FINC 5133 step 5, 2026-11-18): panel 2f. The numbers are implied_vol.py's;
+# the card adds only the report-in-window flag, from the earnings calendar it
+# already reads. One sigma 5d is the band in sigma's denominator: P(|move| > 3%)
+# exceeds 31.7% exactly when the band is narrower than 1 sigma.
+ONE_SIGMA_TWO_TAIL = 0.3173
+
+
+def implied_rows(ivd, earn, on_card, date):
+    """Panel 2f's rows from an implied_vol_<date>.json dict, sorted by P
+    (highest first; no-reads last). None when the file is absent or is for
+    another date. Each row: ticker, card, ok, why, expiry, sessions, iv,
+    exp30, iv30, term, sigma, band_sigma, p, report, report_note."""
+    if not isinstance(ivd, dict) or str(ivd.get("date")) != str(date):
+        return None
+    rows = []
+    for t, x in sorted((ivd.get("names") or {}).items()):
+        r = dict(ticker=t, card=t in on_card, ok=bool(x.get("ok")), why=x.get("why"), expiry=None,
+                 sessions=None, iv=None, exp30=None, iv30=None, term=None, sigma=None,
+                 band_sigma=None, p=None, report=None, report_note="")
+        if r["ok"]:
+            h, ref = x["horizon"], x["ref30"]
+            r.update(expiry=str(h["expiry"]), sessions=h["sessions"], iv=h["iv"],
+                     exp30=str(ref["expiry"]), iv30=ref["iv"], term=x.get("term_ratio"),
+                     sigma=x["sigma_5d"], band_sigma=x["band_in_sigma"], p=x["p_breach"])
+            e = (earn or {}).get(t) or {}
+            try:
+                rep_d = dt.date.fromisoformat(str(e.get("date")))
+            except ValueError:
+                rep_d = None
+            exp_d = dt.date.fromisoformat(r["expiry"][:10])
+            if rep_d is not None and date <= rep_d <= exp_d:
+                import trading_calendar as _tc
+                inside = rep_d <= _tc.shift_sessions(date, 5)
+                r["report"] = str(rep_d)
+                r["report_note"] = "report %s%s %s: the IV carries it" % (
+                    rep_d.strftime("%m-%d"), (" " + e["hour"]) if e.get("hour") else "",
+                    "inside the 5 sessions" if inside else "after the 5 sessions, before expiry")
+        rows.append(r)
+    rows.sort(key=lambda r: (not r["ok"], -(r["p"] or 0.0), r["ticker"]))
+    return rows
+
+
 # --------------------------------------------------------------------------- #
 # DP-V7 step 3 (2026-11-18): capital and credit. Context only.
 # --------------------------------------------------------------------------- #
@@ -1024,10 +1074,12 @@ def load_context(root, date):
     valuation_cache\\ (TTMBasis); these two files remain context: the notes,
     the report date, and the calendar's adjusted consensus (section 2c).
     AMENDED 2026-11-18 (DP-V7 step 2): also cost_of_equity_<date>.json
-    (cost_of_equity.py, value.bat step 7c), the per-name CAPM r. Context only."""
+    (cost_of_equity.py, value.bat step 7c), the per-name CAPM r. Context only.
+    AMENDED 2026-11-18 (DP-V10, step 5): also implied_vol_<date>.json
+    (implied_vol.py, value.bat step 7d), the market-implied move. Context only."""
     out = {}
     for key, name in (("ttm", "ttm_eps_%s.json"), ("earn", "earnings_calendar_%s.json"),
-                      ("coe", "cost_of_equity_%s.json")):
+                      ("coe", "cost_of_equity_%s.json"), ("iv", "implied_vol_%s.json")):
         path = os.path.join(root, name % date)
         try:
             with open(path, encoding="utf-8") as fh:
@@ -1544,6 +1596,45 @@ def build(date, root, log_path, quotes_path, tracker):
         ", ".join(t for t, k in read_v if not k["growth_ok"]) or "none"))
     L.append("")
 
+    # ---- 2f. market-implied move (FINC 5133 step 5, DP-V10) -----------------
+    ivd = ctx.get("iv") if isinstance(ctx.get("iv"), dict) else None
+    iv_rows = implied_rows(ivd, ctx.get("earn"), {c["ticker"] for c in card}, date)
+    L.append("  2f. MARKET-IMPLIED MOVE (FINC 5133 step 5, DP-V10) -- the options market's own 5-day move")
+    L.append("      and its chance of leaving the fixed +/-3% HOLD band. CONTEXT ONLY: nothing here enters")
+    L.append("      the class, a gate, the prompt or D4 (D4's baseline waits for its own pre-registration).")
+    if iv_rows is None:
+        L.append("      not available for %s (value.bat step 7d did not write implied_vol_%s.json%s)." % (
+            date, date, "" if not ivd else "; the file is for %s" % ivd.get("date")))
+    else:
+        L.append("      chains fetched %s. * = on the decision card above." % ivd.get("fetched_at"))
+        L.append("  %-5s %1s %-18s %6s %-11s %6s %5s %7s %7s %7s  %s" % (
+            "tk", "", "horizon (sess)", "IV", "~30d", "IV", "term", "1sd 5d", "band/sd", "P>3%", "note"))
+        for r in iv_rows:
+            if not r["ok"]:
+                L.append("  %-5s %1s %s" % (r["ticker"], "*" if r["card"] else "", r["why"]))
+                continue
+            L.append("  %-5s %1s %-18s %6s %-11s %6s %5s %7s %7s %7s  %s" % (
+                r["ticker"], "*" if r["card"] else "", "%s (%d)" % (r["expiry"][:10], r["sessions"]),
+                fmt(100 * r["iv"], "{:.1f}%"), r["exp30"][:10], fmt(100 * r["iv30"], "{:.1f}%"),
+                fmt(r["term"], "{:.2f}"), fmt(100 * r["sigma"], "{:.2f}%"), fmt(r["band_sigma"], "{:.2f}"),
+                fmt(100 * r["p"], "{:.1f}%"), r["report_note"]))
+        okr = [r for r in iv_rows if r["ok"]]
+        ps = sorted(r["p"] for r in okr)
+        med = (ps[len(ps) // 2] if len(ps) % 2 else (ps[len(ps) // 2 - 1] + ps[len(ps) // 2]) / 2.0) if ps else None
+        L.append("      horizon: the earliest expiry on or after the +5 session (sessions to it in brackets);")
+        L.append("      ~30d: the expiry nearest 30 days, for reference; term = horizon IV / 30-day IV (above 1:")
+        L.append("      the market prices an event before the later expiry). IV: ATM, mean of call and put.")
+        L.append("      1sd 5d = IV x sqrt(5/252); band/sd = 3% / 1sd; P>3% = 2(1 - N(band/sd)), a zero-mean")
+        L.append("      normal (Ch 8). RISK-NEUTRAL: the market's PRICE of the move, not a real-world forecast")
+        L.append("      (Web 26B); a normal understates fat tails. The horizon IV is applied over 5 sessions.")
+        L.append("      read %d of %d; median P>3%% %s; the band is under 1 sd (P > 31.7%%) for %d (%s);"
+                 % (len(okr), len(iv_rows), fmt(None if med is None else 100 * med, "{:.1f}%"),
+                    sum(1 for r in okr if r["p"] > ONE_SIGMA_TWO_TAIL),
+                    ", ".join(r["ticker"] for r in okr if r["p"] > ONE_SIGMA_TWO_TAIL) or "none"))
+        L.append("      a report inside the window: %s." % (
+            ", ".join("%s %s" % (r["ticker"], r["report"][5:]) for r in okr if r["report"]) or "none"))
+    L.append("")
+
     # ---- 3. robustness, every classed name ---------------------------------
     L.append("-" * 100)
     L.append("3. ROBUSTNESS -- every classed name: the cost-of-equity grid on the 12-month basis")
@@ -1763,6 +1854,8 @@ def build(date, root, log_path, quotes_path, tracker):
                                  growth_below_hurdle=[t for t, k in read_v if not k["growth_ok"]]),
                     cost_of_equity=dict(coe_info or {}, available=bool(coe),
                                         differ_own_all=sorted(own_dif)),
+                    implied=dict(available=iv_rows is not None, file="implied_vol_%s.json" % date,
+                                 fetched_at=(ivd or {}).get("fetched_at"), rows=iv_rows or []),
                     changes=[c.strip() for c in changes],
                     dpv2=dict(basis="12-month at rRF + RPM (DP-V8)", flip_rows=len(flips), tickers=tks,
                               needed_rows=DPV2_MIN_ROWS, needed_tickers=DPV2_MIN_TICKERS,
@@ -2008,6 +2101,24 @@ def _write_sheet(ws, snap):
              "" if k["growth_ok"] is None else ("yes" if k["growth_ok"] else "NO"),
              _p100(k["shares_chg"]), "; ".join(k.get("notes") or [])])
     gap()
+    imp = snap.get("implied") or {}
+    put(["Market-implied move (FINC 5133 step 5, DP-V10) -- the options market's 5-day move and its "
+         "P(|move| > 3%). CONTEXT ONLY; risk-neutral, not a forecast"], f_sec)
+    if not imp.get("available"):
+        put(["not available: value.bat step 7d did not write %s" % imp.get("file", "implied_vol_<date>.json")],
+            f_note)
+    else:
+        put(["Ticker", "On card", "Horizon expiry", "Sessions", "IV %", "~30d expiry", "IV 30d %", "Term",
+             "1 sd 5d %", "Band / sd", "P(|move| > 3%) %", "Note"], f_hdr, fill_hdr)
+        for ir in imp.get("rows") or []:        # not `r`: put() keeps its row counter in r
+            if not ir.get("ok"):
+                put([ir["ticker"], "yes" if ir.get("card") else "", "", "", "", "", "", "", "", "", "",
+                     ir.get("why") or ""])
+                continue
+            put([ir["ticker"], "yes" if ir.get("card") else "", ir["expiry"][:10], ir["sessions"],
+                 100 * ir["iv"], ir["exp30"][:10], 100 * ir["iv30"], ir["term"], 100 * ir["sigma"],
+                 ir["band_sigma"], 100 * ir["p"], ir.get("report_note") or ""])
+    gap()
     put(["Robustness -- every classed name: the cost-of-equity grid on the 12-month basis"], f_sec)
     put(["Ticker", "Class (rRF + RPM)", "Ratio", "Last-FY class", "Last-FY ratio", "r - 2", "r",
          "r + 2", "Edge", "Tag", "Own r %", "Own r -2", "Own r", "Own r +2", "Own r tag", "Class @9%",
@@ -2209,6 +2320,32 @@ def _selftest():
           book_free_pe(20.0, None, 40.3) == (40.3, "Schwab 12m", None)
           and book_free_pe(50.0, 2.0, 40.3) == (25.0, "SEC 12m", None))
     check("F-10: no EPS and no P/E -> none, with no reason", book_free_pe(10.0, None, None) == (None, "", None))
+
+    # DP-V10 (step 5): panel 2f's rows
+    d5 = dt.date(2026, 11, 18)
+
+    def _ivn(exp, iv, p, sess=6):
+        return {"ok": True, "why": None, "horizon": {"expiry": exp, "sessions": sess, "iv": iv},
+                "ref30": {"expiry": "2026-12-18", "iv": 0.30}, "term_ratio": iv / 0.30,
+                "sigma_5d": iv * (5 / 252.0) ** 0.5, "band_in_sigma": 0.03 / (iv * (5 / 252.0) ** 0.5),
+                "p_breach": p}
+    ivd5 = {"date": "2026-11-18", "fetched_at": "2026-11-18T14:30:00", "names": {
+        "WMT": _ivn("2026-11-27", 0.40, 0.45), "SPY": _ivn("2026-11-27", 0.18, 0.25),
+        "NKE": _ivn("2026-12-18", 0.35, 0.40, 20), "XYZ": {"ok": False, "why": "chain status FAILED"}}}
+    earn5 = {"WMT": {"date": "2026-11-19", "hour": "bmo"}, "NKE": {"date": "2026-12-16", "hour": "amc"},
+             "SPY": {"date": None}}
+    rows5 = implied_rows(ivd5, earn5, {"WMT"}, d5)
+    check("step 5: rows sort by P (highest first), no-reads last; '*' marks the card",
+          [r["ticker"] for r in rows5] == ["WMT", "NKE", "SPY", "XYZ"] and rows5[0]["card"] and not rows5[2]["card"])
+    check("step 5: a report inside the 5 sessions is flagged (WMT 11-19 bmo)",
+          rows5[0]["report"] == "2026-11-19" and "11-19 bmo inside the 5 sessions" in rows5[0]["report_note"])
+    check("step 5: a report after the 5 sessions but before the expiry is flagged as such (NKE 12-16)",
+          rows5[1]["report"] == "2026-12-16" and "after the 5 sessions, before expiry" in rows5[1]["report_note"])
+    check("NEGATIVE step 5: no file -> None; a file for another date -> None (never a stale read)",
+          implied_rows(None, earn5, set(), d5) is None
+          and implied_rows(dict(ivd5, date="2026-11-17"), earn5, set(), d5) is None)
+    check("NEGATIVE step 5: a no-read keeps its reason and no number",
+          rows5[3]["why"] == "chain status FAILED" and rows5[3]["p"] is None and rows5[3]["iv"] is None)
 
     # parsing real-format lines, then the end-to-end refusal paths
     tmp = tempfile.mkdtemp(prefix="value_card_selftest_")
@@ -2568,6 +2705,16 @@ def _selftest():
     def _rows(tracker, since):                 # the master's BUY rows, without a workbook
         return [(dt.date(2026, 10, 14), "FTI", 68.0), (dt.date(2026, 10, 14), "NVDA", 74.0)]
     load_buy_rows = _rows
+    import implied_vol as _iv                  # DP-V10: the file as implied_vol.py itself writes it
+    _cd = dt.date(2026, 10, 14)
+    _ch = _iv._chain(180.0, [(dt.date(2026, 10, 16), 2, {180.0: (70.0, 72.0)}),
+                             (dt.date(2026, 10, 23), 9, {180.0: (48.0, 50.0)}),
+                             (dt.date(2026, 11, 13), 30, {180.0: (44.0, 46.0)})])
+    _spy = _iv._chain(600.0, [(dt.date(2026, 10, 23), 9, {600.0: (15.0, 16.0)})])
+    _res, _f = _iv.build(_cd, ["NVDA", "FTI"], lambda w, d, lg: (
+        {"NVDA": _ch, "SPY": _spy, "FTI": {"status": "FAILED"}}, {}), log=lambda *_: None)
+    with open(os.path.join(tmp, "implied_vol_2026-10-14.json"), "w", encoding="utf-8") as fh:
+        json.dump(_res, fh, default=_iv._jsonable)
     try:
         txt3, snap3, fnd3 = build(dt.date(2026, 10, 14), tmp, log, None, "selftest-master")
     finally:
@@ -2675,6 +2822,18 @@ def _selftest():
           and any("book equity is negative" in n for n in kpm["notes"]))
     check("NEGATIVE step 3: debt + equity not positive -> no band, said so",
           kneg["band"] is None and any("not positive" in n for n in kneg["notes"]))
+    im3 = {r["ticker"]: r for r in snap3["implied"]["rows"]}
+    check("step 5 e2e: with no implied_vol file, 2f says 'not available' and never guesses",
+          "2f. MARKET-IMPLIED MOVE" in txt and "step 7d did not write implied_vol_2026-10-14.json" in txt
+          and snap["implied"]["available"] is False)
+    check("step 5 e2e: implied_vol.py's own file prints in 2f (NVDA 49%% at 10-23, P %.1f%%; FTI's reason)"
+          % (100 * CF.p_breach(0.49, 5, 0.03)),
+          snap3["implied"]["available"] and im3["NVDA"]["expiry"] == "2026-10-23"
+          and abs(im3["NVDA"]["iv"] - 0.49) < 1e-12 and abs(im3["NVDA"]["p"] - CF.p_breach(0.49, 5, 0.03)) < 1e-12
+          and im3["NVDA"]["card"] and im3["FTI"]["why"] == "chain status FAILED"
+          and "NVDA  * 2026-10-23 (7)" in txt3 and "FTI   * chain status FAILED" in txt3)
+    check("step 5 e2e: 2f changes no class, ratio or ledger (the DP-V8 checks above ran with it present)",
+          c3["NVDA"]["cls"] == "NEUTRAL" and dp3["rows"] == [] and not any("2f" in f for f in fnd3))
     check("step 3 e2e: 2e prints, and a v3 slim cache says why instead of guessing",
           "2e. CAPITAL AND CREDIT (DP-V7 step 3)" in txt3 and "no valuation_cache" in txt3
           and c3["NVDA"]["capital"]["why"] and "slim v3" in c3["NVDA"]["capital"]["why"])

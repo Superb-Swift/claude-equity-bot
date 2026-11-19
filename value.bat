@@ -304,6 +304,24 @@ if errorlevel 2 (
 ) else (
     echo   cost_of_equity_%RUNDATE%.md written - no findings.
 )
+REM  Step 7d - ADDED 2026-11-18 (DP-V10, FINC 5133 step 5;
+REM  claude/DP-V10_Step5_ImpliedMove_2026-11-18.md). implied_vol.py: one Schwab
+REM  option chain per watchlist name; the ATM implied vol of the earliest expiry on
+REM  or after the +5 session, the 5-day 1-sigma move and the chance of a move beyond
+REM  the 3 pct HOLD band, written to implied_vol_<date>.md/.json for panel 2f. Like
+REM  steps 6-7c it NEVER changes the exit code, and nothing in it reaches the class,
+REM  a gate, the prompt or D4 (DP-V1). Chains are today's market: a re-run for an
+REM  earlier date is refused here and the card prints 'not available'.
+echo.
+echo ### 7d. implied move - option-implied 5-day move and band-breach odds per name (DP-V10, context only)
+python implied_vol.py --date %RUNDATE% --log "%LOGFILE%"
+if errorlevel 2 (
+    echo   NOTE: implied_vol could not run - context only; exit code unchanged.
+) else if errorlevel 1 (
+    echo   NOTE: implied_vol has findings - read implied_vol_%RUNDATE%.md; exit code unchanged.
+) else (
+    echo   implied_vol_%RUNDATE%.md written - no findings.
+)
 
 echo.
 if "%FAIL2%"=="1" goto skip5

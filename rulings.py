@@ -1060,6 +1060,28 @@ RULINGS = {
               "PR-6's read, 1 - var(AR)/var(r) and R^2 of r on beta x r_SPY per horizon, report "
               "only."),
     ),
+    # ADDED 2026-11-18: DP-V10 (FINC 5133 step 5).
+    "DP-V10": dict(
+        dp="DP-V10",
+        question=("step 5: the options market's own 5-day move and P(|move| > 3%) for each "
+                  "watchlist name, on the value card"),
+        status=("RULED (Rob) - build now, reporting only (DP-V1): implied_vol.py (value.bat step 7d) "
+                "and value card panel 2f; the horizon expiry is the earliest on or after the +5 "
+                "session, every watchlist name, the card only; D4 and the near-miss registry wait "
+                "for D4's own pre-registration"),
+        open=False, ruled_on=dt.date(2026, 11, 18), effective=dt.date(2026, 11, 19),
+        doc="claude/DP-V10_Step5_ImpliedMove_2026-11-18.md",
+        bar=("implied_vol.py's header, fixed before its first run: ATM = the strike nearest the "
+             "underlying with a usable vol, mean of call and put; sigma_5 = IV x sqrt(5/252); "
+             "P = 2(1 - N(3% / sigma_5)); SPY must read with a horizon IV in [5%, 80%], else a "
+             "FINDING; a past date is refused; a missing chain is printed, never filled"),
+        note=("Rob, 2026-11-18 15:20 CT, verbatim: 'Build step 5 now, but don't apply it before "
+              "tonight's review' - his reply to three defaults put to him at 15:16 (the horizon "
+              "expiry, every watchlist name, the card only), read as accepting them. The option-"
+              "chain call was confirmed by beta_probe.py on 2026-11-18 (SPY, AAPL, NVDA). It is "
+              "applied the session after DP-V9's patch is committed. P is risk-neutral, the "
+              "market's price of the move (Web 26B), and is printed as such."),
+    ),
 }
 
 def status_of(key):

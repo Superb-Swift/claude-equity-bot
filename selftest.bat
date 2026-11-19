@@ -37,7 +37,7 @@ REM e4_exit_read, build_actionable_registry (exit-read code) and
 REM damper_rebase_table. Synthetic data only; none of them reads an outcome here.
 REM AMENDED 2026-11-18 (DP-V7): corpfin (44 textbook fixtures) and beta_probe
 REM (step 1, committed 0dd90ef); cost_of_equity (step 2). Offline fixtures only.
-for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar sec_facts sec_data_audit feed_consistency input_capture exit_read_guard e4_exit_read build_actionable_registry damper_rebase_table corpfin beta_probe cost_of_equity) do (
+for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar sec_facts sec_data_audit feed_consistency input_capture exit_read_guard e4_exit_read build_actionable_registry damper_rebase_table corpfin beta_probe cost_of_equity implied_vol) do (
     python %%T.py --selftest >nul 2>&1
     if errorlevel 1 (
         echo   [FAIL] %%T --selftest   detail: python %%T.py --selftest
