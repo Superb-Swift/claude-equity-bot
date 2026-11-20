@@ -1082,6 +1082,50 @@ RULINGS = {
               "applied the session after DP-V9's patch is committed. P is risk-neutral, the "
               "market's price of the move (Web 26B), and is printed as such."),
     ),
+    "DP-V11": dict(
+        dp="DP-V11",
+        question=("step 6 (course item E1): a descriptive trace of typed corporate actions - equity "
+                  "issue, debt issue, convertible, dividend change, buyback, insider purchase or sale"),
+        status=("RULED (Rob) - INFEASIBLE by type on this watchlist; step 6 stops at its probe. No "
+                "pre-registration, no trace, no log-only typing. event_probe.py (read-only, committed) "
+                "and the results doc are the record (its dated outputs stay on disk, git-ignored); "
+                "re-run it if the watchlist grows"),
+        open=False, ruled_on=dt.date(2026, 11, 19), effective=dt.date(2026, 11, 19),
+        doc="claude/Step6_EventProbe_Results_2026-11-19.md",
+        bar=("event_probe.py's header, fixed before its first run: the trailing-12-month rate "
+             "carried to 2027-06-30 (PR-6's backstop); READABLE >= 40 projected, THIN 20-39. "
+             "Corrected 12-month counts: equity issue 5 (SPCX, O), debt issue 14, convertible 2, "
+             "shelf takedown 30 ex-JPM, dividend change about 10 raises and 0 cuts, buybacks not "
+             "measurable from XBRL; only insider sales reach READABLE"),
+        note=("Rob, 2026-11-19 17:51 CT, verbatim: 'I authorize your recommendations' - his reply "
+              "to three rulings put to him at about 17:45: step 6 (a) INFEASIBLE, stop; F-15 (a) "
+              "fix (DP-V12); next build step 8. The probe's own defects P-1 (program rule on 424B2 "
+              "only), P-2 (zero-value dividend quarters), P-3 (buyback tag) and P-4 (Form 4 issuer) "
+              "were corrected by hand in the results doc and change no conclusion; the probe is "
+              "committed as it ran (v1). Inconvenient, flagged: the course's informative events "
+              "(equity issues, dividend cuts) are the rare ones here."),
+    ),
+    "DP-V12": dict(
+        dp="DP-V12",
+        question=("F-15: Form 4s about OTHER issuers reached a name's insider line (BRK.B carried "
+                  "Berkshire's own Sirius XM purchase and DaVita sale as BRK insider trades)"),
+        status=("RULED (Rob) - fix: extract_form4 counts a Form 4 only when its issuerCik is the "
+                "name's own CIK; excluded filings leave filings, dates and every tally and are "
+                "logged; a filing that states no issuer is kept. An L0 data correction: the prompt "
+                "template is unchanged"),
+        open=False, ruled_on=dt.date(2026, 11, 19), effective=dt.date(2026, 11, 20),
+        doc="claude/F15_Form4Issuer_Runbook_2026-11-19.md",
+        bar=("edgar_client --selftest: the synthetic SIRI/DVA case reads form4=+2/-0 (the code "
+             "before the fix reads +5/-1 on the same fixture); the first live run after apply "
+             "logs the exclusion for BRK.B and its tag drops the SIRI buys and the DVA sell"),
+        note=("Found 2026-11-19 by the step-6 event probe (DP-V11) and reproduced with the bot's "
+              "own parser: BRK.B form4=+5/-1 = SIRI 3 buys ($26.9M) + DVA 1 sell ($69.0M), both "
+              "filed by Berkshire as a 10% owner, + 2 buys by the General Counsel ($250K). Rows "
+              "before the fix stand as recorded (DP-3C-bb): BRK.B 11-17 BUY 72 (gate-cleared; "
+              "quoted '5 discretionary buys versus 1 sell'), 11-18 HOLD 62, 11-19 HOLD 60. Scope "
+              "in the cached sample: BRK.B only, 2 of its 4 insider-coded filings (77 checked "
+              "across 13 names)."),
+    ),
 }
 
 def status_of(key):

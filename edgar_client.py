@@ -854,6 +854,9 @@ def extract_8k(rows, since, cik10=None, fetch=True):
 # =============================================================================
 
 _TXN_CODE_RE   = re.compile(r"<transactionCode>\s*([A-Z])\s*</transactionCode>")
+# F-15 (2026-11-19): whose stock a Form 4 is ABOUT. See the note in extract_form4.
+_ISSUER_CIK_RE = re.compile(r"<issuerCik>\s*(\d+)\s*</issuerCik>")
+_ISSUER_SYM_RE = re.compile(r"<issuerTradingSymbol>\s*([^<\s]+)\s*</issuerTradingSymbol>")
 _TXN_SHARES_RE = re.compile(
     r"<transactionShares>\s*<value>\s*([\d.]+)\s*</value>", re.S)
 _TXN_PRICE_RE  = re.compile(
@@ -870,6 +873,14 @@ def _document_url(cik10, accession, document):
         accession_nodash=accession.replace("-", ""),
         document=document,
     )
+
+
+def form4_issuer(text):
+    """(issuer CIK zero-padded to 10, trading symbol) from a Form 4 XML, or
+    (None, None) when the XML does not say. F-15, 2026-11-19."""
+    m = _ISSUER_CIK_RE.search(text or "")
+    s = _ISSUER_SYM_RE.search(text or "")
+    return (m.group(1).zfill(10) if m else None), (s.group(1) if s else None)
 
 
 def parse_form4_xml(text):
@@ -1105,6 +1116,8 @@ def extract_form4(rows, since, cik10, fetch=True):
               # Read/deferred split, so a partial direction can be labelled as
               # one. read == filings means the whole window was seen.
               "other": 0, "read": 0, "skipped": 0,
+              # F-15 (2026-11-19): read filings whose issuer is ANOTHER company.
+              "other_issuer": 0, "other_issuers": [],
               # DP-3C-i (2026-08-03): the DATE of the most recent Form 4 of
               # ANY transaction code — including grants (A), option exercises
               # (M) and tax withholding (F), none of which move direction —
@@ -1160,6 +1173,7 @@ def extract_form4(rows, since, cik10, fetch=True):
     parsed_any = False
     codes_seen = 0
     read_ok    = 0
+    other_acc  = set()
     for r in to_read:
         doc = r["primaryDocument"]
 
@@ -1174,6 +1188,27 @@ def extract_form4(rows, since, cik10, fetch=True):
         #   fall back to the rendered path.
         text = _fetch_form4_xml(cik10, r["accessionNumber"], doc)
         if not text:
+            continue
+
+        # F-15 (2026-11-19, FOUND BY THE STEP-6 EVENT PROBE): a filer's
+        #   submissions index lists every Form 4 it is a PARTY to, not only
+        #   those about its own stock. Berkshire files Form 4s as a 10% OWNER
+        #   of other companies, so BRK.B's insider line counted Berkshire's
+        #   purchase of Sirius XM (3 buys, $26.9M) and its sale of DaVita (the
+        #   one sell, $69.0M) as BRK insider activity: form4=+5/-1 where the
+        #   filings about BRK held 2 buys ($250K, the General Counsel) and no
+        #   sale. The 11-17 BUY 72 quoted "5 discretionary buys versus 1 sell".
+        #   A Form 4 counts only when its issuerCik is this name's own CIK. A
+        #   filing that does not state an issuer is KEPT (dropping data on a
+        #   missing field would trade one silent error for another). Excluded
+        #   filings leave `filings`, `dates` and every tally, and are logged.
+        iss_cik, iss_sym = form4_issuer(text)
+        if iss_cik and cik10 and iss_cik != str(cik10).zfill(10):
+            result["other_issuer"] += 1
+            other_acc.add(r["accessionNumber"])
+            label = iss_sym or iss_cik
+            if label not in result["other_issuers"]:
+                result["other_issuers"].append(label)
             continue
         parsed_any = True
         read_ok   += 1
@@ -1191,14 +1226,27 @@ def extract_form4(rows, since, cik10, fetch=True):
         if p["role"] and p["role"] not in result["roles"]:
             result["roles"].append(p["role"])
 
+    if other_acc:
+        result["filings"] = len(hits) - len(other_acc)
+        result["dates"] = sorted((r["filingDate"] for r in hits
+                                  if r["accessionNumber"] not in other_acc), reverse=True)
+        log.info("[EDGAR] Form 4: %s filing(s) about other issuers excluded (%s) - "
+                 "filed by this name as an OWNER, not about its stock (F-15).",
+                 len(other_acc), ", ".join(result["other_issuers"]))
     result["read"]    = read_ok
-    result["skipped"] = len(hits) - read_ok
+    result["skipped"] = result["filings"] - read_ok
     # Why the shortfall, when there is one. The cap deferring cold documents is
     # routine and self-healing; the run budget tripping mid-ticker is not, and
     # the two must not read the same in the log.
     if result["skipped"] and _last_fetch.get("reason") == "budget":
         log.info("[EDGAR] Form 4: read %s of %s before the run budget tripped; "
                  "direction is from a partial window.", read_ok, len(hits))
+
+    if not parsed_any and other_acc and result["filings"] == 0:
+        # Every filing in the window was about another company: this name has
+        # no Form 4 of its own, which renders exactly as an empty window.
+        result["detail"] = "none about this issuer"
+        return result
 
     if not parsed_any:
         # Documents were planned but none resolved to ownership XML. Distinct
@@ -2702,6 +2750,59 @@ def cmd_selftest():
     check("...named as unresolved, not as a fetch we declined",
           fs["detail"], "count-only:unresolved")
     reset_budget()
+
+    print("Form 4 — only filings ABOUT this issuer count (F-15, 2026-11-19)")
+    # The live case, rebuilt synthetically: Berkshire (CIK 1067983) as the
+    # 10% OWNER buying SIRI and selling DVA, beside two filings about BRK.
+    def _f4(cik, sym, txns, owner_flag="<isTenPercentOwner>1</isTenPercentOwner>"):
+        body = "".join(
+            "<nonDerivativeTransaction><transactionCoding><transactionCode>%s"
+            "</transactionCode></transactionCoding><transactionAmounts>"
+            "<transactionShares><value>%s</value></transactionShares>"
+            "<transactionPricePerShare><value>%s</value></transactionPricePerShare>"
+            "</transactionAmounts></nonDerivativeTransaction>" % t for t in txns)
+        iss = (("<issuerCik>%s</issuerCik>" % cik) if cik else "") + \
+              (("<issuerTradingSymbol>%s</issuerTradingSymbol>" % sym) if sym else "")
+        return ("<ownershipDocument><issuer>%s</issuer><reportingOwner>%s"
+                "</reportingOwner><nonDerivativeTable>%s</nonDerivativeTable>"
+                "</ownershipDocument>" % (iss, owner_flag, body))
+    _docs = {
+        "0001193125-26-445930": _f4("0000908937", "SIRI", [("P", 100, 25)] * 3),
+        "0001193125-26-438090": _f4("0000927066", "DVA", [("S", 500, 138)]),
+        "0001193125-26-463989": _f4("0001067983", "BRK.B", [("P", 200, 600)] * 2,
+                                    "<isOfficer>1</isOfficer>"),
+        "0001193125-26-465872": _f4("0001067983", "BRK.A", [("C", 1, 0), ("G", 1, 0)],
+                                    "<isDirector>1</isDirector>"),
+    }
+    _d = lambda n: (since + timedelta(days=n)).strftime("%Y-%m-%d")
+    brk = [{"form": "4", "filingDate": _d(d), "accessionNumber": a,
+            "primaryDocument": "xslF345X05/wf-form4_%d.xml" % i}
+           for i, (a, d) in enumerate([("0001193125-26-438090", 2), ("0001193125-26-445930", 6),
+                                       ("0001193125-26-463989", 25), ("0001193125-26-465872", 28)])]
+    _real_fetch, _real_cached = _fetch_form4_xml, _form4_is_cached
+    globals()["_fetch_form4_xml"] = lambda cik10, acc, doc: _docs.get(acc)
+    globals()["_form4_is_cached"] = lambda acc, doc: True
+    try:
+        reset_budget()
+        fk = extract_form4(brk, since, "0001067983")
+        lone = extract_form4(brk[:2], since, "0001067983")
+        _docs["0001193125-26-463989"] = _f4(None, None, [("P", 200, 600)] * 2)
+        bare = extract_form4(brk[2:3], since, "0001067983")
+    finally:
+        globals()["_fetch_form4_xml"], globals()["_form4_is_cached"] = _real_fetch, _real_cached
+        reset_budget()
+    check("issuer read from the XML", form4_issuer(_docs["0001193125-26-445930"]),
+          ("0000908937", "SIRI"))
+    check("Berkshire's SIRI buys and DVA sale are not BRK insider trades",
+          (fk["buys"], fk["sells"], fk["direction"]), (2, 0, "buying"))
+    check("...excluded and named", (fk["other_issuer"], sorted(fk["other_issuers"])), (2, ["DVA", "SIRI"]))
+    check("...filings, read and skipped stay consistent",
+          (fk["filings"], fk["read"], fk["skipped"], fk["detail"]), (2, 2, 0, "parsed"))
+    check("...and the tag date is the latest filing ABOUT BRK", fk["dates"], [_d(28), _d(25)])
+    check("a window of only other-issuer filings renders as no Form 4",
+          (lone["filings"], lone["direction"], lone["detail"]), (0, None, "none about this issuer"))
+    check("a filing that states no issuer is kept, not dropped",
+          (bare["buys"], bare["other_issuer"]), (2, 0))
 
     print("Form 4 role — placeholder titles never reach the prompt")
     check("SEE REMARKS falls through to the director flag",

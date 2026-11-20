@@ -112,6 +112,9 @@ reference_*.csv
 # ADDED 2026-11-18 (DP-V7): the read-only beta probe's dated outputs
 beta_probe_*.md
 beta_probe_*.json
+# ADDED 2026-11-19 (DP-V11): the read-only step-6 event probe's dated outputs
+event_probe_*.md
+event_probe_*.json
 # ADDED 2026-11-18 (DP-V7 step 2): the cost-of-equity exhibit and snapshot, rewritten
 # by value.bat step 7c. Its beta cache lives in valuation_cache/ (ignored above).
 cost_of_equity_*.md
