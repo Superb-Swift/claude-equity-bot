@@ -1158,6 +1158,46 @@ RULINGS = {
               "the common-date rule, not a choice made for its numbers. The 11-19 v1 file stays on "
               "disk as read."),
     ),
+    # ADDED 2026-11-20: DP-V14 and DP-V15 (the watchlist change of 2026-11-20).
+    "DP-V14": dict(
+        dp="DP-V14",
+        question=("ANT (Anthropic, PBC; Nasdaq from 2026-11-19) on the watchlist: the bot's "
+                  "signal model is Claude, made by Anthropic, and so is the reviewer, so the "
+                  "model would rate its maker's stock"),
+        status=("RULED (Rob) - (c) not run: ANT was removed from WATCHLIST_SCOUT before any "
+                "run. No ANT row exists in any log, the master or any arm"),
+        open=False, ruled_on=dt.date(2026, 11, 20), effective=dt.date(2026, 11, 20),
+        doc="claude/Watchlist_W3_ANT_2026-11-20.md",
+        bar=("none: a scope ruling. Options put at 12:45 CT: (a) run it in every arm with every "
+             "read printed with and without ANT (Claude's recommendation), (b) run it outside "
+             "the pre-registered arms, (c) do not run it"),
+        note=("Rob, 2026-11-20 18:22 CT, verbatim: 'I took ANT off the list and updated main.py.' "
+              "Disclosed before the ruling: nothing in the record can show whether the model "
+              "rates ANT differently from a comparable name, and weeks of rows on one name "
+              "could not settle it, so the treatment had to be set before the first row. If "
+              "ANT is proposed again, this ruling is the precedent and the question is re-put, "
+              "not assumed."),
+    ),
+    "DP-V15": dict(
+        dp="DP-V15",
+        question=("CBRS not carried to the scout list after its sale (the only formerly held "
+                  "name left out on 2026-11-20); what follows for its cells, its S1 state and "
+                  "DP-3's Q4 2026 Path-A review"),
+        status=("RULED (Rob) - CBRS leaves the run. Its open outcome cells are entered UNGUARDED "
+                "(enter_closes --allow-unguarded) through the +20d of its last cohort; its S1 "
+                "state is pruned only after that (the DP-3C-bt rule); DP-3's Path-A review is "
+                "CLOSED AS MOOT. SKIP_TICKERS keeps CBRS, inert while it is out of the run"),
+        open=False, ruled_on=dt.date(2026, 11, 20), effective=dt.date(2026, 11, 23),
+        doc="claude/Watchlist_W3_ANT_2026-11-20.md",
+        bar=("none: a population ruling. The last cohort is the last run whose log shows CBRS; "
+             "if that is 2026-11-20, its cells resolve +5d 11-30, +10d 12-07, +20d 12-21"),
+        note=("Rob, 2026-11-20 18:22 CT, verbatim: 'CBRS thesis is broken and harvested.' CBRS "
+              "was held from its 2026-05 IPO; it supplied the gate-cleared ledger's first "
+              "episode (SELL 68, 2026-06-26). Its rows stand as recorded (DP-3C-bb). Recorded "
+              "the same night: Schwab's positions read at 18:21 CT (portfolio_risk, step 7e) "
+              "still listed CBRS and the other 15 formerly held names, so the run that first "
+              "shows them unheld fixes the date, not this ruling."),
+    ),
 }
 
 def status_of(key):

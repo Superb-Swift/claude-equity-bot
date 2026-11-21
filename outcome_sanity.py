@@ -95,6 +95,23 @@ CHECKS
   master is right and the LOG is back-adjusted. They are retired through
   VERIFIED_LOG_ADJUSTED, pinned to both prices.
 
+  AMENDED 2026-11-17 (F-9 guard (a) and F-5 guard (c); approved by Rob
+  2026-11-17). Both report; neither touches a workbook.
+  * Check I (3) COVERAGE GATES: a data row with a usable Px@signal must carry
+    all four K..N formulas. The master's block ended at row 3000; cohorts
+    11-10..11-17 (rows 3001-3181) had none, every existing check passed, and
+    the 11-17 close entry wrote nothing. An info line now reports the formula
+    rows left below the data, with a non-gating LOW HEADROOM note under five
+    sessions.
+  * Each Check F line is followed by the command that clears it: the
+    repair_outcome_close.py dry run with ticker and date filled in, or a note
+    that tonight's enter_closes --catch-up settles it (PRECISION tier, logs
+    agreeing, no verdict flip).
+  * --md PATH appends a Checks F/G/H/I summary to the scan exhibit
+    (scan.bat passes signal_scan_<date>.md), replacing its own earlier
+    section. It never creates the file and never changes the exit code. On
+    11-10, 11-11 and 11-17 a gating finding was printed only in the console.
+
 Advisory-only - no orders - not financial advice.
 """
 
@@ -252,6 +269,24 @@ VERIFIED_LOG_ADJUSTED = {
         "D9 2026-10-22: official close 4.72 (financialcontent.com Close); "
         "4.62 is the external Adjusted Close. All 4 carrying logs post-date "
         "the ~07-28 ex-date. Master correct."),
+    # Added 2026-11-20 (Phase 4a review). Same class: a SPECIAL dividend of
+    # $0.05, record date 2026-11-18 (8-K dated 2026-11-05; paid 11-30), so the
+    # ex-date is 11-18 under T+1. Factor 1 - 0.05/4.72 = 0.98941 reproduces
+    # every adjusted log value to the cent (4.58->4.53, 4.77->4.72,
+    # 4.72->4.67). The 11-18 log, fetched on the ex-date morning before the
+    # adjustment, carries the raw 4.72. 11-18 onward are not adjusted.
+    ("SND", "2026-11-17"): (
+        4.72, 4.67,
+        "2026-11-20: raw close 4.72 (the 11-18 log, pre-adjustment); 4.67 = "
+        "4.72 x (1 - 0.05/4.72), the $0.05 special dividend (record 11-18). "
+        "Logs of 11-19 and 11-20 carry 4.67. Master correct."),
+    # Pinned the same night for the session that tips on 2026-11-23, when a
+    # third adjusted log (11-19, 11-20, 11-23) outvotes the two raw ones.
+    # Reported as unmatched (allowlist hygiene, not a finding) until then.
+    ("SND", "2026-11-16"): (
+        4.77, 4.72,
+        "2026-11-20: raw close 4.77 (logs of 11-17 and 11-18); 4.72 = "
+        "4.77 x (1 - 0.05/4.72), the same $0.05 special dividend. Master correct."),
 }
 
 # Price equality for the pin. Tight enough that a real re-entry breaks the
@@ -305,6 +340,39 @@ def load(path):
 # with the tool that repairs them, so the check and the repair cannot drift.
 CACHE_TOL = 1e-9          # a return is a fraction; Excel and Python agree far
                           # inside this, and a chained leg misses it by ~1e-3
+COVERAGE_WARN_SESSIONS = 5   # (3): warn, never gate, below this many sessions
+
+
+def _row_ranges(nums, limit=8):
+    """[3001, 3002, 3003, 3010] -> '3001-3003, 3010'."""
+    spans, start, prev = [], None, None
+    for n in sorted(nums):
+        if start is None:
+            start = prev = n
+        elif n == prev + 1:
+            prev = n
+        else:
+            spans.append((start, prev))
+            start = prev = n
+    if start is not None:
+        spans.append((start, prev))
+    txt = ", ".join(("%d" % a) if a == b else ("%d-%d" % (a, b)) for a, b in spans[:limit])
+    return txt + (", ..." if len(spans) > limit else "")
+
+
+def _rows_per_session(rows, last_n=10):
+    """Rows the paste adds per session: the largest of the last `last_n`
+    cohorts (the conservative figure for a headroom estimate). 0 if unknown."""
+    counts = {}
+    for r in rows:
+        counts[r["date"]] = counts.get(r["date"], 0) + 1
+    recent = [counts[d] for d in sorted(counts)[-last_n:]]
+    return max(recent) if recent else 0
+
+
+def _fill_to(last_data):
+    """A round row to copy K:N down to: at least ~500 rows past the data."""
+    return ((last_data + 500) // 1000 + 1) * 1000
 
 
 def _band(sig, k, band=BAND_PCT / 100.0):
@@ -322,8 +390,9 @@ def _blankish(v):
     return v is None or (isinstance(v, str) and v.strip() == "")
 
 
-def check_integrity(path, rows, first_row=FIRST_DATA_ROW):
-    """Check I. Returns (findings, info) as lists of strings.
+def check_integrity(path, rows, first_row=FIRST_DATA_ROW, detail=False):
+    """Check I. Returns (findings, info) as lists of strings; with detail=True,
+    (findings, info, coverage) where coverage is a dict for the fix line.
 
     (1) Formulas: every K..N cell carrying a formula, from first_row to the
         sheet's last row, resolves (shared formulas included) to the canonical
@@ -332,20 +401,29 @@ def check_integrity(path, rows, first_row=FIRST_DATA_ROW):
     (2) Cache: on every data row with a usable Px@signal, cached K/L/M equal
         (price - G)/G within CACHE_TOL, or are blank where the price is blank;
         cached N equals the band verdict on that K.
-    A row whose Px@signal is blank or zero is skipped for (2) and counted."""
+    A row whose Px@signal is blank or zero is skipped for (2) and counted.
+    (3) Coverage (ADDED 2026-11-17, F-9, guard (a); approved by Rob
+        2026-11-17): every data row with a usable Px@signal carries all four
+        K..N formulas. (1) checks only the formula cells that EXIST, and (2)
+        reads an absent cell as blank, which is what a blank price expects, so
+        rows 3001-3181 (cohorts 11-10..11-17) passed both for a week with no
+        formulas at all. The first close due on them (11-10's +5d, entered
+        11-17) could not be written. This GATES: it fires the night the first
+        uncovered cohort is pasted, five sessions before any close is due.
+        An info line reports how many formula rows remain below the data."""
     findings, info = [], []
     try:
         import zipfile
         import repair_outcome_close as _roc
         import repair_return_formulas as _rrf
     except Exception as e:                                   # pragma: no cover
-        return ["[I] formula/cache check unavailable: %s" % e], info
+        return (["[I] formula/cache check unavailable: %s" % e], info) + (({},) if detail else ())
     try:
         zin = zipfile.ZipFile(path)
         xml = zin.read(_roc.signals_part(zin)).decode("utf-8")
         zin.close()
     except Exception as e:                                   # pragma: no cover
-        return ["[I] could not read the Signals sheet XML: %s" % e], info
+        return (["[I] could not read the Signals sheet XML: %s" % e], info) + (({},) if detail else ())
     cells, _groups, masters = _rrf.scan(xml, first_row)
     bad = {}
     for ref, c in cells.items():
@@ -364,6 +442,46 @@ def check_integrity(path, rows, first_row=FIRST_DATA_ROW):
                            _rrf.CANON[col].format(r=rs[0])))
     info.append("[I] formulas: %d K..N formula cell(s) scanned from row %d, "
                 "%d non-canonical" % (len(cells), first_row, len(bad)))
+
+    # (3) coverage: a data row with a usable Px@signal must carry K, L, M and N.
+    uncovered = {}
+    for r in rows:
+        if not num(r["g"]) or r["g"] == 0:
+            continue
+        lack = [c for c in "KLMN" if "%s%d" % (c, r["row"]) not in cells]
+        if lack:
+            uncovered[r["row"]] = (r, lack)
+    full_rows = {}
+    for c in cells.values():
+        full_rows.setdefault(c["row"], set()).add(c["col"])
+    full = sorted(n for n, cs in full_rows.items() if len(cs) == 4)
+    last_formula = full[-1] if full else 0
+    last_data = max((r["row"] for r in rows), default=0)
+    if uncovered:
+        rs = sorted(uncovered)
+        d0, d1 = uncovered[rs[0]][0]["date"], uncovered[rs[-1]][0]["date"]
+        n_cells = sum(len(v[1]) for v in uncovered.values())
+        ex = "%s%d" % (uncovered[rs[0]][1][0], rs[0])
+        findings.append("[I] %d data row(s) with a Px@signal carry NO K..N formula "
+                        "(%d cell(s) absent), rows %s, cohort(s) %s; e.g. %s. "
+                        "enter_closes cannot write a return into an absent cell, so "
+                        "every close due on these rows would stay blank"
+                        % (len(rs), n_cells, _row_ranges(rs),
+                           d0 if d0 == d1 else "%s..%s" % (d0, d1), ex))
+    headroom = last_formula - last_data
+    per = _rows_per_session(rows)
+    est = (" - about %d session(s) at %d row(s) a session" % (headroom // per, per)
+           if per and headroom > 0 else "")
+    info.append("[I] coverage: complete K..N formula rows end at row %d; data ends at "
+                "row %d; %d formula row(s) below the data%s"
+                % (last_formula, last_data, max(headroom, 0), est))
+    if not uncovered and per and headroom < COVERAGE_WARN_SESSIONS * per:
+        info.append("[i] LOW FORMULA HEADROOM (not gating): fewer than %d sessions of "
+                    "K..N rows remain. In Excel, copy K:N from row %d down through row "
+                    "%d, save, close." % (COVERAGE_WARN_SESSIONS, last_formula,
+                                           _fill_to(last_data)))
+    coverage = dict(uncovered=len(uncovered), last_formula=last_formula,
+                    last_data=last_data, fill_to=_fill_to(last_data))
 
     mism, skipped, compared = [], 0, 0
     for r in rows:
@@ -403,6 +521,8 @@ def check_integrity(path, rows, first_row=FIRST_DATA_ROW):
                            r0["date"], why0))
     info.append("[I] cache: %d K..N value(s) compared with the prices, %d mismatched; "
                 "%d row(s) skipped (no usable Px@signal)" % (compared, len(mism), skipped))
+    if detail:
+        return findings, info, coverage
     return findings, info
 
 
@@ -587,6 +707,88 @@ def log_close_consensus(rows, logs_glob, resolve):
     return out
 
 
+MD_BEGIN = "<!-- outcome_sanity:begin -->"
+MD_END = "<!-- outcome_sanity:end -->"
+
+
+def _md_summary(tracker, findings, checked_f, findings_f, findings_f_prec, fix_f,
+                findings_g, findings_h, due_blank, no_pxsig, findings_i, info_i, cov_i):
+    """F-5 (c), ADDED 2026-11-17 (approved by Rob 2026-11-17). The part of this
+    run a reviewer must not miss, as markdown for the scan exhibit. On 11-10,
+    11-11 and 11-17 a gating Check F or Check H finding was printed only in
+    the console, above a "SCAN FINDINGS" banner that prints most nights, and
+    the review read the scan exhibit, which did not carry it."""
+    letters = sorted({f[1:f.index("]")] for f in findings if f.startswith("[") and "]" in f})
+    out = []
+    if findings:
+        out.append("RESULT: FINDINGS - %d gating finding(s) in Check(s) %s"
+                   % (len(findings), ", ".join(letters)))
+    else:
+        out.append("RESULT: CLEAN - no gating finding in Checks A-I")
+    out.append("[F] %d log-close comparison(s); MATERIAL %d; PRECISION %d"
+               % (checked_f, len(findings_f), len(findings_f_prec)))
+    for f in findings_f + findings_f_prec[:20]:
+        out.append("    " + f)
+        if f in fix_f:
+            out.append("      " + fix_f[f])
+    if len(findings_f_prec) > 20:
+        out.append("    ... and %d more PRECISION item(s) (console)" % (len(findings_f_prec) - 20))
+    out.append("[G] %d close(s) entered for an unsettled session" % len(findings_g))
+    out.append("[H] due-but-blank: %d cell(s) on %d settled session(s); %d on rows with no "
+               "Px@signal (not gated)" % (sum(len(v) for v in due_blank.values()),
+                                          len(due_blank), no_pxsig))
+    for f in findings_h:
+        out.append("    " + f)
+    if findings_h:
+        out.append("      FIX: python enter_closes.py --catch-up (dry run), then --apply. If it")
+        out.append("      reports TARGET CELLS ABSENT, the K..N formulas ran out (Check I).")
+    for line in info_i:
+        out.append(line)
+    for f in findings_i:
+        out.append("    " + f)
+    if cov_i.get("uncovered"):
+        out.append("      FIX: in Excel, copy K:N from row %d down through row %d, save, close,"
+                   % (cov_i["last_formula"], cov_i["fill_to"]))
+        out.append("      then re-run scan.bat.")
+    other = [f for f in findings if f[:3] not in ("[F]", "[G]", "[H]", "[I]")]
+    out.append("Other gating findings (A, B, C, CAL): %d%s"
+               % (len(other), " - listed in the console block" if other else ""))
+    for f in other[:10]:
+        out.append("    " + f)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    return ("%s\n## outcome_sanity - Checks F, G, H, I\n\n"
+            "*Appended by `outcome_sanity.py --md` at %s from `%s`. A re-run replaces "
+            "this section. The full block is in the scan console.*\n\n```\n%s\n```\n%s\n"
+            % (MD_BEGIN, stamp, os.path.basename(tracker), "\n".join(out), MD_END))
+
+
+def _append_md(path, text):
+    """Append `text` to the exhibit at `path`, replacing an earlier section
+    between MD_BEGIN and MD_END. Never creates the file: a missing exhibit
+    means the scan step did not write one, and a file created here would make
+    chain_check [1] believe it had. Never changes the exit code."""
+    if not os.path.isfile(path):
+        print("  NOTE: --md %s not found - summary NOT appended (this tool never "
+              "creates the scan exhibit)." % path)
+        return False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        i, j = body.find(MD_BEGIN), body.find(MD_END)
+        if i != -1 and j > i:
+            body = body[:i].rstrip("\n") + "\n\n" + text + body[j + len(MD_END):].lstrip("\n")
+        else:
+            body = body.rstrip("\n") + "\n\n" + text
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+    except OSError as e:
+        print("  [WARN] could not append the summary to %s (%s). The checks above "
+              "are unaffected." % (path, e))
+        return False
+    print("  summary (Checks F, G, H, I) appended to %s" % path)
+    return True
+
+
 def default_resolve():
     """The calendar resolver outcome_sanity uses, for callers."""
     if _cal is None:                                       # pragma: no cover
@@ -611,6 +813,10 @@ def main():
     ap.add_argument("--no-allowlist", action="store_true",
                     help="ignore VERIFIED_REAL_MOVES and show the raw ungated "
                          "[C] set (audit view - run this before trusting a clean result)")
+    ap.add_argument("--md", default=None,
+                    help="append this run's Checks F/G/H/I summary to an EXISTING scan "
+                         "exhibit (scan.bat passes signal_scan_<date>.md). Replaces its "
+                         "own earlier section; never creates the file (F-5, 2026-11-17)")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
@@ -795,6 +1001,7 @@ def main():
     # claim from one seen once, and the two are NOT reported as if they were.
     findings_f = []
     findings_f_prec = []     # below 0.05% but beyond the log's print precision
+    fix_f = {}               # finding line -> its fix line (F-5 (c), 2026-11-17)
     checked_f = 0
     row_by_num = {r["row"]: r for r in rows}
     suppressed_f, matched_adj = [], set()     # VERIFIED_LOG_ADJUSTED hits
@@ -889,13 +1096,26 @@ def main():
                                              % (tkr, sess, v, price, where), adj[2]))
                         matched_adj.add((tkr, str(sess)))
                         continue
+                    line_f = ("[F] %-5s %s  master %.4f vs log %.4f  %+.3f%%  %d log(s)  "
+                              "cells %s  %s%s%s%s"
+                              % (tkr, sess, v, price, gap, len(runs), where,
+                                 sig if is_digit else ("no digit signature" if material else sig),
+                                 spread, hint, sens))
+                    # F-5 (c): name the command that clears the line. A MATERIAL
+                    # item, a verdict-sensitive one and one whose logs disagree
+                    # all need an outside official close (DP-3C-bd); the rest of
+                    # the PRECISION tier is settled by enter_closes --catch-up.
+                    if material or sens or spread:
+                        fix_f[line_f] = (
+                            "FIX (dry run): python repair_outcome_close.py --ticker %s "
+                            "--date %s --price <official close> --source-note "
+                            "\"<source, read date>\"   then add --apply" % (tkr, sess))
+                    else:
+                        fix_f[line_f] = ("settled to the log close by tonight's "
+                                         "enter_closes --catch-up (DP-3C-bd)")
                     findings_f.append((
                         0 if material else 1, 0 if is_digit else 1, -len(runs), -abs(gap),
-                        "[F] %-5s %s  master %.4f vs log %.4f  %+.3f%%  %d log(s)  "
-                        "cells %s  %s%s%s%s"
-                        % (tkr, sess, v, price, gap, len(runs), where,
-                           sig if is_digit else ("no digit signature" if material else sig),
-                           spread, hint, sens)))
+                        line_f))
             findings_f.sort()
             findings_f_prec = [f[-1] for f in findings_f if f[0] == 1]
             findings_f = [f[-1] for f in findings_f if f[0] == 0]
@@ -1123,6 +1343,8 @@ def main():
             print("    alone; a low-order swap would have cleared all of them.")
         for f in findings_f:
             print("    " + f)
+            if f in fix_f:
+                print("      " + fix_f[f])
         print("    Resolve with the settled close (repair_outcome_close.py --price)")
         print("    before treating either value as correct. A corporate-action")
         print("    adjustment in Schwab's price history is a live alternative to a")
@@ -1156,6 +1378,8 @@ def main():
         print("  (DP-3C-ag) because MSFT 2026-09-15 sat in exactly this band.")
         for f in findings_f_prec:
             print("    " + f)
+            if f in fix_f:
+                print("      " + fix_f[f])
         print("-" * 78)
 
     if findings_g:
@@ -1176,13 +1400,15 @@ def main():
             print("    " + f)
         print("    Enter them: python enter_closes.py --catch-up   (dry run first;")
         print("    it fills every settled session with blank cells, oldest first).")
+        print("    If it reports TARGET CELLS ABSENT, the K..N formulas ran out:")
+        print("    see Check I below (F-9, 2026-11-17).")
         print("-" * 78)
     if not args.quiet:
         print("  [H] due-but-blank: %d cell(s) on %d settled session(s); %d blank cell(s)"
               % (sum(len(v) for v in due_blank.values()), len(due_blank), no_pxsig))
         print("      on rows with no Px@signal counted, not gated (nothing can fill them)")
 
-    findings_i, info_i = check_integrity(args.tracker, rows)
+    findings_i, info_i, cov_i = check_integrity(args.tracker, rows, detail=True)
     if not args.quiet:
         for line in info_i:
             print("  " + line)
@@ -1191,15 +1417,28 @@ def main():
               % len(findings_i))
         for f in findings_i:
             print("    " + f)
-        print("    Formulas: python repair_return_formulas.py (dry run), then --apply")
-        print("    with Excel closed. A cache-only mismatch clears when Excel")
-        print("    recalculates and saves the master (open, wait, save, close).")
+        if cov_i.get("uncovered"):
+            # F-9 (2026-11-17): absent formulas are not a repair_return_formulas
+            # case; that tool rewrites formula cells, it never creates them.
+            print("    ABSENT formulas: in Excel, copy K:N from row %d (the last complete"
+                  % cov_i["last_formula"])
+            print("    row) down through row %d, save, close, then re-run scan.bat."
+                  % cov_i["fill_to"])
+            print("    Until then enter_closes refuses these rows (nothing written).")
+        print("    Non-canonical formulas: python repair_return_formulas.py (dry run),")
+        print("    then --apply with Excel closed. A cache-only mismatch clears when")
+        print("    Excel recalculates and saves the master (open, wait, save, close).")
         print("-" * 78)
 
     g_summary = (["[G] %d cell(s) hold a close for an unsettled session - listed above"
                   % len(findings_g)] if findings_g else [])
     findings = (findings_cal + g_summary + findings_h + findings_i + findings
                 + (findings_f if CHECK_F_GATES_EXIT else []))
+
+    if args.md:
+        _append_md(args.md, _md_summary(
+            args.tracker, findings, checked_f, findings_f, findings_f_prec, fix_f,
+            findings_g, findings_h, due_blank, no_pxsig, findings_i, info_i, cov_i))
 
     if findings:
         print("  %d FINDING(S) - VERIFY BEFORE READING ANY RESOLUTION:" % len(findings))
@@ -1233,7 +1472,7 @@ def selftest():
     import repair_return_formulas as _rrf
     fails = []
 
-    def build(path, chained=False, stale_cache=False):
+    def build(path, chained=False, stale_cache=False, absent=False):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Signals"
@@ -1249,6 +1488,8 @@ def selftest():
             ws.cell(r, 7, g)
             ws.cell(r, 8, h)
             for col in "KLMN":
+                if absent and i == 2:
+                    continue        # F-9: the last data row has no K..N at all
                 f = _rrf.CANON[col].format(r=r)
                 if chained and col == "L":
                     f = 'IF(I{r}="","",(I{r}-H{r})/H{r})'.format(r=r)
@@ -1262,6 +1503,8 @@ def selftest():
         items = [(it, zin.read(it.filename)) for it in zin.infolist()]
         zin.close()
         for r, sig, g, h in rows:
+            if absent and r == FIRST_DATA_ROW + 2:
+                continue
             k = (h - g) / g
             xml = _roc.set_cached(xml, "K%d" % r, repr(k + (0.01 if stale_cache else 0.0)))
             xml = _roc.set_cached(xml, "N%d" % r, _roc.band_flag(sig, k), numeric=False)
@@ -1272,12 +1515,17 @@ def selftest():
     tmp = tempfile.mkdtemp(prefix="os_selftest_")
     try:
         for name, kw, expect in (("clean", {}, 0), ("chained", dict(chained=True), 1),
-                                 ("stale", dict(stale_cache=True), 1)):
+                                 ("stale", dict(stale_cache=True), 1),
+                                 ("absent", dict(absent=True), 1)):
             p = os.path.join(tmp, name + ".xlsx")
             build(p, **kw)
             f, _info = check_integrity(p, load(p))
             got = 1 if f else 0
             ok = got == expect
+            if name == "absent":            # the coverage finding itself must fire
+                ok = ok and any("carry NO K..N formula" in x and "rows 7" in x for x in f)
+            elif name == "clean":           # and stay quiet on a covered master
+                ok = ok and any(x.startswith("[I] coverage:") for x in _info)
             print("  [%s] Check I %-8s -> %d finding(s)%s"
                   % ("PASS" if ok else "FAIL", name, len(f),
                      "" if ok else "  (expected %s)" % ("some" if expect else "none")))
@@ -1302,6 +1550,27 @@ def selftest():
                 print("  [%s] Check H %-8s -> %d due-but-blank" % ("PASS" if ok else "FAIL", name, got))
                 if not ok:
                     fails.append("H-" + name)
+        # F-5 (c): the scan-exhibit summary replaces its own section and never
+        # creates a missing exhibit (chain_check [1] reads the file's existence)
+        md = os.path.join(tmp, "signal_scan_x.md")
+        with open(md, "w", encoding="utf-8") as fh:
+            fh.write("# signal_scan - x\n\n```\nbody\n```\n")
+        sec1 = "%s\nfirst\n%s\n" % (MD_BEGIN, MD_END)
+        sec2 = "%s\nsecond\n%s\n" % (MD_BEGIN, MD_END)
+        _append_md(md, sec1)
+        _append_md(md, sec2)
+        with open(md, encoding="utf-8") as fh:
+            body = fh.read()
+        ok = body.count(MD_BEGIN) == 1 and "second" in body and "first" not in body \
+            and body.startswith("# signal_scan - x")
+        gone = os.path.join(tmp, "absent.md")
+        ok2 = (_append_md(gone, sec1) is False) and not os.path.exists(gone)
+        print("  [%s] md summary replaces its section" % ("PASS" if ok else "FAIL"))
+        print("  [%s] md summary never creates the exhibit" % ("PASS" if ok2 else "FAIL"))
+        if not ok:
+            fails.append("md-replace")
+        if not ok2:
+            fails.append("md-create")
         # verdict sensitivity
         rb = {9: dict(row=9, g=100.0, sig="HOLD", h=102.99, i=None, j=None)}
         s1 = _verdict_sensitivity(rb, [(9, "+5d")], 103.01)

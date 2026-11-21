@@ -133,6 +133,19 @@ WATCHLIST_SCOUT = [
     "SPCX",
     "WMT",
     "BRK.B",
+    "NVDA",
+    "DOW",
+    "NKE",
+    "FTI",
+    "JPM",
+    "MSFT",
+    "PM",
+    "PWR",
+    "AAPL",
+    "BBWI",
+    "PAA",
+    "SND",
+    "RTX",
     #  Cleaned up watchlist on 2026-10-22 with the aim to remove broken thesis tickers and to add new thesis sector gaps and flavorful ETFs
     #
     # WATCHLIST ERA W2 FROM 2026-11-09 (DP-3C-bk, deferred whole to the Phase 3-C exit and
@@ -164,6 +177,25 @@ WATCHLIST_SCOUT = [
     #     and the row was dropped (ROW DROPPED, a run fault, not a watchlist change). The repo
     #     spells class shares with a dot, which every log parser reads; schwab_client
     #     translates to Schwab's "BRK/B" (CLASS-SHARE SYMBOLS, 2026-11-16).
+    #   ADDED to the scout list 2026-11-20 (Rob, 12:00 CT): "Things are getting very volatile
+    #     and I sold everything except for SCHD and fixed income of course." Sold after the
+    #     2026-11-20 morning run. Added so coverage continues: NVDA, DOW, NKE, FTI, JPM, MSFT,
+    #     PM, PWR, AAPL, PAA, SND, RTX (UNH and BRK.B were already scouts). HELD -> SCOUT for
+    #     14 names at once: from their first run as scouts their rows carry the scout prompt
+    #     and are NOT prompt-comparable to earlier rows (the CORN caveat below). The boundary
+    #     date is the first run whose log shows them unheld (expected 2026-11-23).
+    #   RE-ADDED to the scout list 2026-11-20: BBWI (Rob). Held until the 2026-11-17 run, out
+    #     of the run 2026-11-18..11-20, back as a scout from the next run. Its S1 state was never
+    #     pruned, so its first row back carries priors dated 2026-11-13..11-17. Its departing
+    #     cells were entered UNGUARDED on 11-18..11-20 and are guarded again once it runs.
+    #   NOT CARRIED: CBRS (Rob, 2026-11-20 18:22 CT: "CBRS thesis is broken and harvested").
+    #     Leaves the run at the first run whose log shows it unheld (expected 2026-11-23): a
+    #     population change (membership CHANGED, -CBRS +BBWI). Its open cells are entered
+    #     UNGUARDED through the +20d of its last cohort (2026-12-21 if that is 2026-11-20)
+    #     and its S1 state is pruned only after that. DP-3's Path-A review (edgar_client
+    #     SKIP_TICKERS) is moot (rulings DP-V15).
+    #   ANT (Anthropic, PBC) was added and removed on 2026-11-20 before any run: not run
+    #     (rulings DP-V14; the bot's signal model is Anthropic's).
     #
     # ---- HISTORY, ERA W1 (kept: this block is the watchlist's only written record) ----
     # CORN — added 2026-08-14 to PREVENT AN E4 SUPPLY SHORTFALL.
