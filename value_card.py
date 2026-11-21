@@ -1066,6 +1066,22 @@ def fmt(v, spec="{:.2f}", none="—"):
     return none if v is None else spec.format(v)
 
 
+def portfolio_rows(prd, date):
+    """DP-V13 (FINC 5133 step 8, 2026-11-19): panel 2g's rows from a
+    portfolio_risk_<date>.json dict; None when the file is absent or for
+    another date. The numbers are portfolio_risk.py's; nothing here recomputes
+    them, and nothing reads them back into a class, gate or the prompt."""
+    if not isinstance(prd, dict) or str(prd.get("date")) != str(date):
+        return None
+    keys = ("label", "positions", "beta_card", "beta_card_cash", "coverage_beta", "sigma_p", "r2",
+            "beta_hist", "n_eff", "top_name", "top_w", "top3_w", "cash_share", "dr", "n_obs", "short",
+            "pairs_n", "pairs", "risk_share",
+            # AMENDED 2026-11-19 (v1.1, before Part B): the other-asset share reaches the card
+            "other_share", "other_types", "too_new", "max_pair", "limiting")
+    accts = list(prd.get("accounts") or []) + ([prd["combined"]] if prd.get("combined") else [])
+    return [{k: a.get(k) for k in keys} for a in accts]
+
+
 def load_context(root, date):
     """DP-V3 (2026-10-22): the TTM exhibit (ttm_eps.py, V2) and the earnings
     calendar (earnings_calendar.py, V5) for the SAME date, if value.bat wrote
@@ -1076,10 +1092,13 @@ def load_context(root, date):
     AMENDED 2026-11-18 (DP-V7 step 2): also cost_of_equity_<date>.json
     (cost_of_equity.py, value.bat step 7c), the per-name CAPM r. Context only.
     AMENDED 2026-11-18 (DP-V10, step 5): also implied_vol_<date>.json
-    (implied_vol.py, value.bat step 7d), the market-implied move. Context only."""
+    (implied_vol.py, value.bat step 7d), the market-implied move. Context only.
+    AMENDED 2026-11-19 (DP-V13, step 8): also portfolio_risk_<date>.json
+    (portfolio_risk.py, value.bat step 7e), risk per account. Context only."""
     out = {}
     for key, name in (("ttm", "ttm_eps_%s.json"), ("earn", "earnings_calendar_%s.json"),
-                      ("coe", "cost_of_equity_%s.json"), ("iv", "implied_vol_%s.json")):
+                      ("coe", "cost_of_equity_%s.json"), ("iv", "implied_vol_%s.json"),
+                      ("pr", "portfolio_risk_%s.json")):
         path = os.path.join(root, name % date)
         try:
             with open(path, encoding="utf-8") as fh:
@@ -1635,6 +1654,59 @@ def build(date, root, log_path, quotes_path, tracker):
             ", ".join("%s %s" % (r["ticker"], r["report"][5:]) for r in okr if r["report"]) or "none"))
     L.append("")
 
+    # ---- 2g. portfolio risk per account (FINC 5133 step 8, DP-V13) -------------
+    prd = ctx.get("pr") if isinstance(ctx.get("pr"), dict) else None
+    pr_rows = portfolio_rows(prd, date)
+    L.append("  2g. PORTFOLIO RISK PER ACCOUNT (FINC 5133 step 8, DP-V13) -- each account's beta, sigma and")
+    L.append("      concentration from today's holdings. CONTEXT ONLY: nothing here enters the class, a gate,")
+    L.append("      the prompt or risk_engine (DP-V1). Labels and weights only; no dollar amounts.")
+    if pr_rows is None:
+        L.append("      not available for %s (value.bat step 7e did not write portfolio_risk_%s.json%s)." % (
+            date, date, "" if not prd else "; the file is for %s" % prd.get("date")))
+    else:
+        L.append("  %-22s %5s %7s %8s %7s %7s %6s %6s %-12s %6s %5s %6s %6s" % (
+            "account", "names", "beta", "whole", "sigma", "mkt R2", "own b", "N_eff", "top-1", "top-3",
+            "cash", "other", "div"))
+        for a in pr_rows:
+            L.append("  %-22s %5s %7s %8s %7s %7s %6s %6s %-12s %6s %5s %6s %6s%s" % (
+                a["label"][:22], a["positions"], fmt(a["beta_card"]), fmt(a["beta_card_cash"]),
+                fmt(None if a["sigma_p"] is None else 100 * a["sigma_p"], "{:.1f}%"),
+                fmt(None if a["r2"] is None else 100 * a["r2"], "{:.0f}%"), fmt(a["beta_hist"]),
+                fmt(a["n_eff"], "{:.1f}"),
+                "%s %s" % (a["top_name"] or "", fmt(None if a["top_w"] is None else 100 * a["top_w"], "{:.0f}%")),
+                fmt(None if a["top3_w"] is None else 100 * a["top3_w"], "{:.0f}%"),
+                fmt(None if a["cash_share"] is None else 100 * a["cash_share"], "{:.0f}%"),
+                fmt(None if a.get("other_share") is None else 100 * a["other_share"], "{:.0f}%"), fmt(a["dr"]),
+                "  SHORT (%s returns, limited by %s)" % (a["n_obs"], a.get("limiting")) if a["short"] else ""))
+        for a in pr_rows:
+            bits = []
+            if a["pairs"]:
+                bits.append("rho >= 0.70: %d pair(s), %s" % (a["pairs_n"], ", ".join(
+                    "%s-%s %.2f" % (p["a"], p["b"], p["rho"]) for p in a["pairs"])))
+            elif a.get("max_pair"):
+                bits.append("no pair at rho >= 0.70 (highest %s-%s %.2f)" % (
+                    a["max_pair"]["a"], a["max_pair"]["b"], a["max_pair"]["rho"]))
+            if a.get("too_new"):
+                bits.append("left out of sigma (under 250 returns of its own): %s" % ", ".join(
+                    "%s %.1f%%" % (y["ticker"], 100 * y["w"]) for y in a["too_new"]))
+            if a["risk_share"]:
+                bits.append("largest variance shares %s" % ", ".join(
+                    "%s %.0f%%" % (t, 100 * x) for t, x in a["risk_share"] if x is not None))
+            if bits:
+                L.append("      %s: %s" % (a["label"], "; ".join(bits)))
+        if prd.get("in_both"):
+            L.append("      held in more than one account: %s." % ", ".join(prd["in_both"]))
+        L.append("      beta = sum w x the card's adjusted beta (panel 2d; Ch 6 slides 70-72), over the EQUITY and ETF")
+        L.append("      positions only. whole = beta x their share of the account, with cash and every other asset")
+        L.append("      (other: %s) at beta 0 -- right for T-bills and CDs, not for long or corporate bonds." % (
+            ", ".join(sorted({t for a in pr_rows for t in (a.get("other_types") or [])})) or "none"))
+        L.append("      sigma: today's weights on 2 years of daily returns, AS IF HELD")
+        L.append("      THROUGHOUT (backward-looking). mkt R2 = the market's share of the account's variance; own b =")
+        L.append("      its slope on SPY. N_eff = 1 / sum w^2; div = sum w sigma_i / sigma_p (1 = no diversification).")
+        if prd.get("findings"):
+            L.append("      findings (portfolio_risk_%s.md): %s." % (date, "; ".join(prd["findings"])))
+    L.append("")
+
     # ---- 3. robustness, every classed name ---------------------------------
     L.append("-" * 100)
     L.append("3. ROBUSTNESS -- every classed name: the cost-of-equity grid on the 12-month basis")
@@ -1856,6 +1928,9 @@ def build(date, root, log_path, quotes_path, tracker):
                                         differ_own_all=sorted(own_dif)),
                     implied=dict(available=iv_rows is not None, file="implied_vol_%s.json" % date,
                                  fetched_at=(ivd or {}).get("fetched_at"), rows=iv_rows or []),
+                    portfolio=dict(available=pr_rows is not None, file="portfolio_risk_%s.json" % date,
+                                   rows=pr_rows or [], in_both=(prd or {}).get("in_both") or [],
+                                   findings=(prd or {}).get("findings") or []),
                     changes=[c.strip() for c in changes],
                     dpv2=dict(basis="12-month at rRF + RPM (DP-V8)", flip_rows=len(flips), tickers=tks,
                               needed_rows=DPV2_MIN_ROWS, needed_tickers=DPV2_MIN_TICKERS,
@@ -2118,6 +2193,22 @@ def _write_sheet(ws, snap):
             put([ir["ticker"], "yes" if ir.get("card") else "", ir["expiry"][:10], ir["sessions"],
                  100 * ir["iv"], ir["exp30"][:10], 100 * ir["iv30"], ir["term"], 100 * ir["sigma"],
                  ir["band_sigma"], 100 * ir["p"], ir.get("report_note") or ""])
+    gap()
+    prs = snap.get("portfolio") or {}
+    put(["Portfolio risk per account (FINC 5133 step 8, DP-V13) -- today's holdings on 2 years of daily "
+         "returns. CONTEXT ONLY; labels and weights, no dollar amounts"], f_sec)
+    if not prs.get("available"):
+        put(["not available: value.bat step 7e did not write %s" % prs.get("file", "portfolio_risk_<date>.json")],
+            f_note)
+    else:
+        put(["Account", "Names", "Beta (card)", "Beta, whole account", "Sigma %", "Market R2 %", "Own beta",
+             "N_eff", "Top-1", "Top-1 %", "Top-3 %", "Cash %", "Other %", "Div. ratio", "Returns",
+             "Pairs rho >= 0.70"], f_hdr, fill_hdr)
+        for pa in prs.get("rows") or []:        # not `r`: put() keeps its row counter in r
+            put([pa["label"], pa["positions"], pa["beta_card"], pa["beta_card_cash"], _p100(pa["sigma_p"]),
+                 _p100(pa["r2"]), pa["beta_hist"], pa["n_eff"], pa["top_name"] or "", _p100(pa["top_w"]),
+                 _p100(pa["top3_w"]), _p100(pa["cash_share"]), _p100(pa.get("other_share")), pa["dr"], pa["n_obs"],
+                 "; ".join("%s-%s %.2f" % (p["a"], p["b"], p["rho"]) for p in (pa["pairs"] or []))])
     gap()
     put(["Robustness -- every classed name: the cost-of-equity grid on the 12-month basis"], f_sec)
     put(["Ticker", "Class (rRF + RPM)", "Ratio", "Last-FY class", "Last-FY ratio", "r - 2", "r",
@@ -2715,6 +2806,19 @@ def _selftest():
         {"NVDA": _ch, "SPY": _spy, "FTI": {"status": "FAILED"}}, {}), log=lambda *_: None)
     with open(os.path.join(tmp, "implied_vol_2026-10-14.json"), "w", encoding="utf-8") as fh:
         json.dump(_res, fh, default=_iv._jsonable)
+    import portfolio_risk as _pr               # DP-V13: the file as portfolio_risk.py itself writes it
+    _m = [0.004 * ((i * 7) % 5 - 2) for i in range(520)]
+    _pc = {"SPY": _pr._candles(dt.date(2024, 9, 2), _pr._path(_m)),
+           "NVDA": _pr._candles(dt.date(2024, 9, 2), _pr._path([1.5 * x for x in _m])),
+           "FTI": _pr._candles(dt.date(2024, 9, 2), _pr._path([0.5 * x + 0.001 * ((i * 3) % 4 - 1.5)
+                                                              for i, x in enumerate(_m)]))}
+    _pf = [{"account_number": "11112222", "account_label": "Roth IRA", "cash_available": 1000.0,
+            "portfolio_value": 11000.0, "positions": [_pr._pos("NVDA", 6000.0), _pr._pos("FTI", 4000.0)]}]
+    _prr, _ = _pr.build(_cd, _pf, _pc, {"date": "2026-10-14", "names": {"NVDA": {"beta_adj": 1.40},
+                                                                         "FTI": {"beta_adj": 0.80}}},
+                        ("Roth IRA",))
+    with open(os.path.join(tmp, "portfolio_risk_2026-10-14.json"), "w", encoding="utf-8") as fh:
+        json.dump(_prr, fh, default=_pr._jsonable)
     try:
         txt3, snap3, fnd3 = build(dt.date(2026, 10, 14), tmp, log, None, "selftest-master")
     finally:
@@ -2834,6 +2938,21 @@ def _selftest():
           and "NVDA  * 2026-10-23 (7)" in txt3 and "FTI   * chain status FAILED" in txt3)
     check("step 5 e2e: 2f changes no class, ratio or ledger (the DP-V8 checks above ran with it present)",
           c3["NVDA"]["cls"] == "NEUTRAL" and dp3["rows"] == [] and not any("2f" in f for f in fnd3))
+    pr3 = {a["label"]: a for a in snap3["portfolio"]["rows"]}
+    check("step 8 e2e: with no portfolio_risk file, 2g says 'not available' and never guesses",
+          "2g. PORTFOLIO RISK PER ACCOUNT" in txt and "step 7e did not write portfolio_risk_2026-10-14.json" in txt
+          and snap["portfolio"]["available"] is False)
+    check("step 8 e2e: portfolio_risk.py's own file prints in 2g (Roth IRA beta 0.6 x 1.40 + 0.4 x 0.80 = 1.16)",
+          snap3["portfolio"]["available"] and abs(pr3["Roth IRA"]["beta_card"] - 1.16) < 1e-12
+          and abs(pr3["Roth IRA"]["beta_card_cash"] - 1.16 * 10 / 11) < 1e-12
+          and "Roth IRA                   2    1.16" in txt3 and "11112222" not in txt3)
+    check("step 8 v1.1: 'whole' replaces 'w/ cash' and the other-asset column prints",
+          " whole " in txt3 and " other " in txt3 and "w/ cash" not in txt3 and pr3["Roth IRA"]["other_share"] == 0.0)
+    check("step 8 e2e: 2g changes no class, ratio or ledger",
+          c3["NVDA"]["cls"] == "NEUTRAL" and dp3["rows"] == [] and not any("2g" in f for f in fnd3))
+    check("step 8: a file for another date is not read",
+          portfolio_rows(dict(_prr, date="2026-10-13"), dt.date(2026, 10, 14)) is None
+          and portfolio_rows(None, dt.date(2026, 10, 14)) is None)
     check("step 3 e2e: 2e prints, and a v3 slim cache says why instead of guessing",
           "2e. CAPITAL AND CREDIT (DP-V7 step 3)" in txt3 and "no valuation_cache" in txt3
           and c3["NVDA"]["capital"]["why"] and "slim v3" in c3["NVDA"]["capital"]["why"])

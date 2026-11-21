@@ -38,6 +38,11 @@ REM                         caches (valuation_cache\dgs10.json) is now the
 REM                         HEADLINE class's rRF: the card reads r = rRF + RPM.
 REM                         Its exit code still never changes the pass; with no
 REM                         series at all the card is NO READ with a FINDING.
+REM    portfolio_risk.py -> ADDED 2026-11-19 (DP-V13, step 8), step 7e. Beta,
+REM                         sigma and concentration per account from the Schwab
+REM                         positions read (labels and weights only) and today's
+REM                         cost_of_equity_<date>.json, so it runs AFTER step 7c.
+REM                         Context for panel 2g; never changes the exit code.
 REM    step 5b           -> ADDED 2026-10-14. Embeds the card as the 'Value Card'
 REM                         sheet in tracker_with_registry.xlsx. So value.bat now
 REM                         runs AFTER run_daily_review.bat (which rebuilds that
@@ -321,6 +326,25 @@ if errorlevel 2 (
     echo   NOTE: implied_vol has findings - read implied_vol_%RUNDATE%.md; exit code unchanged.
 ) else (
     echo   implied_vol_%RUNDATE%.md written - no findings.
+)
+REM  Step 7e - ADDED 2026-11-19 (DP-V13, FINC 5133 step 8;
+REM  claude/DP-V13_Step8_PortfolioRisk_2026-11-19.md). portfolio_risk.py: each
+REM  active account's positions (labels and weights only - never a dollar amount
+REM  or an account number), one Schwab daily history per held name plus SPY, and
+REM  today's cost_of_equity_<date>.json: portfolio beta, sigma, the market's share
+REM  of the variance, N_eff and correlated pairs, written to portfolio_risk_<date>
+REM  .md/.json for panel 2g. Like steps 6-7d it NEVER changes the exit code, and
+REM  nothing in it reaches the class, a gate, the prompt or risk_engine (DP-V1).
+REM  Positions are today's: a re-run for an earlier date is refused here.
+echo.
+echo ### 7e. portfolio risk - beta, sigma and concentration per account (DP-V13, context only)
+python portfolio_risk.py --date %RUNDATE% --log "%LOGFILE%"
+if errorlevel 2 (
+    echo   NOTE: portfolio_risk could not run - context only; exit code unchanged.
+) else if errorlevel 1 (
+    echo   NOTE: portfolio_risk has findings - read portfolio_risk_%RUNDATE%.md; exit code unchanged.
+) else (
+    echo   portfolio_risk_%RUNDATE%.md written - no findings.
 )
 
 echo.

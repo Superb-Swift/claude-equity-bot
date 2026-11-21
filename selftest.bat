@@ -39,7 +39,9 @@ REM AMENDED 2026-11-18 (DP-V7): corpfin (44 textbook fixtures) and beta_probe
 REM (step 1, committed 0dd90ef); cost_of_equity (step 2). Offline fixtures only.
 REM AMENDED 2026-11-19 (DP-V11): event_probe (step 6's read-only probe; 38 offline
 REM fixture checks, no network).
-for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar sec_facts sec_data_audit feed_consistency input_capture exit_read_guard e4_exit_read build_actionable_registry damper_rebase_table corpfin beta_probe cost_of_equity implied_vol event_probe) do (
+REM AMENDED 2026-11-19 (DP-V13): portfolio_risk (step 8; 27 offline fixture checks,
+REM no account read, no network).
+for %%T in (episodes advisory_guard trail_basis_audit shadow_damper signal_scan band_price implied_return value_anchor xbrl_sweep edgar_client value_card e4_counter outcome_sanity enter_closes risk_engine run_guard decision_journal prune_signal_state ttm_eps earnings_calendar sec_facts sec_data_audit feed_consistency input_capture exit_read_guard e4_exit_read build_actionable_registry damper_rebase_table corpfin beta_probe cost_of_equity implied_vol event_probe portfolio_risk) do (
     python %%T.py --selftest >nul 2>&1
     if errorlevel 1 (
         echo   [FAIL] %%T --selftest   detail: python %%T.py --selftest

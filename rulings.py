@@ -1126,6 +1126,38 @@ RULINGS = {
               "in the cached sample: BRK.B only, 2 of its 4 insider-coded filings (77 checked "
               "across 13 names)."),
     ),
+    "DP-V13": dict(
+        dp="DP-V13",
+        question=("step 8 (course item F3): portfolio beta, sigma and concentration per account "
+                  "(Roth IRA, Individual, and both together)"),
+        status=("RULED (Rob) - build, reporting only (DP-V1): portfolio_risk.py (value.bat step 7e) "
+                "and value card panel 2g; account labels and weights only, never a dollar amount, "
+                "quantity or account number; nothing reaches the class, a gate, the prompt or "
+                "risk_engine"),
+        open=False, ruled_on=dt.date(2026, 11, 19), effective=dt.date(2026, 11, 20),
+        doc="claude/DP-V13_Step8_PortfolioRisk_2026-11-19.md",
+        bar=("portfolio_risk.py's header, fixed before its first run: weights = market value over "
+             "the account's invested total (schwab_client's equity/ETF rule, cash equivalents "
+             "out); beta = sum w x the card's adjusted beta, re-weighted over covered names, a "
+             "FINDING below 95% covered; sigma = sd of today's weights on 2 years of daily simple "
+             "returns on common dates x sqrt(252), SHORT below 250 returns; market share = R^2 on "
+             "SPY; N_eff = 1 / sum w^2; pairs rho >= 0.70, 5 printed; a past date is refused. "
+             "AMENDED 2026-11-19 ~20:30 CT (v1.1, after the first live read, before Part B): a held "
+             "name with under 250 returns of its own is left out of sigma, R^2, own beta and pairs "
+             "and named with its weight (sigma below 95% covered is a FINDING); SHORT applies only "
+             "when every name is young. 'w/ cash' becomes 'whole account' (cash and every other "
+             "asset at beta 0) and the other-asset share reaches the card"),
+        note=("Rob, 2026-11-19 17:51 CT, 'I authorize your recommendations' (next build step 8), "
+              "and 18:08, 'if no blockers lets move to the next step'. The defaults were put to him "
+              "at 18:1x and are Claude's under DP-V13 until he changes one; any change lands before "
+              "Part B. The course oracle is Ch 6 slide 71's 0.70 x 0.603 + 0.30 x 1.300 = 0.8121. "
+              "Caveat printed on the card: today's holdings on 2 years of returns, as if held "
+              "throughout; individual betas are noisy (Ch 25 slides 40-47). The v1.1 amendment "
+              "exists because on 11-19 CBRS (1.4% of the Individual account, listed 2026-05-15) cut "
+              "that account and the combined book from 499 returns to 130: a structural failure of "
+              "the common-date rule, not a choice made for its numbers. The 11-19 v1 file stays on "
+              "disk as read."),
+    ),
 }
 
 def status_of(key):

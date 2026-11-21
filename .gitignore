@@ -115,6 +115,9 @@ beta_probe_*.json
 # ADDED 2026-11-19 (DP-V11): the read-only step-6 event probe's dated outputs
 event_probe_*.md
 event_probe_*.json
+# ADDED 2026-11-19 (DP-V13): step 8's dated outputs (account labels and weights)
+portfolio_risk_*.md
+portfolio_risk_*.json
 # ADDED 2026-11-18 (DP-V7 step 2): the cost-of-equity exhibit and snapshot, rewritten
 # by value.bat step 7c. Its beta cache lives in valuation_cache/ (ignored above).
 cost_of_equity_*.md
